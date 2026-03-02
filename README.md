@@ -1,256 +1,268 @@
-# Infinite War Simulation
-
-A tick-based, grid-world, two-team multi-agent simulation with per-agent neural policies and optional training/telemetry (see `Infinite_War_Simulation/main.py`).
-
-> **Status:** Research code. Several behaviors depend on config flags and environment variables (see `Infinite_War_Simulation/config.py`).
-
----
-
-## What this is (5 bullets)
-
-* **Discrete-time grid simulation**: the world advances in integer ticks; the engine owns the tick loop and mechanics (see `Infinite_War_Simulation/engine/tick.py`).
-* **Many independent agents**: each agent has its own row in a registry tensor + a unique `agent_id` (see `Infinite_War_Simulation/engine/agent_registry.py`).
-* **Two teams**: occupancy encodes walls and team cells; rendering shows team stats (see `Infinite_War_Simulation/engine/ray_engine/raycast_32.py`, `Infinite_War_Simulation/ui/viewer.py`).
-* **Neural “brains” per agent**: multiple architectures exist (TransformerBrain / TronBrain / MirrorBrain) and are run in buckets (optionally via `torch.func.vmap`) (see `Infinite_War_Simulation/agent/*.py`, `Infinite_War_Simulation/agent/ensemble.py`).
-* **Optional logging & telemetry**: results CSVs + run summary; optional scientific telemetry sidecars (agent life table, lineage edges, event jsonl, tick summaries) (see `Infinite_War_Simulation/utils/results_writer.py`, `Infinite_War_Simulation/utils/telemetry.py`).
-
----
-
-## Quickstart
-
-### Requirements
-
-* Python: **Unknown (not found in code dump)**
-* Core runtime deps (imported):
-
-  * `torch` (see `Infinite_War_Simulation/main.py`, `Infinite_War_Simulation/engine/tick.py`)
-  * `numpy` (see `Infinite_War_Simulation/main.py`)
-  * `pygame` / `pygame-ce` (UI) (see `Infinite_War_Simulation/ui/viewer.py`)
-* Optional:
-
-  * `opencv-python` for raw AVI recording (`cv2`) (see `_SimpleRecorder` in `Infinite_War_Simulation/main.py`)
-
-### Install
-
-If you do not have a requirements file, install the minimal set:
-
-```bash
-pip install torch numpy pygame-ce
-# optional
-pip install opencv-python
-```
-
-### Run
-
-From the folder that contains `Infinite_War_Simulation/`:
-
-```bash
+Neural Siege
+Large-scale multi-agent combat simulation with neural policy optimization.
+Overview
+Neural Siege is a high-performance, grid-based multi-agent simulation framework designed for research in emergent behaviors, multi-agent reinforcement learning, and large-scale combat dynamics. The system simulates team-based warfare between autonomous agents controlled by neural network policies, trained via Proximal Policy Optimization (PPO).
+Design Philosophy
+Vectorized Execution: All core simulation logic operates on PyTorch tensors, enabling GPU acceleration and batch processing of thousands of agents.
+Deterministic Reproducibility: Full checkpointing support with RNG state preservation ensures experiments can be resumed and replicated.
+Modular Architecture: Swappable brain architectures, configurable map generation, and pluggable telemetry systems.
+Observability: Comprehensive telemetry, interactive visualization, and real-time inspection capabilities.
+Key Features
+Table
+Feature	Description
+Tensor-Based Simulation	Grid and agent state stored as PyTorch tensors; operations vectorized across all agents
+Multi-Agent PPO	Clipped surrogate objective with entropy regularization, generalized advantage estimation (GAE)
+Modular Brain Architectures	TronBrain (MLP), MirrorBrain (symmetric), TransformerBrain (self-attention)
+Procedural Map Generation	Random walk-based terrain with heal zones and control points
+Interactive Visualization	Pygame-based viewer with camera controls, agent inspection, and overlay modes
+Comprehensive Telemetry	Event logging (JSONL), life-cycle tracking, lineage graphs, movement analytics
+Atomic Checkpointing	Crash-safe save/resume with CPU-portable tensor serialization
+Background Persistence	Multiprocess-based results writer to avoid simulation stalls
+System Architecture
+plain
+Copy
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              SIMULATION LOOP                                  │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐   │
+│  │  Map Gen    │───▶│  Registry   │───▶│   Engine    │───▶│   Viewer    │   │
+│  │  (CPU)      │    │  (GPU)      │    │  (GPU)      │    │  (CPU/GPU)  │   │
+│  └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘   │
+│                              │                                                │
+│                              ▼                                                │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                       │
+│  │   PPO       │◄───│  Brains     │◄───│  Actions    │                       │
+│  │  Trainer    │    │  (NN Modules)│    │  (Discrete) │                       │
+│  └─────────────┘    └─────────────┘    └─────────────┘                       │
+│                              │                                                │
+│                              ▼                                                │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                       │
+│  │ Telemetry   │◄───│ Checkpoints │◄───│  Results    │                       │
+│  │  (JSONL)    │    │  (Atomic)   │    │  (CSV)      │                       │
+│  └─────────────┘    └─────────────┘    └─────────────┘                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+Data Flow
+Initialization: MapGenerator creates terrain; AgentRegistry allocates agent slots with unique IDs
+Observation: ObservationBuilder constructs per-agent views (self + nearby allies/enemies)
+Inference: Brain networks (batched via torch.vmap) output action logits and state values
+Action Resolution: ActionResolver processes moves, attacks, and collisions; updates grid state
+Reward Calculation: Team-based rewards with individual penalties (damage taken, idle time)
+PPO Update: Trajectory buffer flushed; policy and value networks updated periodically
+Telemetry: Events batched and written to disk via background process
+Core Components
+Engine (engine/)
+Table
+Module	Responsibility
+tick_engine.py	Core simulation loop: observation → inference → action → reward
+action_resolver.py	Discrete action processing: 8-direction movement, attack, noop
+observations.py	Per-agent observation construction with spatial and entity features
+agent_registry.py	Slot-based agent management with tensor storage (alive, HP, position, team)
+mapgen.py	Procedural terrain generation: walls, heal zones, control points
+respawn.py	Periodic agent respawning with team cooldowns and spawn-point selection
+Agent Brains (agent/)
+Table
+Brain	Architecture	Parameters	Use Case
+TronBrain	3-layer MLP	~50K	Baseline policy, fast inference
+MirrorBrain	Symmetric twin networks	~100K	Red/Blue policy sharing
+TransformerBrain	Multi-head self-attention	~500K	Relational reasoning, attention visualization
+All brains implement:
+forward(obs) -> (action_logits, state_value)
+get_action_and_value(obs, action=None) -> (action, log_prob, entropy, value)
+Training (training/)
+Table
+Module	Function
+ppo_trainer.py	Multi-agent PPO with GAE, entropy bonus, gradient clipping
+reward.py	Reward shaping: team rewards, individual penalties, death penalties
+PPO Hyperparameters (configurable):
+Learning rate: 3e-4
+Gamma (discount): 0.99
+GAE lambda: 0.95
+Clip epsilon: 0.2
+Value loss coefficient: 0.5
+Entropy coefficient: 0.01
+Configuration (config.py)
+Environment-based configuration system supporting:
+Device selection (TORCH_DEVICE)
+Grid dimensions (GRID_WIDTH, GRID_HEIGHT)
+Agent counts (NUM_AGENTS, MAX_AGENTS)
+PPO hyperparameters
+Telemetry toggles
+Checkpoint intervals
+Profile selection via FWS_PROFILE environment variable:
+bash
+Copy
+FWS_PROFILE=train_fast python main.py
+FWS_PROFILE=visualize python main.py
+Telemetry (utils/telemetry.py)
+Event-driven telemetry with configurable verbosity:
+Agent Life: Birth/death timestamps, lifespan, kills, damage totals
+Lineage Edges: Parent-child relationships for evolutionary analysis
+Events (JSONL): Birth, death, damage, kill, move events with schema versioning
+Movement Summary: Per-tick aggregates (attempted, success, blocked, conflicts)
+Tick Summary: Low-frequency population and health metrics
+Checkpointing (utils/checkpointing.py)
+Atomic checkpoint format:
+plain
+Copy
+checkpoints/
+├── latest.txt              # Pointer to most recent checkpoint
+└── ckpt_t{tick}_{timestamp}/
+    ├── checkpoint.pt       # Full state (grid, registry, brains, PPO, RNG)
+    ├── manifest.json       # Metadata (tick, git commit, notes)
+    └── DONE                # Atomic completion marker
+Checkpoint includes:
+World grid and zone masks
+Agent data tensor and brain state dicts
+PPO trainer state (optimizer, trajectory buffer)
+RNG states (Python, NumPy, PyTorch CPU/CUDA)
+Respawn controller state
+Viewer (ui/viewer.py)
+Interactive Pygame visualization:
+Camera: Pan (WASD), zoom (scroll), adaptive cell sizing
+Overlays: HP bars, brain type labels, threat vision, line-of-sight rays
+Inspection: Click agent for detailed stats (HP, attack, vision, brain params)
+HUD: Team scores, kill/death counts, control point status, score history graph
+Minimap: World overview with viewport rectangle
+Controls: Pause, speed adjustment (0.25x–16x), manual checkpoint (F9)
+Technical Highlights
+Vectorized Observation Construction
+Observations built via tensor operations (no Python loops):
+Python
+Copy
+# Relative positions computed via broadcasting
+rel_x = other_x - self_x  # shape: (num_alive, num_alive)
+rel_y = other_y - self_y
+Batched Neural Inference
+Brain inference parallelized via torch.vmap:
+Python
+Copy
+logits, values = torch.vmap(self.brain_forward)(obs_tensor)
+GPU-Optimized Action Resolution
+Collision detection and position updates on GPU:
+Wall collision: boolean mask from grid occupancy
+Agent collision: hash-based position deduplication
+Conflict resolution: deterministic priority by agent ID
+Memory-Efficient Trajectory Storage
+PPO buffer stores minimal state:
+Observations (float32)
+Actions (int64)
+Log probabilities (float32)
+Rewards (float32)
+Values (float32)
+Dones (bool)
+Deterministic Resume
+RNG state captured/restored for reproducibility:
+Python random module state
+NumPy random state
+PyTorch CPU and CUDA RNG states
+Installation & Setup
+Requirements
+Python 3.10+
+PyTorch 2.0+ (with CUDA optional)
+pygame 2.5+
+numpy 1.24+
+Install
+bash
+Copy
+git clone <repository>
 cd Infinite_War_Simulation
-python main.py
-```
+pip install -r requirements.txt
+Verify Environment
+bash
+Copy
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+Usage
+Training Mode
+bash
+Copy
+# Fast training on GPU
+FWS_PROFILE=train_fast python main.py
 
-Headless (no UI) is controlled by config/env flags (see `Infinite_War_Simulation/config.py`, and the UI/headless switch in `Infinite_War_Simulation/main.py`).
+# With custom config
+TORCH_DEVICE=cuda:0 NUM_AGENTS=256 python main.py
+Visualization Mode
+bash
+Copy
+# Interactive viewer with trained policy
+FWS_PROFILE=visualize python main.py
 
-### Outputs
-
-A run creates a timestamped directory under `results/` (see `Infinite_War_Simulation/utils/results_writer.py`). Typical artifacts:
-
-* `results/sim_YYYY-MM-DD_HH-MM-SS/config.json` (config snapshot) (see `Infinite_War_Simulation/utils/results_writer.py`)
-* `results/sim_.../stats.csv` (per-tick rows) (see `Infinite_War_Simulation/utils/results_writer.py`, `Infinite_War_Simulation/simulation/stats.py`)
-* `results/sim_.../dead_agents_log.csv` (death rows) (see `Infinite_War_Simulation/utils/results_writer.py`, `Infinite_War_Simulation/simulation/stats.py`)
-* `results/sim_.../summary.json` (final status + duration + final scores) (see `Infinite_War_Simulation/main.py`)
-* `results/sim_.../crash_trace.txt` (only on crash) (see `Infinite_War_Simulation/main.py`)
-* `results/sim_.../simulation_raw.avi` (only if `RECORD_VIDEO` is enabled and `cv2` is installed) (see `_SimpleRecorder` in `Infinite_War_Simulation/main.py`)
-* `results/sim_.../telemetry/…` (only if telemetry enabled) (see `Infinite_War_Simulation/utils/telemetry.py`)
-
----
-
-## Core concepts (skim table)
-
-| Concept            | Meaning (short)                                                         | Where in code                                                                                                                                        |
-| ------------------ | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Tick engine        | Owns the tick loop and applies all mechanics per tick                   | `Infinite_War_Simulation/engine/tick.py`                                                                                                             |
-| Grid tensor        | World state tensor; channel 0 is occupancy used by renderer/recorder    | `Infinite_War_Simulation/engine/grid.py`, `_SimpleRecorder` in `Infinite_War_Simulation/main.py`                                                     |
-| Agent registry     | Per-agent data stored in a tensor (hp, team, pos, etc.)                 | `Infinite_War_Simulation/engine/agent_registry.py`                                                                                                   |
-| Rays / perception  | Fast 32-ray first-hit raycast used to build observations                | `Infinite_War_Simulation/engine/ray_engine/raycast_32.py`                                                                                            |
-| Observation layout | Flat vector split into rays + rich_base + instinct; strict shape checks | `Infinite_War_Simulation/agent/obs_spec.py`, `Infinite_War_Simulation/config.py`                                                                     |
-| Action mask        | Valid action masking before sampling                                    | `Infinite_War_Simulation/engine/game/move_mask.py`                                                                                                   |
-| Brains             | Neural policies/values (TransformerBrain, TronBrain, MirrorBrain)       | `Infinite_War_Simulation/agent/transformer_brain.py`, `Infinite_War_Simulation/agent/tron_brain.py`, `Infinite_War_Simulation/agent/mirror_brain.py` |
-| Bucketed forward   | Groups agents by brain type; optional `torch.func.vmap` inference       | `Infinite_War_Simulation/agent/ensemble.py`, `Infinite_War_Simulation/engine/tick.py`                                                                |
-| PPO runtime        | Per-agent PPO buffers + update logic (if enabled)                       | `Infinite_War_Simulation/rl/ppo_runtime.py`                                                                                                          |
-| Stats              | Aggregates scores/kills/deaths/alive; provides CSV rows                 | `Infinite_War_Simulation/simulation/stats.py`                                                                                                        |
-| Checkpoints        | Save/load full world + runtime state                                    | `Infinite_War_Simulation/utils/checkpointing.py`, `Infinite_War_Simulation/main.py`                                                                  |
-| Results writer     | Background process writes CSVs + config.json                            | `Infinite_War_Simulation/utils/results_writer.py`                                                                                                    |
-| Telemetry          | Optional research-grade event logs + lineage tables                     | `Infinite_War_Simulation/utils/telemetry.py`                                                                                                         |
-| UI viewer          | Pygame loop + HUD (tick, speed, team stats)                             | `Infinite_War_Simulation/ui/viewer.py`                                                                                                               |
-
----
-
-## Architecture
-
-### Runtime pipeline (Mermaid)
-
-```mermaid
-flowchart TD
-  A["main.py build or load world"] --> B["TickEngine init"]
-  B --> C{"UI enabled?"}
-  C -->|yes| D["Viewer run loop"]
-  C -->|no| E["Headless loop"]
-  D --> F["TickEngine run_tick"]
-  E --> F
-
-  F --> G["Build observations rays and rich tail"]
-  G --> H["Build action mask"]
-  H --> I["Policy and value forward bucketed optional vmap"]
-  I --> J["Sample actions"]
-  J --> K["Resolve movement conflicts"]
-  K --> L["Combat damage and deaths"]
-  L --> M["Score and CP updates"]
-  M --> N["PPO record_step and optional updates"]
-  N --> O["Respawn step"]
-  O --> P["Telemetry hooks and periodic flush"]
-  P --> Q["Stats row written"]
-```
-
-> Note: each labeled stage above corresponds to explicit blocks and helpers inside `TickEngine.run_tick` and its collaborators (see `Infinite_War_Simulation/engine/tick.py`).
-
-### Module layout (ASCII)
-
-```
-Infinite_War_Simulation/
-  main.py                 # entrypoint + run loops + results/telemetry setup
-  config.py               # env-driven configuration knobs
-  engine/                 # grid, registry, tick loop, raycast, spawn, mapgen
-  agent/                  # brain implementations + observation spec + inference bucketing
-  rl/                     # PPO runtime (per-agent)
-  simulation/             # stats + team score bookkeeping
-  ui/                     # pygame renderer/viewer
-  utils/                  # checkpointing, telemetry, background writers, profiling
-```
-
----
-
-## Determinism & reproducibility
-
-* **Torch + NumPy seeding**: if `FWS_SEED` is set, the program seeds `torch` (CPU + CUDA) and `numpy` (see `_seed_all_from_env` in `Infinite_War_Simulation/main.py`).
-* **Other RNG sources**: the map/spawn code uses Python’s `random` module (see `Infinite_War_Simulation/engine/mapgen.py`, `Infinite_War_Simulation/engine/spawn.py`). Seeding for `random` is **Unknown (not found in main loop)**.
-* **Reproduce a run (best effort)**:
-
-  1. Set `FWS_SEED` to a fixed integer.
-  2. Keep the same device (`TORCH_DEVICE`) and config knobs.
-  3. Prefer headless mode for fewer timing effects.
-
-<details>
-<summary>Useful env/config knobs (selected)</summary>
-
-| Knob                                   | What it changes                                           | Where                                                                            |
-| -------------------------------------- | --------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `FWS_SEED`                             | Seeds `torch` + `numpy` in `main.py`                      | `Infinite_War_Simulation/main.py`                                                |
-| `FWS_TORCH_DEVICE`                     | Selects device string (`cuda` / `cpu`)                    | `Infinite_War_Simulation/config.py`                                              |
-| `FWS_START_AGENTS_PER_TEAM`            | Initial agents per team                                   | `Infinite_War_Simulation/config.py`, spawn in `Infinite_War_Simulation/main.py`  |
-| `FWS_SPAWN_MODE`                       | `uniform` vs `symmetric` spawning                         | `Infinite_War_Simulation/main.py`                                                |
-| `FWS_TICK_LIMIT`                       | Stop after N ticks (0 = infinite)                         | `Infinite_War_Simulation/config.py`, loop in `Infinite_War_Simulation/main.py`   |
-| `FWS_TARGET_FPS`                       | UI frame cap                                              | `Infinite_War_Simulation/config.py`, `Infinite_War_Simulation/ui/viewer.py`      |
-| `FWS_USE_VMAP` / `FWS_VMAP_MIN_BUCKET` | Enable/threshold `torch.func.vmap` inference              | `Infinite_War_Simulation/config.py`, `Infinite_War_Simulation/agent/ensemble.py` |
-| `FWS_AMP`                              | AMP autocast for brains (if implemented in tick/PPO path) | `Infinite_War_Simulation/config.py`, `Infinite_War_Simulation/engine/tick.py`    |
-| `FWS_CHECKPOINT_PATH`                  | Resume from checkpoint file                               | `Infinite_War_Simulation/config.py`, `Infinite_War_Simulation/main.py`           |
-
-</details>
-
----
-
-## Telemetry / logs
-
-Telemetry is implemented as an additive, file-based sidecar inside the run folder (see `Infinite_War_Simulation/utils/telemetry.py`).
-
-* Toggle: `TELEMETRY_ENABLED` is read from config (see `Infinite_War_Simulation/utils/telemetry.py`, `Infinite_War_Simulation/config.py`).
-* Output layout (inside `results/sim_.../telemetry/`):
-
-  * `agent_life.csv` (snapshot table)
-  * `lineage_edges.csv` (append-only parent→child edges)
-  * `tick_summary.csv` (per-tick aggregates)
-  * `agent_static.csv` + `run_meta.json` (optional sidecars)
-  * `events/events_00001.jsonl` (chunked append-only event log)
-
-<details>
-<summary>CSV schemas (as written in code)</summary>
-
-**`tick_summary.csv`** (see `Infinite_War_Simulation/utils/telemetry.py`):
-
-* `tick`, `red_alive`, `blue_alive`, `red_mean_hp`, `blue_mean_hp`, `red_kills`, `blue_kills`, `red_deaths`, `blue_deaths`, `red_dmg_dealt`, `blue_dmg_dealt`
-
-**`lineage_edges.csv`** (see `Infinite_War_Simulation/utils/telemetry.py`):
-
-* `tick`, `parent_id`, `child_id`
-
-**`agent_life.csv`** (see `Infinite_War_Simulation/utils/telemetry.py`):
-
-* `agent_id`, `slot_id`, `team`, `unit_type`, `born_tick`, `death_tick`, `parent_id`, `kills_total`, `damage_dealt_total`, `damage_taken_total`, `offspring_count`, `notes`
-
-</details>
-
-<details>
-<summary>Lineage visualization helper</summary>
-
-A standalone script exists to build a filtered lineage tree graph:
-
-* `lineage_tree.py` expects `lineage_edges.csv` and (optionally) `agent_life.csv` in the current working directory (see `lineage_tree.py`).
-* It can use Plotly if enabled in the script (`USE_PLOTLY = True`) (see `lineage_tree.py`).
-
-</details>
-
----
-
-## Screenshot
-
-![Simulation UI](docs/sim.png)
-
-Caption (what is visible):
-
-* A square grid world with many colored cells and several larger shaded green regions.
-* HUD shows: `Tick 12270 [ 0.25x ]` and two team lines (`Red … Alive:…`, `Blue … Alive:…`).
-* Team lines include fields like `S`, `CP`, `K`, `D`, and a split like `(S:…, A:…)` (see HUD formatting in `Infinite_War_Simulation/ui/viewer.py`).
-
----
-
-## Minimal repo structure (from the code dump)
-
-```text
-Infinite_War_Simulation/
-  main.py
-  config.py
-  agent/
-    ensemble.py
-    transformer_brain.py
-    tron_brain.py
-    mirror_brain.py
-    obs_spec.py
-  engine/
-    tick.py
-    agent_registry.py
-    grid.py
-    mapgen.py
-    spawn.py
-    respawn.py
-    ray_engine/raycast_32.py
-    game/move_mask.py
-  rl/ppo_runtime.py
-  simulation/stats.py
-  ui/viewer.py
-  utils/
-    results_writer.py
-    telemetry.py
-    checkpointing.py
-    profiler.py
-    sanitize.py
-```
-
----
-
-## Roadmap (safe)
-
-* Document full environment-variable surface area (many knobs live in `Infinite_War_Simulation/config.py`).
-* Add a small “analysis/” notebook or scripts that parse `telemetry/events/*.jsonl` (event schema already versioned) (see `Infinite_War_Simulation/utils/telemetry.py`).
-* Optional gzip for event logs is flagged but not implemented (see `events_gzip` note in `Infinite_War_Simulation/utils/telemetry.py`).
-* Make seeding cover Python `random` for full map/spawn determinism (map/spawn use `random`; see `Infinite_War_Simulation/engine/mapgen.py`, `Infinite_War_Simulation/engine/spawn.py`).
-* Add a minimal `requirements.txt` / `pyproject.toml` (Unknown: not present in the code dump).
+# Load from checkpoint
+python main.py --resume results/sim_2025-01-15_10-30-00/checkpoints/latest.txt
+Headless Mode
+bash
+Copy
+# No viewer, telemetry only
+FWS_PROFILE=train_fast VIEWER_ENABLED=false python main.py
+Expected Outputs
+plain
+Copy
+results/
+└── sim_YYYY-MM-DD_HH-MM-SS/
+    ├── config.json              # Runtime configuration
+    ├── stats.csv                # Per-tick metrics
+    ├── dead_agents_log.csv      # Death events
+    ├── checkpoints/             # Periodic snapshots
+    │   ├── latest.txt
+    │   └── ckpt_t{tick}_{timestamp}/
+    └── telemetry/               # Detailed event logs
+        ├── agent_life.csv
+        ├── lineage_edges.csv
+        ├── move_summary.csv
+        └── events/
+            └── events_000001.jsonl
+Configuration
+Key environment variables:
+Table
+Variable	Default	Description
+TORCH_DEVICE	cuda	Compute device (cuda, cpu, mps)
+GRID_WIDTH	64	World width in cells
+GRID_HEIGHT	64	World height in cells
+NUM_AGENTS	128	Initial agents per team
+MAX_AGENTS	512	Maximum concurrent agents
+PPO_UPDATE_EVERY	2048	Steps between policy updates
+TELEMETRY_ENABLED	true	Enable event logging
+CHECKPOINT_EVERY_TICKS	10000	Auto-save interval
+See config.py for complete parameter list.
+Design Principles
+Reproducibility
+All randomness controlled via seedable RNGs
+Checkpoint system preserves full runtime state
+Git commit hash recorded in checkpoints
+Modularity
+Brains implement standard interface; new architectures plug in seamlessly
+Observation builder composable from feature modules
+Telemetry events schema-versioned for backward compatibility
+Performance
+GPU-resident simulation state minimizes CPU-GPU transfers
+Background I/O via multiprocessing Queue
+Viewer caches static terrain; dynamic elements updated per-frame
+Stability
+Runtime sanity checks detect NaN/Inf in grid and agent data
+Gradient clipping in PPO prevents policy collapse
+Checkpoint atomic writes prevent corruption on crash
+Limitations
+Discrete Actions Only: Action space limited to 9 discrete actions (8 directions + noop + attack)
+Grid-Based Movement: Agents occupy single cells; no continuous position or fractional movement
+2D Top-Down: No elevation, line-of-sight blocked only by walls
+Simplified Combat: Attack is instantaneous with fixed range; no projectile physics
+Homogeneous Teams: All agents on a team share the same brain architecture (though individual parameters differ)
+Single-Device Training: PPO updates assume all agents on same GPU; no distributed training support
+License
+MIT License
+Copyright (c) 2025 Neural Siege Contributors
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+Acknowledgments
+This project was developed as a research platform for multi-agent reinforcement learning. The architecture draws inspiration from vectorized simulation frameworks and modern PPO implementations. The codebase prioritizes clarity, extensibility, and reproducibility for academic and industrial research applications.
