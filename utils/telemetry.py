@@ -94,39 +94,58 @@ def _to_int(x: Any) -> int:
         return int(float(x))
 
 
+# REPLACE THIS FUNCTION (exact name/signature) =================================
 def _atomic_write_text(path: Path, text: str) -> None:
     """
     Atomically write text to `path`.
 
-    Atomic write: what it means
-    ---------------------------
-    "Atomic" here means: readers will see either
-    - the old full file, OR
-    - the new full file,
-    but never a partially-written file.
-
-    How it's achieved
-    -----------------
-    1) Write content into a temporary file in the same directory.
-    2) Use `os.replace(tmp, path)` which is an atomic rename on most OS/filesystems.
-
-    Why it matters
-    --------------
-    During long runs you may:
-    - tail files
-    - run analysis scripts concurrently
-    - resume from checkpoints
-    A non-atomic write can leave half a CSV/JSON file which breaks parsers.
-
-    Constraints
-    -----------
-    - The temp file uses a ".tmp" suffix appended to the original suffix.
-    - We ensure the parent directory exists.
+    Windows note
+    ------------
+    On Windows, `os.replace(tmp, path)` can fail transiently if:
+      - antivirus/indexer is scanning the destination
+      - another process has the destination open (sharing violations)
+    We retry briefly and (as a last resort) fall back to a direct overwrite.
     """
+    import time  # local import to keep module import surface unchanged
+
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+
+    # Retry a bit on Windows to survive transient locks (AV/indexer/reader).
+    # Keep deterministic behavior: fixed retry count + fixed backoff schedule.
+    max_tries = 20 if os.name == "nt" else 3
+    last_exc: Optional[BaseException] = None
+
+    for attempt in range(max_tries):
+        try:
+            os.replace(tmp, path)
+            return
+        except OSError as e:
+            last_exc = e
+            winerr = getattr(e, "winerror", None)
+
+            # Windows transient lock patterns:
+            # - 5  = Access is denied
+            # - 32 = The process cannot access the file because it is being used by another process
+            if os.name == "nt" and winerr in (5, 32):
+                time.sleep(0.01 * (attempt + 1))
+                continue
+            raise
+
+    # Last resort: try non-atomic overwrite (better than losing the snapshot entirely).
+    # If this fails too, re-raise the last exception so callers can surface it.
+    try:
+        path.write_text(text, encoding="utf-8")
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+    except Exception:
+        if last_exc is not None:
+            raise last_exc
+        raise
+# =============================================================================
 
 
 def _parse_validate_level(v: Any, default: int = 2) -> int:
@@ -171,6 +190,31 @@ def _parse_validate_level(v: Any, default: int = 2) -> int:
 
     # Fallback to default.
     return int(default)
+
+
+def _parse_schema_version_int(x: Any, default: int = 2) -> int:
+    """
+    Parse telemetry schema version into an integer for event payloads.
+
+    Accepts numeric values and strings like "2" or "v2". Falls back to `default`.
+    """
+    try:
+        return int(x)
+    except Exception:
+        pass
+
+    try:
+        s = str(x).strip()
+    except Exception:
+        return int(default)
+
+    if s[:1] in ("v", "V"):
+        s = s[1:]
+
+    try:
+        return int(float(s))
+    except Exception:
+        return int(default)
 
 
 # =============================================================================
@@ -224,10 +268,22 @@ class TelemetrySession:
         self.run_dir = Path(run_dir)
 
         # ---------------------------------------------------------------------
+        # Event ordering context (additive metadata for causal replay)
+        # ---------------------------------------------------------------------
+        # These fields are optional; if the engine never sets them, events behave as before.
+        self._event_ctx_tick: Optional[int] = None
+        self._event_ctx_phase: Optional[str] = None
+        self._event_ctx_tick_seq: int = 0
+        self._event_ctx_phase_seq: int = 0
+
+        # ---------------------------------------------------------------------
         # Schema versioning (important for downstream analysis compatibility)
         # ---------------------------------------------------------------------
         # NOTE: The original code sets schema_version as int here.
-        self.schema_version: int = int(getattr(config, "TELEMETRY_SCHEMA_VERSION", 2))
+        self.schema_version_int: int = _parse_schema_version_int(
+            getattr(config, "TELEMETRY_SCHEMA_VERSION", 2),
+            default=2,
+        )
 
         # ---------------------------------------------------------------------
         # Reuse existing knobs (do not invent a second config system).
@@ -263,6 +319,29 @@ class TelemetrySession:
         self.move_events_every: int = int(getattr(config, "TELEMETRY_MOVE_EVENTS_EVERY", 0))
         self.move_events_max_per_tick: int = int(getattr(config, "TELEMETRY_MOVE_EVENTS_MAX_PER_TICK", 256))
         self.move_events_sample_rate: float = float(getattr(config, "TELEMETRY_MOVE_EVENTS_SAMPLE_RATE", 1.0))
+
+        # ---------------------------------------------------------------------
+        # Per-slot movement totals (used to populate AgentLife movement columns)
+        # ---------------------------------------------------------------------
+        # Why per-slot?
+        # - The engine is vectorized over registry slots.
+        # - We can update per-slot counters with torch index_add_ (fast on GPU/CPU).
+        #
+        # Correctness with slot reuse:
+        # - When an agent dies, we "freeze" its final counters into the AgentLife record
+        #   in record_deaths().
+        # - When a new agent is born into a slot, we reset slot counters in record_birth().
+        #
+        # NOTE: These are lazily allocated tensors (created only if enabled+log_moves).
+        #       They are placed on the engine device (CPU/CUDA) so updates are cheap.
+        self._move_slot_attempted = None
+        self._move_slot_success = None
+        self._move_slot_blocked_wall = None
+        self._move_slot_blocked_occupied = None
+        self._move_slot_conflict_lost = None
+        self._move_slot_conflict_tie = None
+        self._move_slot_cells_l1 = None
+        self._move_slot_last_seen = None
 
         # ---------------------------------------------------------------------
         # Generic "counters" stream for lightweight extensions
@@ -314,7 +393,9 @@ class TelemetrySession:
         #   which will FAIL for "v2".
         #
         # However: YOU asked "do not change any code". So we document, not modify.
-        self.schema_version: str = str(getattr(config, "TELEMETRY_SCHEMA_VERSION", "v2"))
+        self.schema_version_str: str = str(getattr(config, "TELEMETRY_SCHEMA_VERSION", "v2"))
+        # Backward-compat alias used by existing metadata writers.
+        self.schema_version: str = self.schema_version_str
 
         # FIX comment: Renamed attribute to avoid conflict with write_run_meta method
         # - The method is write_run_meta(...)
@@ -506,6 +587,37 @@ class TelemetrySession:
                             except Exception:
                                 pass
 
+                    # Movement totals (optional columns; may not exist in older runs).
+                    for k in (
+                        "moves_attempted",
+                        "moves_success",
+                        "moves_blocked_wall",
+                        "moves_blocked_occupied",
+                        "moves_conflict_lost",
+                        "moves_conflict_tie",
+                        "cells_walked_total_l1",
+                        "last_seen_tick",
+                    ):
+                        v = (row.get(k) or "").strip()
+                        if v != "":
+                            try:
+                                rec[k] = int(float(v))
+                            except Exception:
+                                pass
+
+                    # reward_total is numeric but may be blank.
+                    v = (row.get("reward_total") or "").strip()
+                    if v != "":
+                        try:
+                            rec["reward_total"] = float(v)
+                        except Exception:
+                            pass
+
+                    # death_cause is free-form.
+                    v = (row.get("death_cause") or "").strip()
+                    if v != "":
+                        rec["death_cause"] = str(v)
+
                     self._life[aid] = rec
 
                     # Offspring count stored separately.
@@ -578,6 +690,58 @@ class TelemetrySession:
             for r in rows:
                 w.writerow(r)
 
+    def _event_schema_version_int(self) -> int:
+        """Return schema version as int for event payloads (robust to \"v2\" strings)."""
+        if hasattr(self, "schema_version_int"):
+            return int(getattr(self, "schema_version_int"))
+        return _parse_schema_version_int(getattr(self, "schema_version", 2), default=2)
+
+    # =============================================================================
+    # Event ordering context (optional, additive)
+    # =============================================================================
+    def begin_tick_event_context(self, tick: int) -> None:
+        """
+        Begin/reset per-tick event ordering counters.
+
+        Engine can call this at the start of a tick (or before a new tick's event-producing phase).
+        Safe to call multiple times with the same tick (no reset in that case).
+        """
+        if not self.enabled:
+            return
+
+        t = int(tick)
+        if self._event_ctx_tick != t:
+            self._event_ctx_tick = t
+            self._event_ctx_phase = None
+            self._event_ctx_tick_seq = 0
+            self._event_ctx_phase_seq = 0
+
+    def set_event_phase(self, phase: str, tick: Optional[int] = None) -> None:
+        """
+        Set current event phase label (e.g., 'combat_damage', 'combat_kill_credit', 'move', 'respawn_birth').
+
+        This resets phase-local sequence while preserving tick-global sequence.
+        """
+        if not self.enabled:
+            return
+
+        if tick is not None:
+            self.begin_tick_event_context(int(tick))
+        elif self._event_ctx_tick is None:
+            # If engine forgot to set tick, keep graceful behavior (no exception).
+            return
+
+        phase_s = str(phase)
+        if self._event_ctx_phase != phase_s:
+            self._event_ctx_phase = phase_s
+            self._event_ctx_phase_seq = 0
+
+    def clear_event_context(self) -> None:
+        """Optional cleanup hook; not required for correctness."""
+        if not self.enabled:
+            return
+        self._event_ctx_phase = None
+
     def _emit_event(self, ev: Dict[str, Any]) -> None:
         """
         Buffer a single event dict and flush if the buffer reaches chunk size.
@@ -600,6 +764,20 @@ class TelemetrySession:
             # Degrade safely to jsonl; do not invent other writers.
             ev = dict(ev)
             ev["notes"] = (ev.get("notes", "") + " events_format_forced_jsonl").strip()
+
+        # Additive event-order metadata (only if engine set tick/phase context).
+        # This preserves backwards compatibility: downstream parsers can ignore these fields.
+        if self._event_ctx_tick is not None:
+            ev = dict(ev)  # avoid mutating caller-owned dict
+            # Tick-global sequence across all event types/phases for this tick.
+            ev.setdefault("tick_event_seq", int(self._event_ctx_tick_seq))
+            self._event_ctx_tick_seq += 1
+
+            # Optional phase label + sequence within phase.
+            if self._event_ctx_phase is not None:
+                ev.setdefault("phase", str(self._event_ctx_phase))
+                ev.setdefault("phase_event_seq", int(self._event_ctx_phase_seq))
+                self._event_ctx_phase_seq += 1
 
         self._events_buf.append(ev)
         if len(self._events_buf) >= self.event_chunk_size:
@@ -652,8 +830,7 @@ class TelemetrySession:
         ------------
         - Includes core life history (born_tick, death_tick, lifespan_ticks)
         - Includes totals (kills, damage)
-        - Includes several "future extension" columns (moves_attempted, reward_total, etc.)
-          which may remain blank today.
+        - Includes several "future extension" columns (moves_attempted, reward_total, etc.).
         """
         fieldnames = [
             "agent_id", "slot_id", "team", "unit_type",
@@ -661,10 +838,38 @@ class TelemetrySession:
             "kills_total", "damage_dealt_total", "damage_taken_total", "notes",
             # Additional fields reserved for future extensions
             "moves_attempted", "moves_success", "moves_blocked_wall", "moves_blocked_occupied",
+            "moves_conflict_lost", "moves_conflict_tie",
             "cells_walked_total_l1", "reward_total", "death_cause", "last_seen_tick",
         ]
 
         rows: List[Dict[str, Any]] = []
+
+        # -----------------------------------------------------------------
+        # Movement totals integration (AgentLife snapshot)
+        # -----------------------------------------------------------------
+        # We maintain per-slot movement counters (attempted/success/blocked/etc.)
+        # via vectorized updates (see record_move_totals_by_slot()).
+        #
+        # IMPORTANT PERFORMANCE NOTE:
+        # - If the simulation runs on CUDA, reading per-agent counters via .item()
+        #   inside the loop would cause *thousands of device synchronizations*.
+        # - Therefore, we bulk-copy the counter tensors to CPU ONCE per snapshot,
+        #   then do cheap Python list indexing while building CSV rows.
+        move_lists = None
+        if self.enabled and self.log_moves and getattr(self, "_move_slot_attempted", None) is not None:
+            try:
+                a0 = self._move_slot_attempted.detach().cpu().tolist()
+                a1 = self._move_slot_success.detach().cpu().tolist()
+                a2 = self._move_slot_blocked_wall.detach().cpu().tolist()
+                a3 = self._move_slot_blocked_occupied.detach().cpu().tolist()
+                a4 = self._move_slot_conflict_lost.detach().cpu().tolist()
+                a5 = self._move_slot_conflict_tie.detach().cpu().tolist()
+                a6 = self._move_slot_cells_l1.detach().cpu().tolist()
+                a7 = self._move_slot_last_seen.detach().cpu().tolist()
+                move_lists = (a0, a1, a2, a3, a4, a5, a6, a7)
+            except Exception:
+                move_lists = None
+
         for aid, rec in sorted(self._life.items(), key=lambda kv: kv[0]):
             r = dict(rec)
             r["agent_id"] = aid
@@ -677,6 +882,28 @@ class TelemetrySession:
                 r["lifespan_ticks"] = int(dt) - int(bt)
             else:
                 r["lifespan_ticks"] = ""
+
+            # Fill movement columns for currently-alive agents from per-slot counters.
+            # For dead agents, values are frozen into the life record at record_deaths().
+            if move_lists is not None and r.get("death_tick", None) is None:
+                try:
+                    sid = r.get("slot_id", None)
+                    if sid is not None and sid != "":
+                        s = int(sid)
+                        a0, a1, a2, a3, a4, a5, a6, a7 = move_lists
+                        if 0 <= s < len(a0):
+                            r["moves_attempted"] = int(a0[s])
+                            r["moves_success"] = int(a1[s])
+                            r["moves_blocked_wall"] = int(a2[s])
+                            r["moves_blocked_occupied"] = int(a3[s])
+                            r["moves_conflict_lost"] = int(a4[s])
+                            r["moves_conflict_tie"] = int(a5[s])
+                            r["cells_walked_total_l1"] = int(a6[s])
+                            lst = int(a7[s])
+                            if lst >= 0:
+                                r["last_seen_tick"] = lst
+                except Exception:
+                    pass
 
             # Emit exactly the defined fields; missing fields become "" for CSV cleanliness.
             rows.append({k: r.get(k, "") for k in fieldnames})
@@ -757,6 +984,145 @@ class TelemetrySession:
         if len(self._move_agg_buf) >= max(1, int(self.event_chunk_size)):
             self._flush_move_summary()
 
+    def _ensure_move_slot_tensors(self, n_slots: int, device) -> None:
+        """
+        Lazily allocate per-slot movement counter tensors.
+
+        This is called from:
+        - record_birth() (to reset/seed a slot)
+        - record_deaths() (to freeze a slot)
+        - record_move_totals_by_slot() (to update counts)
+
+        Implementation notes
+        --------------------
+        - We import torch lazily to avoid forcing torch import at module import time.
+        - Tensors live on the same device as the simulation (CPU or CUDA).
+        """
+        if (not self.enabled) or (not self.log_moves):
+            return
+
+        try:
+            import torch  # local import (torch is already a project dependency)
+        except Exception:
+            return
+
+        n = int(n_slots)
+        if n <= 0:
+            return
+
+        cur = getattr(self, "_move_slot_attempted", None)
+        if cur is not None and int(cur.numel()) == n and str(cur.device) == str(device):
+            return
+
+        def _new_zeros() -> "torch.Tensor":
+            return torch.zeros((n,), device=device, dtype=torch.int64)
+
+        # If we already had counters, preserve them (best-effort) when resizing/moving.
+        old_attempted = cur
+
+        self._move_slot_attempted = _new_zeros()
+        self._move_slot_success = _new_zeros()
+        self._move_slot_blocked_wall = _new_zeros()
+        self._move_slot_blocked_occupied = _new_zeros()
+        self._move_slot_conflict_lost = _new_zeros()
+        self._move_slot_conflict_tie = _new_zeros()
+        self._move_slot_cells_l1 = _new_zeros()
+        self._move_slot_last_seen = torch.full((n,), -1, device=device, dtype=torch.int64)
+
+        if old_attempted is not None:
+            try:
+                m = min(int(old_attempted.numel()), n)
+                if m > 0:
+                    self._move_slot_attempted[:m] = old_attempted[:m].to(device=device)
+            except Exception:
+                pass
+
+    def record_move_totals_by_slot(self, tick: int, slot_ids, outcome_code) -> None:
+        """
+        Update per-slot movement totals for AgentLife snapshot.
+
+        Inputs are tensors aligned per attempted move:
+            slot_ids[i]      -> registry slot attempting a move
+            outcome_code[i]  -> outcome code for that attempt
+
+        Outcome codes (must match TickEngine):
+            0 = success
+            1 = blocked_wall
+            2 = blocked_occupied
+            3 = conflict_lost
+            4 = conflict_tie
+        """
+        if (not self.enabled) or (not self.log_moves):
+            return
+
+        reg = getattr(self, "_registry", None)
+        if reg is None or not hasattr(reg, "agent_data"):
+            return
+
+        try:
+            import torch  # local import
+        except Exception:
+            return
+
+        try:
+            n_slots = int(reg.agent_data.shape[0])
+        except Exception:
+            return
+
+        if n_slots <= 0:
+            return
+
+        # Prefer the device of slot_ids (engine device); fall back to registry tensor device.
+        device = getattr(slot_ids, "device", getattr(reg.agent_data, "device", "cpu"))
+        self._ensure_move_slot_tensors(n_slots=n_slots, device=device)
+
+        if getattr(self, "_move_slot_attempted", None) is None:
+            return
+
+        try:
+            s = slot_ids.to(dtype=torch.long, device=device)
+            oc = outcome_code.to(dtype=torch.int16, device=device)
+            if int(s.numel()) == 0:
+                return
+
+            ones = torch.ones((int(s.numel()),), device=device, dtype=torch.int64)
+
+            # Always increment attempted.
+            self._move_slot_attempted.index_add_(0, s, ones)
+
+            # Update last_seen_tick for attempted movers.
+            try:
+                self._move_slot_last_seen.index_fill_(0, s, int(tick))
+            except Exception:
+                self._move_slot_last_seen[s] = int(tick)
+
+            # Per-outcome increments.
+            m0 = (oc == 0)
+            if bool(m0.any()):
+                ss = s[m0]
+                oo = ones[m0]
+                self._move_slot_success.index_add_(0, ss, oo)
+                self._move_slot_cells_l1.index_add_(0, ss, oo)  # 1 cell per successful step
+
+            m1 = (oc == 1)
+            if bool(m1.any()):
+                self._move_slot_blocked_wall.index_add_(0, s[m1], ones[m1])
+
+            m2 = (oc == 2)
+            if bool(m2.any()):
+                self._move_slot_blocked_occupied.index_add_(0, s[m2], ones[m2])
+
+            m3 = (oc == 3)
+            if bool(m3.any()):
+                self._move_slot_conflict_lost.index_add_(0, s[m3], ones[m3])
+
+            m4 = (oc == 4)
+            if bool(m4.any()):
+                self._move_slot_conflict_tie.index_add_(0, s[m4], ones[m4])
+
+        except Exception:
+            return
+
     def record_move_events(
         self,
         tick: int,
@@ -817,7 +1183,7 @@ class TelemetrySession:
         for i in range(n):
             self._require_birth(int(agent_ids[i]), "move")
             self._emit_event({
-                "schema_version": int(getattr(self, "schema_version", 2)),
+                "schema_version": self._event_schema_version_int(),
                 "tick": int(tick),
                 "type": "move",
                 "agent_id": int(agent_ids[i]),
@@ -1111,6 +1477,40 @@ class TelemetrySession:
         })
         self._life[agent_id] = rec
 
+        # Reset/seed per-slot movement counters for this slot.
+        # - For new agents: reset to 0 (fresh life).
+        # - For allow_existing bootstrap/resume: seed from existing AgentLife values when present.
+        if self.log_moves:
+            try:
+                reg = getattr(self, "_registry", None)
+                if reg is not None and hasattr(reg, "agent_data"):
+                    device = getattr(reg.agent_data, "device", "cpu")
+                    n_slots = int(reg.agent_data.shape[0])
+                    self._ensure_move_slot_tensors(n_slots=n_slots, device=device)
+                    sid = int(slot_id)
+                    if 0 <= sid < int(self._move_slot_attempted.numel()):
+                        if allow_existing:
+                            self._move_slot_attempted[sid] = int(rec.get("moves_attempted", 0) or 0)
+                            self._move_slot_success[sid] = int(rec.get("moves_success", 0) or 0)
+                            self._move_slot_blocked_wall[sid] = int(rec.get("moves_blocked_wall", 0) or 0)
+                            self._move_slot_blocked_occupied[sid] = int(rec.get("moves_blocked_occupied", 0) or 0)
+                            self._move_slot_conflict_lost[sid] = int(rec.get("moves_conflict_lost", 0) or 0)
+                            self._move_slot_conflict_tie[sid] = int(rec.get("moves_conflict_tie", 0) or 0)
+                            self._move_slot_cells_l1[sid] = int(rec.get("cells_walked_total_l1", 0) or 0)
+                            ls = rec.get("last_seen_tick", None)
+                            self._move_slot_last_seen[sid] = int(ls) if ls is not None else -1
+                        else:
+                            self._move_slot_attempted[sid] = 0
+                            self._move_slot_success[sid] = 0
+                            self._move_slot_blocked_wall[sid] = 0
+                            self._move_slot_blocked_occupied[sid] = 0
+                            self._move_slot_conflict_lost[sid] = 0
+                            self._move_slot_conflict_tie[sid] = 0
+                            self._move_slot_cells_l1[sid] = 0
+                            self._move_slot_last_seen[sid] = -1
+            except Exception:
+                pass
+
         # If lineage info exists, record parent->child edge and update offspring counts.
         if parent_id is not None:
             self._offspring_count[int(parent_id)] = int(self._offspring_count.get(int(parent_id), 0)) + 1
@@ -1123,7 +1523,7 @@ class TelemetrySession:
         # Optionally emit a birth event.
         if self.log_births:
             self._emit_event({
-                "schema_version": int(getattr(self, "schema_version", 2)),
+                "schema_version": self._event_schema_version_int(),
                 "tick": int(tick),
                 "type": "birth",
                 "agent_id": int(agent_id),
@@ -1328,7 +1728,7 @@ class TelemetrySession:
 
             if self.log_damage:
                 ev = {
-                    "schema_version": int(getattr(self, "schema_version", 2)),
+                    "schema_version": self._event_schema_version_int(),
                     "tick": int(tick),
                     "type": "damage",
                     "mode": "victim_sum",
@@ -1421,7 +1821,7 @@ class TelemetrySession:
             self._require_birth(vid, "damage(per_hit victim)")
 
             self._emit_event({
-                "schema_version": int(getattr(self, "schema_version", 2)),
+                "schema_version": self._event_schema_version_int(),
                 "tick": int(tick),
                 "type": "damage",
                 "mode": "per_hit",
@@ -1461,7 +1861,7 @@ class TelemetrySession:
 
             if self.log_kills:
                 self._emit_event({
-                    "schema_version": int(getattr(self, "schema_version", 2)),
+                    "schema_version": self._event_schema_version_int(),
                     "tick": int(tick),
                     "type": "kill",
                     "killer_id": kid,
@@ -1508,9 +1908,29 @@ class TelemetrySession:
 
             rec["death_tick"] = int(tick)
 
+            # Freeze final movement totals into the life record.
+            # This protects correctness if the registry slot is later reused for a new agent.
+            if self.log_moves:
+                try:
+                    sid = int(dead_slots[i]) if i < len(dead_slots) else None
+                    if sid is not None and getattr(self, "_move_slot_attempted", None) is not None:
+                        if 0 <= sid < int(self._move_slot_attempted.numel()):
+                            rec["moves_attempted"] = int(self._move_slot_attempted[sid].item())
+                            rec["moves_success"] = int(self._move_slot_success[sid].item())
+                            rec["moves_blocked_wall"] = int(self._move_slot_blocked_wall[sid].item())
+                            rec["moves_blocked_occupied"] = int(self._move_slot_blocked_occupied[sid].item())
+                            rec["moves_conflict_lost"] = int(self._move_slot_conflict_lost[sid].item())
+                            rec["moves_conflict_tie"] = int(self._move_slot_conflict_tie[sid].item())
+                            rec["cells_walked_total_l1"] = int(self._move_slot_cells_l1[sid].item())
+                            lst = int(self._move_slot_last_seen[sid].item())
+                            if lst >= 0:
+                                rec["last_seen_tick"] = lst
+                except Exception:
+                    pass
+
             if self.log_deaths:
                 self._emit_event({
-                    "schema_version": int(getattr(self, "schema_version", 2)),
+                    "schema_version": self._event_schema_version_int(),
                     "tick": int(tick),
                     "type": "death",
                     "agent_id": int(did),
@@ -1634,34 +2054,35 @@ class TelemetrySession:
     # Shutdown
     # =============================================================================
 
+    # REPLACE THIS METHOD BODY INSIDE class TelemetrySession =======================
     def close(self) -> None:
         """
         Clean shutdown: flush buffers and write final snapshots.
 
-        What happens on close
-        ---------------------
-        1) Flush any remaining events buffer to a chunk file.
-        2) Write the final agent_life snapshot.
-        3) Optionally write one last tick summary row (if enabled).
-
-        Reliability note
-        ----------------
-        This method is typically called in a `finally:` block or at program end.
-        It should not crash the program. Hence the try/except.
-
-        Current behavior
-        ----------------
-        If an exception occurs here, it prints a message (not silent).
-        That may be intentional because shutdown failures are important.
+        IMPORTANT RELIABILITY CHANGE
+        ----------------------------
+        Each flush step is best-effort and isolated: one failure (e.g. agent_life snapshot)
+        must NOT prevent other flushes (e.g. move_summary, counters, events).
         """
         if not self.enabled:
             return
-        try:
-            self._flush_event_chunk()
-            self._flush_agent_life_snapshot()
-            self._flush_move_summary()
-            self._flush_counters()
-            if self._last_tick_seen is not None and self.tick_summary_every > 0:
-                self._write_tick_summary(tick=self._last_tick_seen)
-        except Exception as e:
-            print(f"[telemetry] Close failed: {e}")
+
+        errors: List[str] = []
+
+        def _safe(step: str, fn) -> None:
+            try:
+                fn()
+            except Exception as e:
+                errors.append(f"{step}: {type(e).__name__}: {e}")
+
+        _safe("events_chunk", self._flush_event_chunk)
+        _safe("agent_life_snapshot", self._flush_agent_life_snapshot)
+        _safe("move_summary", self._flush_move_summary)
+        _safe("counters", self._flush_counters)
+
+        if self._last_tick_seen is not None and self.tick_summary_every > 0:
+            _safe("tick_summary_final", lambda: self._write_tick_summary(tick=self._last_tick_seen))
+
+        if errors:
+            print("[telemetry] Close encountered errors:\n  - " + "\n  - ".join(errors))
+    # =============================================================================

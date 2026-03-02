@@ -54,6 +54,21 @@ dedicated background writer process (`ResultsWriter`) that is explicitly Windows
 from __future__ import annotations  # Allows forward references in type hints (Python typing feature)
 
 import os
+
+# ---------------------------------------------------------------------
+# Windows Ctrl+C mitigation for Intel Fortran runtime (MKL/oneAPI, etc.)
+# ---------------------------------------------------------------------
+# Some native numeric stacks on Windows (Intel Fortran runtime) install a console Ctrl+C
+# handler that aborts the process with:
+#   forrtl: error (200): program aborting due to control-C event
+# This abort bypasses Python's KeyboardInterrupt and prevents graceful shutdown.
+#
+# Intel documents an official opt-out via FOR_DISABLE_CONSOLE_CTRL_HANDLER.
+# This MUST be set before importing numpy/torch/scipy (they may load MKL/ifcore).
+if os.name == "nt":
+    if os.getenv("FWS_WIN_FORRTL_MITIGATE", "1").strip().lower() in ("1", "true", "yes", "y", "on", "t"):
+        os.environ.setdefault("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "TRUE")
+
 import json
 import time
 import signal
@@ -76,7 +91,17 @@ except Exception:
 # Each import below corresponds to a subsystem. "main.py" should *not*
 # re-implement their logic; it just ties them together.
 
-import config
+try:
+    import config
+except ModuleNotFoundError:
+    # If executed from inside the package directory (common Windows workflow),
+    # the repo root may not be on sys.path, so top-level `config.py` is not importable.
+    # Fix by adding the parent directory of this file (repo root) to sys.path.
+    import sys as _sys
+    _repo_root = Path(__file__).resolve().parent.parent
+    if str(_repo_root) not in _sys.path:
+        _sys.path.insert(0, str(_repo_root))
+    import config
 from simulation.stats import SimulationStats
 from engine.agent_registry import AgentsRegistry
 from engine.tick import TickEngine
@@ -200,6 +225,7 @@ def _config_snapshot() -> dict:
             "TARGET_FPS": config.TARGET_FPS,
         },
         "SPAWN": {
+            "SPAWN_MODE": str(getattr(config, "SPAWN_MODE", "uniform")),
             "SPAWN_ARCHER_RATIO": float(getattr(config, "SPAWN_ARCHER_RATIO", 0.4)),
         },
         "ARCHER_LOS_BLOCKS_WALLS": bool(getattr(config, "ARCHER_LOS_BLOCKS_WALLS", False)),
@@ -637,10 +663,12 @@ def main() -> None:
     # PyTorch can use different matmul kernels; "high" may improve performance on some GPUs.
     torch.set_float32_matmul_precision("high")
 
-    # Seed from environment variable if provided (reproducibility)
-    seed = _seed_all_from_env()
-    if seed is not None:
-        print(f"[main] Using deterministic seed: {seed}")
+    # Seed from resolved config value (which already honors FWS_SEED overrides).
+    # This ensures deterministic startup seeding even when the env var is absent and
+    # only the config default (RNG_SEED) is in effect.
+    seed = int(getattr(config, "RNG_SEED", getattr(config, "SEED", 42)))
+    seed_everything(seed)
+    print(f"[main] Using deterministic seed: {seed}")
 
     # Print a one-line banner summarizing config (useful for logs)
     print(config.summary_str())
@@ -685,7 +713,7 @@ def main() -> None:
         zones = make_zones(config.GRID_HEIGHT, config.GRID_WIDTH, device=config.TORCH_DEVICE)
 
         # Spawn initial agents
-        spawn_mode = os.getenv("FWS_SPAWN_MODE", "uniform").lower()
+        spawn_mode = str(getattr(config, "SPAWN_MODE", "uniform")).strip().lower()
 
         if spawn_mode == "symmetric":
             spawn_symmetric(registry, grid, per_team=config.START_AGENTS_PER_TEAM)
@@ -750,7 +778,7 @@ def main() -> None:
                 {
                     "schema_version": getattr(config, "TELEMETRY_SCHEMA_VERSION", "v2"),
                     "config": _config_snapshot(),
-                    "seed": getattr(config, "SEED", None),
+                    "seed": int(getattr(config, "RNG_SEED", getattr(config, "SEED", 42))),
                     "device": str(grid.device),
                     "grid_h": int(grid.shape[1]),
                     "grid_w": int(grid.shape[2]),

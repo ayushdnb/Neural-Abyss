@@ -1377,9 +1377,14 @@ class InputHandler:
 
                     # Store last selected unique ID (useful if agent dies later)
                     if self.viewer.selected_slot_id is not None:
-                        self.viewer.last_selected_uid = int(
-                            self.viewer.registry.agent_data[self.viewer.selected_slot_id, COL_AGENT_ID].item()
-                        )
+                        if hasattr(self.viewer.registry, "agent_uids"):
+                            self.viewer.last_selected_uid = int(
+                                self.viewer.registry.agent_uids[self.viewer.selected_slot_id].item()
+                            )
+                        else:
+                            self.viewer.last_selected_uid = int(
+                                self.viewer.registry.agent_data[self.viewer.selected_slot_id, COL_AGENT_ID].item()
+                            )
 
                 # Mouse wheel zoom
                 elif ev.button == 4:
@@ -1613,12 +1618,23 @@ class Viewer:
                 # Bulk select needed columns for alive agents
                 cols = [COL_X, COL_Y, COL_UNIT, COL_TEAM, COL_AGENT_ID]
                 alive_data = ad.index_select(0, alive_idx_t)[:, cols].detach().cpu().numpy()
+                uid_data = None
+                if hasattr(self.registry, "agent_uids"):
+                    uid_data = (
+                        self.registry.agent_uids
+                        .index_select(0, alive_idx_t)
+                        .detach()
+                        .cpu()
+                        .numpy()
+                    )
 
                 brains = self.registry.brains
 
                 agent_map = {}
                 for k, slot_id in enumerate(alive_indices):
                     x, y, unit, team, uid = alive_data[k]
+                    if uid_data is not None:
+                        uid = uid_data[k]
 
                     # Determine short brain label (string) for rendering
                     br = brains[slot_id]
@@ -1686,8 +1702,11 @@ class Viewer:
                 with torch.no_grad():
                     slot_ids = agent_ids.detach()
 
-                    # Bulk lookup unique ids (GPU->CPU copy)
-                    uids = registry.agent_data.index_select(0, slot_ids)[:, COL_AGENT_ID].detach().cpu().numpy()
+                    # Bulk lookup unique ids (GPU->CPU copy). Prefer int64 side-tensor.
+                    if hasattr(registry, "agent_uids"):
+                        uids = registry.agent_uids.index_select(0, slot_ids).detach().cpu().numpy()
+                    else:
+                        uids = registry.agent_data.index_select(0, slot_ids)[:, COL_AGENT_ID].detach().cpu().numpy()
                     r = rewards.detach().cpu().numpy()
 
                 for uid, rv in zip(uids, r):

@@ -10,10 +10,8 @@
 #       Each agent slot has its own model parameters AND its own optimizer.
 #       There is no parameter sharing between slots.
 #
-# Why this is unusual:
-#   - Many RL systems share one policy network across all agents (parameter sharing).
-#   - Here, each slot learns separately, which increases compute cost but allows
-#     divergent behaviors and avoids “global homogenization”.
+# Here, each slot learns separately, which increases compute cost but allows
+# divergent behaviors and avoids “global homogenization”.
 #
 # What this runtime does:
 #   1) Collects per-agent trajectories (observations, actions, rewards, etc.)
@@ -776,11 +774,16 @@ class PerAgentPPORuntime:
         """
         T = rewards.numel()
         adv = torch.zeros_like(rewards)
-        last_gae = 0.0
+        last_gae = rewards.new_zeros(())
+
+        if last_value is not None:
+            last_value_t = last_value.detach().to(device=values.device, dtype=values.dtype).reshape(())
+        else:
+            last_value_t = values.new_zeros(())
 
         for t in reversed(range(T)):
-            # mask = 0 if done, else 1
-            mask = 1.0 - float(dones[t].item())
+            # mask = 0 if done, else 1 (kept as tensor to avoid GPU->CPU sync)
+            mask = (~dones[t]).to(dtype=values.dtype)
 
             # Choose next value:
             # - interior steps: values[t+1]
@@ -788,7 +791,7 @@ class PerAgentPPORuntime:
             if t < T - 1:
                 next_val_t = values[t + 1]
             else:
-                next_val_t = float(last_value.item()) if last_value is not None else 0.0
+                next_val_t = last_value_t
 
             delta = rewards[t] + self.gamma * next_val_t * mask - values[t]
             last_gae = delta + self.gamma * self.lam * mask * last_gae

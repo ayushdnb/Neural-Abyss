@@ -317,6 +317,12 @@ class TronBrain(nn.Module):
                 f"expected {self.expected_obs_dim} = ({self.num_rays}*{self.ray_feat_dim})"
                 f"+{self.rich_base_dim}+{self.instinct_dim}."
             )
+        cfg_obs_dim = int(getattr(config, "OBS_DIM", self.expected_obs_dim))
+        if cfg_obs_dim != self.expected_obs_dim:
+            raise ValueError(
+                f"TronBrain config OBS layout mismatch: expected {self.expected_obs_dim} from "
+                f"RAY_TOKEN_COUNT*RAY_FEAT_DIM + RICH_BASE_DIM + INSTINCT_DIM, but config.OBS_DIM={cfg_obs_dim}."
+            )
 
         # ------------------------------------------------------------------
         # Semantic partition indices

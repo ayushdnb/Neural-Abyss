@@ -246,12 +246,12 @@ class MirrorBrain(nn.Module):
         # This class enforces that the configured layout matches the expected layout,
         # to prevent silent bugs from changing feature ordering.
         self.num_rays = int(getattr(config, "RAY_TOKEN_COUNT", 32))
-        self.ray_feat_dim = int(getattr(config, "RAY_FEAT_DIM", 4))
+        self.ray_feat_dim = int(getattr(config, "RAY_FEAT_DIM", 8))
         self.rays_flat_dim = self.num_rays * self.ray_feat_dim
 
         self.rich_base_dim = int(getattr(config, "RICH_BASE_DIM", 64))
+        self.rich_base_dim = int(getattr(config, "RICH_BASE_DIM", 23))
         self.instinct_dim = int(getattr(config, "INSTINCT_DIM", 4))
-
         # Expected observation dimension based on the parts above.
         expected_obs_dim = self.rays_flat_dim + self.rich_base_dim + self.instinct_dim
 

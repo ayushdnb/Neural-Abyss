@@ -3,7 +3,7 @@ from datetime import datetime
 
 # --- Config ---
 BASE_DIR = Path(r"C:\Kishan\RL_Project\rich_feature")
-OUT_FILE = BASE_DIR / "codes" / "rich_feature.txt"
+OUT_FILE = BASE_DIR / "codes" / "code_dump.txt"
 
 # Set to True if you want to APPEND on every run (instead of recreating fresh)
 APPEND = False

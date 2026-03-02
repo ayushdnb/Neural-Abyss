@@ -1,3 +1,4 @@
+# Infinite_War_Simulation/engine/tick.py
 # =============================================================================
 # Tick Engine (Combat-First, Vectorized, Multi-Agent RL Simulation)
 # =============================================================================
@@ -119,6 +120,11 @@ class TickMetrics:
     moved: int = 0
     attacks: int = 0
     deaths: int = 0
+
+    # Death breakdown (explicit semantics; helps telemetry/forensics)
+    deaths_combat: int = 0
+    deaths_metabolism: int = 0
+
     tick: int = 0
     cp_red_tick: float = 0.0
     cp_blue_tick: float = 0.0
@@ -354,6 +360,81 @@ class TickEngine:
         return x.to(torch.long)
 
     # -------------------------------------------------------------------------
+    # Identity helpers (SLOT ID vs PERSISTENT AGENT UID)
+    # -------------------------------------------------------------------------
+    def _slot_ids_to_agent_uids_list(self, slot_idx: torch.Tensor) -> List[int]:
+        """
+        Convert registry slot indices -> persistent agent ids (UIDs) for telemetry/analysis.
+
+        IMPORTANT:
+        - slot index = runtime storage location in registry (reused after death/respawn)
+        - agent UID   = persistent identity across lifetime (preferred for telemetry)
+
+        Fallback behavior:
+        - If registry.agent_uids does not exist, we fall back to COL_AGENT_ID.
+          COL_AGENT_ID is treated as display/compat field and may be float-backed.
+        """
+        if slot_idx.numel() == 0:
+            return []
+
+        if hasattr(self.registry, "agent_uids"):
+            return (
+                self.registry.agent_uids
+                .index_select(0, slot_idx)
+                .detach()
+                .cpu()
+                .to(torch.int64)
+                .tolist()
+            )
+
+        data = self.registry.agent_data
+        return (
+            data[slot_idx, COL_AGENT_ID]
+            .detach()
+            .cpu()
+            .to(torch.int64)
+            .tolist()
+        )
+
+    # -------------------------------------------------------------------------
+    # Grid HP sync helper (minimize grid/registry desync windows)
+    # -------------------------------------------------------------------------
+    def _sync_grid_hp_for_slots(self, slot_idx: torch.Tensor) -> None:
+        """
+        Sync grid HP channel (grid[1]) from registry HP for the given slots.
+
+        Why this exists:
+        - Combat/environment often mutate registry HP first.
+        - We want a single, explicit helper to shrink the "registry updated but grid HP stale"
+          window and make code review easier.
+        """
+        if slot_idx.numel() == 0:
+            return
+        data = self.registry.agent_data
+        gx = self._as_long(data[slot_idx, COL_X])
+        gy = self._as_long(data[slot_idx, COL_Y])
+        self.grid[1, gy, gx] = data[slot_idx, COL_HP].to(self._grid_dt)
+
+    # -------------------------------------------------------------------------
+    # Optional telemetry phase context helper (safe no-op if telemetry lacks API)
+    # -------------------------------------------------------------------------
+    def _telemetry_set_phase(self, telemetry, *, tick: int, phase: str) -> None:
+        """
+        Best-effort phase marker for telemetry event ordering.
+        This is additive only; if telemetry doesn't support it, nothing breaks.
+        """
+        if telemetry is None or not getattr(telemetry, "enabled", False):
+            return
+        try:
+            if hasattr(telemetry, "begin_tick_event_context"):
+                telemetry.begin_tick_event_context(int(tick))
+            if hasattr(telemetry, "set_event_phase"):
+                telemetry.set_event_phase(str(phase), tick=int(tick))
+        except Exception:
+            # Telemetry should never destabilize sim.
+            pass
+
+    # -------------------------------------------------------------------------
     # Alive filtering
     # -------------------------------------------------------------------------
     def _recompute_alive_idx(self) -> torch.Tensor:
@@ -523,14 +604,21 @@ class TickEngine:
     # -------------------------------------------------------------------------
     # Death application: remove dead agents from grid and update stats/metrics
     # -------------------------------------------------------------------------
-    def _apply_deaths(self, sel: torch.Tensor, metrics: TickMetrics, credit_kills: bool = True) -> Tuple[int, int]:
+    def _apply_deaths(
+        self,
+        sel: torch.Tensor,
+        metrics: TickMetrics,
+        credit_kills: bool = True,
+        death_cause: str = "unknown",
+    ) -> Tuple[int, int]:
         """
         Kill agents indicated by sel (boolean mask or index tensor).
         Updates grid, agent data, and metrics. Returns (red_deaths, blue_deaths).
 
-        Important semantic:
+        Important semantics:
         - "credit_kills" controls whether deaths increase opponent kill counters.
-          For example, starvation deaths might not be credited as enemy kills.
+          Example: starvation/metabolism deaths should typically not be credited as enemy kills.
+        - "death_cause" is a telemetry/forensics label ("combat", "metabolism", ...).
         """
         data = self.registry.agent_data
 
@@ -543,39 +631,18 @@ class TickEngine:
         if dead_idx.numel() == 0:
             return 0, 0
 
-        # ---- TELEMETRY: death events + AgentLife death_tick ----
-        telemetry = getattr(self, "telemetry", None)
-        if telemetry is not None and getattr(telemetry, "enabled", False):
-            try:
-                tick_now = int(self.stats.tick)
-                if hasattr(self.registry, "agent_uids"):
-                    dead_ids = self.registry.agent_uids.index_select(0, dead_idx).detach().cpu().tolist()
-                else:
-                    dead_ids = [int(data[slot, COL_AGENT_ID].item()) for slot in dead_idx.tolist()]
-                dead_team = [int(data[slot, COL_TEAM].item()) for slot in dead_idx.tolist()]
-                dead_unit = [int(data[slot, COL_UNIT].item()) for slot in dead_idx.tolist()]
-                dead_slots = [int(s) for s in dead_idx.tolist()]
-                telemetry.record_deaths(
-                    tick=tick_now,
-                    dead_ids=dead_ids,
-                    dead_team=dead_team,
-                    dead_unit=dead_unit,
-                    dead_slots=dead_slots,
-                    notes=("credit_kills" if credit_kills else "no_credit_kills"),
-                )
-            except Exception as e:
-                # Telemetry errors should not crash the simulation.
-                try:
-                    telemetry._anomaly(f"_apply_deaths telemetry hook failed: {e}")
-                except Exception:
-                    pass
+        # Snapshot metadata BEFORE mutation (positions/teams/units/uids are still readable now).
+        dead_slots = [int(s) for s in dead_idx.tolist()]
+        dead_ids = self._slot_ids_to_agent_uids_list(dead_idx)
+        dead_team_list = [int(data[slot, COL_TEAM].item()) for slot in dead_slots]
+        dead_unit_list = [int(data[slot, COL_UNIT].item()) for slot in dead_slots]
 
-        # Count deaths by team encoding:
+        # Count deaths by team encoding (read before ALIVE zeroing).
         dead_team = data[dead_idx, COL_TEAM]
         red_deaths = int((dead_team == 2.0).sum().item())
         blue_deaths = int((dead_team == 3.0).sum().item())
 
-        # Update global stats:
+        # Update global stats (semantic counters).
         if red_deaths:
             self.stats.add_death("red", red_deaths)
             if credit_kills:
@@ -586,17 +653,45 @@ class TickEngine:
             if credit_kills:
                 self.stats.add_kill("red", blue_deaths)
 
-        # THEORY: Grid State Management
-        #
-        # If an agent dies:
-        #   - grid[0] at its cell becomes empty (0)
-        #   - grid[1] at its cell becomes 0 HP (0)
-        #   - grid[2] at its cell becomes -1 (no slot)
-        #   - registry ALIVE flag becomes 0
-        #
-        gx, gy = self._as_long(data[dead_idx, COL_X]), self._as_long(data[dead_idx, COL_Y])
+        # -----------------------------------------------------------------
+        # STATE MUTATION (registry + grid)
+        # -----------------------------------------------------------------
+        # We apply the world-state mutation before emitting death telemetry so that
+        # post-death readers do not observe "death event emitted but agent still alive on grid".
+        gx = self._as_long(data[dead_idx, COL_X])
+        gy = self._as_long(data[dead_idx, COL_Y])
+
+        # Clear occupancy / hp / slot-id in grid first (spatial truth for fast queries).
         self.grid[0][gy, gx], self.grid[1][gy, gx], self.grid[2][gy, gx] = self._g0, self._g0, self._gneg
+
+        # Then mark registry ALIVE=0 (agent remains in slot storage, but dead).
         data[dead_idx, COL_ALIVE] = self._d0
+
+        # -----------------------------------------------------------------
+        # TELEMETRY (after state mutation)
+        # -----------------------------------------------------------------
+        telemetry = getattr(self, "telemetry", None)
+        if telemetry is not None and getattr(telemetry, "enabled", False):
+            try:
+                tick_now = int(self.stats.tick)
+                self._telemetry_set_phase(
+                    telemetry,
+                    tick=tick_now,
+                    phase=("death_combat" if death_cause == "combat" else f"death_{death_cause}"),
+                )
+                telemetry.record_deaths(
+                    tick=tick_now,
+                    dead_ids=dead_ids,
+                    dead_team=dead_team_list,
+                    dead_unit=dead_unit_list,
+                    dead_slots=dead_slots,
+                    notes=f"cause={death_cause}; credit_kills={1 if credit_kills else 0}",
+                )
+            except Exception as e:
+                try:
+                    telemetry._anomaly(f"_apply_deaths telemetry hook failed: {e}")
+                except Exception:
+                    pass
 
         metrics.deaths += int(dead_idx.numel())
         return red_deaths, blue_deaths
@@ -807,6 +902,9 @@ class TickEngine:
         data = self.registry.agent_data
         telemetry = getattr(self, "telemetry", None)
         tick_now = int(self.stats.tick)
+
+        # Initialize per-tick telemetry ordering context (additive only; safe no-op if unsupported).
+        self._telemetry_set_phase(telemetry, tick=tick_now, phase="tick_start")
 
         metrics = TickMetrics()
         alive_idx = self._recompute_alive_idx()
@@ -1066,19 +1164,44 @@ class TickEngine:
                         data[uniq_v, COL_HP] = hp_before - dmg_sum
                         hp_after = data[uniq_v, COL_HP]
 
-                        # Reward all attackers that contributed to a kill
-                        # Condition: victim crosses from >0 to <=0 in this tick
+                        # We delay kill-event emission until AFTER damage telemetry so replay order is:
+                        # damage -> kill_credit -> death (later in _apply_deaths).
+                        kill_event_killer_slots = None
+                        kill_event_victim_slots = None
+
+                        # PATCH: reward/credit exactly one attacker per kill (not all contributors).
+                        # Why:
+                        # - Prevents multi-attacker focus-fire from granting multiple kill credits
+                        #   for the same victim in one tick.
+                        # How (deterministic):
+                        #   1) choose highest same-tick damage contributor for that victim
+                        #   2) if tied on damage, choose smallest attacker slot id
                         killed_v = (hp_before > 0) & (hp_after <= 0)
                         if killed_v.any():
                             reward_val = float(config.PPO_REWARD_KILL_INDIVIDUAL)
 
-                            # Repeat kill mask per attacker entry:
-                            killed_per_entry = killed_v.repeat_interleave(counts)
-                            killers = satk[killed_per_entry]
-                            if killers.numel() > 0:
+                            killed_group_idx = killed_v.nonzero(as_tuple=False).squeeze(1)
+                            if killed_group_idx.numel() > 0:
+                                credited_victims = uniq_v[killed_group_idx]
+                                credited_killers = torch.empty(
+                                    (killed_group_idx.numel(),),
+                                    device=satk.device,
+                                    dtype=satk.dtype,
+                                )
+
+                                for out_i, g in enumerate(killed_group_idx.tolist()):
+                                    s = int(starts[g].item())
+                                    e = int(ends[g].item()) + 1  # slice end is exclusive
+                                    grp_atk = satk[s:e]
+                                    grp_dmg = sdmg[s:e]
+
+                                    max_dmg = grp_dmg.max()
+                                    tied_killers = grp_atk[grp_dmg == max_dmg]
+                                    credited_killers[out_i] = tied_killers.min()
+
                                 # Deterministic accumulation per killer slot:
-                                k_order = killers.argsort()
-                                sk = killers[k_order]
+                                k_order = credited_killers.argsort()
+                                sk = credited_killers[k_order]
                                 uniq_k, k_counts = torch.unique_consecutive(sk, return_counts=True)
 
                                 individual_rewards[uniq_k] += (k_counts.to(self._data_dt) * reward_val)
@@ -1091,25 +1214,38 @@ class TickEngine:
                                         uid = int(data[killer_slot, COL_AGENT_ID].item())
                                     self.agent_scores[uid] += reward_val * float(cnt)
 
-                                # TELEMETRY: kill events
-                                if telemetry is not None and getattr(telemetry, "enabled", False):
-                                    try:
-                                        kill_mask = killed_per_entry
-                                        if kill_mask.any():
-                                            killer_slots_killed = satk[kill_mask]
-                                            victim_slots_killed = sv[kill_mask]
-                                            if hasattr(self.registry, "agent_uids"):
-                                                killer_ids = self.registry.agent_uids.index_select(0, killer_slots_killed).detach().cpu().tolist()
-                                                victim_ids = self.registry.agent_uids.index_select(0, victim_slots_killed).detach().cpu().tolist()
-                                            else:
-                                                killer_ids = [int(data[slot, COL_AGENT_ID].item()) for slot in killer_slots_killed.tolist()]
-                                                victim_ids = [int(data[slot, COL_AGENT_ID].item()) for slot in victim_slots_killed.tolist()]
-                                            telemetry.record_kills(tick=tick_now, killer_ids=killer_ids, victim_ids=victim_ids)
-                                    except Exception as e:
-                                        try:
-                                            telemetry._anomaly(f"tick.kill hook failed: {e}")
-                                        except Exception:
-                                            pass
+                                # Defer kill-event emission until AFTER damage telemetry (causal ordering).
+                                kill_event_killer_slots = credited_killers
+                                kill_event_victim_slots = credited_victims
+
+                        # Individual PPO dense damage shaping (per-agent only; no team reward path here).
+                        ppo_dmg_dealt_coef = float(getattr(config, "PPO_REWARD_DMG_DEALT_INDIVIDUAL", 0.0))
+                        ppo_dmg_taken_pen = float(getattr(config, "PPO_PENALTY_DMG_TAKEN_INDIVIDUAL", 0.0))
+
+                        # Aggregate per-attacker damage once so it can feed both PPO shaping and telemetry.
+                        uniq_a = torch.empty((0,), device=satk.device, dtype=satk.dtype)
+                        dmg_a = torch.empty((0,), device=sdmg.device, dtype=sdmg.dtype)
+                        need_attacker_sum = (satk.numel() > 0) and (
+                            (ppo_dmg_dealt_coef != 0.0)
+                            or (telemetry is not None and getattr(telemetry, "enabled", False))
+                        )
+                        if need_attacker_sum:
+                            uniq_a, inv_a = satk.unique(return_inverse=True)
+                            dmg_a = torch.zeros((uniq_a.numel(),), device=sdmg.device, dtype=sdmg.dtype)
+                            dmg_a.scatter_add_(0, inv_a, sdmg)
+
+                        if ppo_dmg_dealt_coef != 0.0 and uniq_a.numel() > 0:
+                            individual_rewards[uniq_a] += (dmg_a.to(self._data_dt) * float(ppo_dmg_dealt_coef))
+
+                        if ppo_dmg_taken_pen != 0.0 and uniq_v.numel() > 0:
+                            individual_rewards[uniq_v] -= (dmg_sum.to(self._data_dt) * float(ppo_dmg_taken_pen))
+
+                        # Sync grid HP immediately after registry HP mutation (shrink desync window).
+                        # This reduces the chance that debug hooks / future readers observe
+                        # registry HP(t) while grid HP is still stale.
+                        self._sync_grid_hp_for_slots(uniq_v)
+
+                        self._telemetry_set_phase(telemetry, tick=tick_now, phase="combat_damage")
 
                         # TELEMETRY: damage totals + damage events
                         if telemetry is not None and getattr(telemetry, "enabled", False):
@@ -1135,9 +1271,6 @@ class TickEngine:
                                 )
 
                                 # Attacker-sum (aggregate per attacker)
-                                uniq_a, inv_a = satk.unique(return_inverse=True)
-                                dmg_a = torch.zeros((uniq_a.numel(),), device=sdmg.device, dtype=sdmg.dtype)
-                                dmg_a.scatter_add_(0, inv_a, sdmg)
                                 if hasattr(self.registry, "agent_uids"):
                                     a_ids = self.registry.agent_uids.index_select(0, uniq_a).detach().cpu().tolist()
                                 else:
@@ -1168,9 +1301,28 @@ class TickEngine:
                                 except Exception:
                                     pass
 
-                        # Update HP channel on grid for unique victims only
-                        vy, vx = self._as_long(data[uniq_v, COL_Y]), self._as_long(data[uniq_v, COL_X])
-                        self.grid[1, vy, vx] = data[uniq_v, COL_HP].to(self._grid_dt)
+                        # TELEMETRY: kill events (emitted AFTER damage telemetry for causal replay ordering)
+                        if (
+                            telemetry is not None
+                            and getattr(telemetry, "enabled", False)
+                            and kill_event_killer_slots is not None
+                            and kill_event_victim_slots is not None
+                            and kill_event_killer_slots.numel() > 0
+                        ):
+                            try:
+                                self._telemetry_set_phase(telemetry, tick=tick_now, phase="combat_kill_credit")
+                                killer_ids = self._slot_ids_to_agent_uids_list(kill_event_killer_slots)
+                                victim_ids = self._slot_ids_to_agent_uids_list(kill_event_victim_slots)
+                                telemetry.record_kills(
+                                    tick=tick_now,
+                                    killer_ids=killer_ids,
+                                    victim_ids=victim_ids,
+                                )
+                            except Exception as e:
+                                try:
+                                    telemetry._anomaly(f"tick.kill hook failed: {e}")
+                                except Exception:
+                                    pass
 
                         metrics.attacks += int(atk_idx.numel())
                         # ===== END NEW DAMAGE =====
@@ -1178,7 +1330,17 @@ class TickEngine:
         # ---------------------------------------------------------------------
         # 5) Apply deaths after combat
         # ---------------------------------------------------------------------
-        rD, bD = self._apply_deaths((data[:, COL_ALIVE] > 0.5) & (data[:, COL_HP] <= 0.0), metrics)
+        # IMPORTANT SEMANTIC:
+        # - Combat damage is applied first.
+        # - Combat deaths are resolved here (before movement).
+        # Therefore, agents killed in combat do NOT move this tick.
+        rD, bD = self._apply_deaths(
+            (data[:, COL_ALIVE] > 0.5) & (data[:, COL_HP] <= 0.0),
+            metrics,
+            credit_kills=True,
+            death_cause="combat",
+        )
+        metrics.deaths_combat += (rD + bD)
         combat_rd += rD
         combat_bd += bD
         self._debug_invariants("post_combat")
@@ -1325,6 +1487,8 @@ class TickEngine:
             # 6.3) Telemetry: movement aggregates + optional per-agent events
             # -----------------------------------------------------------------
             if telemetry is not None and getattr(telemetry, "enabled", False) and bool(getattr(telemetry, "log_moves", False)):
+                self._telemetry_set_phase(telemetry, tick=tick_now, phase="move")
+
                 # Aggregates are always cheap and always recorded when log_moves is enabled.
                 try:
                     telemetry.record_move_summary(
@@ -1340,6 +1504,66 @@ class TickEngine:
                 except Exception:
                     pass
 
+                # -------------------------------------------------------------
+                # Per-agent movement totals (AgentLife snapshot)
+                # -------------------------------------------------------------
+                # NOTE: This runs *after* conflict resolution and after winner moves are applied,
+                # so outcomes are finalized.
+                #
+                # Why this exists:
+                # - The simulation already records high-level move aggregates (move_summary.csv)
+                # - It also optionally records sampled per-move events (events_*.jsonl)
+                # - But AgentLife snapshots (agent_life.csv) typically want *per-agent totals*
+                #   (e.g., moves attempted/success/blocked counts) so you can analyze behavior
+                #   per agent over long runs without reading huge event logs.
+                #
+                # This hook sends, in one vectorized call, the "attempted move outcome code"
+                # for every slot that attempted to move this tick. Telemetry can then accumulate
+                # these per slot across ticks.
+                out_code_all = None
+                try:
+                    n_all = int(move_idx_all.numel())
+                    if n_all > 0 and hasattr(telemetry, "record_move_totals_by_slot"):
+                        # Outcome codes for attempted moves:
+                        # 0=success | 1=blocked_wall | 2=blocked_occupied | 3=conflict_lost | 4=conflict_tie
+                        #
+                        # Default is "blocked_occupied" because:
+                        # - The most general non-empty case is “occupied”
+                        # - We then refine wall-blocks and can-move / conflict outcomes below.
+                        out_code_all = torch.full((n_all,), 2, device=self.device, dtype=torch.int16)  # default: blocked_occupied
+
+                        # Blocked outcomes (attempted but destination not empty)
+                        # blocked_all tells us "destination not empty"
+                        # occ_all == g_wall specializes that into "blocked by wall"
+                        out_code_all[blocked_all & (occ_all == g_wall)] = 1
+                        # If destination was empty, the move is "can move", which is *provisionally* success.
+                        # We will override for ties/losses below if conflicts existed.
+                        out_code_all[can_move_all] = 0  # provisional: can-move defaults to success
+
+                        # Override can-move outcomes with conflict results (if any)
+                        # IMPORTANT: tie_mask / lost_mask are indexed over the can-move subset.
+                        # can_locs maps those subset positions back into the original n_all indexing.
+                        if can_locs.numel() > 0:
+                            if tie_mask.numel() > 0 and tie_mask.any():
+                                out_code_all[can_locs[tie_mask]] = 4
+                            if lost_mask.numel() > 0 and lost_mask.any():
+                                out_code_all[can_locs[lost_mask]] = 3
+                            if winner_mask.numel() > 0:
+                                weird = (~winner_mask) & (~tie_mask)
+                                if weird.any():
+                                    out_code_all[can_locs[weird]] = 3
+
+                        # This is the “per-slot totals” ingestion point:
+                        # - slot_ids is the registry slot index (stable identity within capacity)
+                        # - outcome_code is the per-attempt result for that slot in THIS tick
+                        telemetry.record_move_totals_by_slot(
+                            tick=tick_now,
+                            slot_ids=move_idx_all,
+                            outcome_code=out_code_all,
+                        )
+                except Exception:
+                    pass
+
                 # Per-agent move events are optional and sampling-based.
                 try:
                     every = int(getattr(telemetry, "move_events_every", 0))
@@ -1349,22 +1573,25 @@ class TickEngine:
                         # Outcome codes for attempted moves:
                         # 0=success | 1=blocked_wall | 2=blocked_occupied | 3=conflict_lost | 4=conflict_tie
                         n_all = int(move_idx_all.numel())
-                        out_code = torch.full((n_all,), 2, device=self.device, dtype=torch.int16)  # default: blocked_occupied
+                        # Reuse the already-computed out_code_all when available to avoid duplicate work.
+                        out_code = out_code_all
+                        if out_code is None:
+                            out_code = torch.full((n_all,), 2, device=self.device, dtype=torch.int16)  # default: blocked_occupied
 
-                        # Blocked outcomes (attempted but destination not empty)
-                        out_code[blocked_all & (occ_all == g_wall)] = 1
-                        out_code[can_move_all] = 0  # provisional: can-move defaults to success
+                            # Blocked outcomes (attempted but destination not empty)
+                            out_code[blocked_all & (occ_all == g_wall)] = 1
+                            out_code[can_move_all] = 0  # provisional: can-move defaults to success
 
-                        # Override can-move outcomes with conflict results (if any)
-                        if can_locs.numel() > 0:
-                            if tie_mask.numel() > 0 and tie_mask.any():
-                                out_code[can_locs[tie_mask]] = 4
-                            if lost_mask.numel() > 0 and lost_mask.any():
-                                out_code[can_locs[lost_mask]] = 3
-                            if winner_mask.numel() > 0:
-                                weird = (~winner_mask) & (~tie_mask)
-                                if weird.any():
-                                    out_code[can_locs[weird]] = 3
+                            # Override can-move outcomes with conflict results (if any)
+                            if can_locs.numel() > 0:
+                                if tie_mask.numel() > 0 and tie_mask.any():
+                                    out_code[can_locs[tie_mask]] = 4
+                                if lost_mask.numel() > 0 and lost_mask.any():
+                                    out_code[can_locs[lost_mask]] = 3
+                                if winner_mask.numel() > 0:
+                                    weird = (~winner_mask) & (~tie_mask)
+                                    if weird.any():
+                                        out_code[can_locs[weird]] = 3
 
                         # Deterministic sampling (no RNG; stable across runs):
                         # hash = (slot_id * 1103515245 + tick * 12345) mod 2^32
@@ -1379,10 +1606,8 @@ class TickEngine:
                             sel = sel[:max_ev]  # cap volume (deterministic order)
 
                             sel_slots = move_idx_all.index_select(0, sel)
-                            if hasattr(self.registry, "agent_uids"):
-                                agent_ids = self.registry.agent_uids.index_select(0, sel_slots).detach().cpu().to(torch.int64).tolist()
-                            else:
-                                agent_ids = data[sel_slots, COL_AGENT_ID].detach().cpu().to(torch.int64).tolist()
+                            # Event IDs must be persistent agent UIDs (NOT registry slot ids).
+                            event_agent_uids = self._slot_ids_to_agent_uids_list(sel_slots)
 
                             act_ids = a_all.index_select(0, sel).detach().cpu().to(torch.int64).tolist()
                             fx = x0_all.index_select(0, sel).detach().cpu().to(torch.int64).tolist()
@@ -1393,7 +1618,7 @@ class TickEngine:
 
                             telemetry.record_move_events(
                                 tick=tick_now,
-                                agent_ids=agent_ids,
+                                agent_ids=event_agent_uids,
                                 actions=act_ids,
                                 from_x=fx,
                                 from_y=fy,
@@ -1410,6 +1635,10 @@ class TickEngine:
         # ---------------------------------------------------------------------
         # 7) ENVIRONMENT (Heal, Metabolism, Objectives)
         # ---------------------------------------------------------------------
+        # IMPORTANT SEMANTIC:
+        # - This phase runs AFTER movement.
+        # - Metabolism/starvation deaths therefore happen AFTER movement in the same tick.
+        # - These deaths are not enemy kills (credit_kills=False).
         # Recompute alive index because environment effects may kill agents.
         if (alive_idx := self._recompute_alive_idx()).numel() > 0:
             pos_xy = self.registry.positions_xy(alive_idx)
@@ -1436,7 +1665,9 @@ class TickEngine:
                         alive_idx[data[alive_idx, COL_HP] <= 0.0],
                         metrics,
                         credit_kills=False,
+                        death_cause="metabolism",
                     )
+                    metrics.deaths_metabolism += (rD + bD)
                     meta_rd += rD
                     meta_bd += bD
 
@@ -1476,7 +1707,9 @@ class TickEngine:
         # 8) PPO REINFORCEMENT LEARNING LOGGING
         # ---------------------------------------------------------------------
         if self._ppo and rec_agent_ids:
-            agent_ids = torch.cat(rec_agent_ids)
+            # IMPORTANT: these are REGISTRY SLOT IDS captured at decision time (not persistent UIDs).
+            # PPO runtime is slot-based because it tracks per-slot state in the live registry.
+            ppo_slot_ids = torch.cat(rec_agent_ids)
 
             # Team-level rewards:
             # - TEAM_KILL_REWARD for kills
@@ -1486,30 +1719,50 @@ class TickEngine:
             team_b_rew = (combat_rd * config.TEAM_KILL_REWARD) + ((combat_bd + meta_bd) * config.PPO_REWARD_DEATH) + metrics.cp_blue_tick
 
             # Per-agent HP reward each tick (dense shaping)
-            current_hp = data[agent_ids, COL_HP]
-            hp_reward = (current_hp * config.PPO_REWARD_HP_TICK).to(self._data_dt)
+            current_hp = data[ppo_slot_ids, COL_HP]
+            hp_reward_base = (current_hp * config.PPO_REWARD_HP_TICK).to(self._data_dt)
+            hp_reward_mode = str(getattr(config, "PPO_HP_REWARD_MODE", "raw")).strip().lower()
+            if hp_reward_mode == "threshold_ramp":
+                hp_max = data[ppo_slot_ids, COL_HP_MAX].clamp_min(1e-8)
+                hp_pct = (current_hp / hp_max).clamp(0.0, 1.0)
+
+                hp_thr = float(getattr(config, "PPO_HP_REWARD_THRESHOLD", 0.60))
+                hp_thr = max(0.0, min(1.0, hp_thr))
+                if hp_thr >= 1.0:
+                    hp_reward = torch.zeros_like(hp_reward_base)
+                else:
+                    ramp = ((hp_pct - hp_thr) / (1.0 - hp_thr)).clamp(0.0, 1.0)
+                    hp_reward = hp_reward_base * ramp.to(self._data_dt)
+            else:
+                # Legacy/default behavior (backward compatible): linear in current HP.
+                hp_reward = hp_reward_base
 
             # Final reward: individual + team + hp shaping
-            final_rewards = individual_rewards[agent_ids] + torch.where(torch.cat(rec_teams) == 2.0, team_r_rew, team_b_rew) + hp_reward
+            final_rewards = individual_rewards[ppo_slot_ids] + torch.where(torch.cat(rec_teams) == 2.0, team_r_rew, team_b_rew) + hp_reward
 
             # Bootstrapping values for next state if training next step
+            #
+            # NOTE (PPO/GAE semantics):
+            # bootstrap_values here are V(s_{t+1}) for surviving slots, so they are computed
+            # from POST-resolution observations (after combat/move/env in this tick).
+            # This is expected behavior for standard actor-critic bootstrapping.
             bootstrap_values = None
             if self._ppo.will_train_next_step():
-                alive_mask = (data[agent_ids, COL_ALIVE] > 0.5)
-                bootstrap_values = torch.zeros((agent_ids.numel(),), device=agent_ids.device, dtype=torch.float32)
+                alive_mask = (data[ppo_slot_ids, COL_ALIVE] > 0.5)
+                bootstrap_values = torch.zeros((ppo_slot_ids.numel(),), device=ppo_slot_ids.device, dtype=torch.float32)
                 if alive_mask.any():
                     alive_pos = alive_mask.nonzero(as_tuple=False).squeeze(1)
-                    post_ids = agent_ids[alive_pos]
+                    post_step_slot_ids = ppo_slot_ids[alive_pos]
 
-                    order = torch.argsort(post_ids)
-                    post_ids = post_ids[order]
+                    order = torch.argsort(post_step_slot_ids)
+                    post_step_slot_ids = post_step_slot_ids[order]
                     alive_pos = alive_pos[order]
 
-                    pos_xy_post = self.registry.positions_xy(post_ids)
-                    obs_post = self._build_transformer_obs(post_ids, pos_xy_post)
+                    pos_xy_post = self.registry.positions_xy(post_step_slot_ids)
+                    obs_post = self._build_transformer_obs(post_step_slot_ids, pos_xy_post)
 
-                    for bucket in self.registry.build_buckets(post_ids):
-                        loc = torch.searchsorted(post_ids, bucket.indices)
+                    for bucket in self.registry.build_buckets(post_step_slot_ids):
+                        loc = torch.searchsorted(post_step_slot_ids, bucket.indices)
                         _, vals = ensemble_forward(bucket.models, obs_post[loc])
                         bootstrap_values[alive_pos[loc]] = vals.to(torch.float32)
 
@@ -1517,13 +1770,13 @@ class TickEngine:
             # The rest of the tick uses no_grad for speed.
             with torch.enable_grad():
                 self._ppo.record_step(
-                    agent_ids=agent_ids,
+                    agent_ids=ppo_slot_ids,
                     obs=torch.cat(rec_obs),
                     logits=torch.cat(rec_logits),
                     values=torch.cat(rec_values),
                     actions=torch.cat(rec_actions),
                     rewards=final_rewards,
-                    done=(data[agent_ids, COL_ALIVE] <= 0.5),
+                    done=(data[ppo_slot_ids, COL_ALIVE] <= 0.5),
                     bootstrap_values=bootstrap_values,
                 )
 
@@ -1547,6 +1800,8 @@ class TickEngine:
         # TELEMETRY: births + lineage edges
         if telemetry is not None and getattr(telemetry, "enabled", False):
             try:
+                # Birth events happen on the advanced tick (post self.stats.on_tick_advanced(1)).
+                self._telemetry_set_phase(telemetry, tick=int(self.stats.tick), phase="respawn_birth")
                 meta = getattr(self.respawner, "last_spawn_meta", None) or []
                 telemetry.ingest_spawn_meta(meta)
             except Exception as e:
@@ -1563,6 +1818,8 @@ class TickEngine:
         # Periodic telemetry flush/validation
         if telemetry is not None and getattr(telemetry, "enabled", False):
             try:
+                if hasattr(telemetry, "clear_event_context"):
+                    telemetry.clear_event_context()
                 telemetry.on_tick_end(metrics.tick)
             except Exception:
                 pass

@@ -255,6 +255,10 @@ def _infer_brain_kind(brain: torch.nn.Module) -> str:
         return "mirror"
     if isinstance(brain, TransformerBrain):
         return "transformer"
+    # TorchScript-compiled transformer path (non-PPO inference) should round-trip
+    # through the same eager architecture on load.
+    if isinstance(brain, (torch.jit.ScriptModule, torch.jit.RecursiveScriptModule)):
+        return "transformer"
 
     # Fallback: store class name; load will error loudly if unknown
     return brain.__class__.__name__
@@ -290,8 +294,8 @@ def _make_brain(kind: str, device: torch.device) -> torch.nn.Module:
         return TronBrain(obs_dim, act_dim).to(device)
     if kind == "mirror":
         return MirrorBrain(obs_dim, act_dim).to(device)
-    if kind == "transformer":
-        return TransformerBrain(obs_dim, act_dim).to(device)
+    if kind in ("transformer", "ScriptModule", "RecursiveScriptModule"):
+         return TransformerBrain(obs_dim, act_dim).to(device)   
 
     # Raise error for unknown brain type
     raise CheckpointError(f"Unknown brain kind in checkpoint: {kind}")
@@ -1063,33 +1067,29 @@ class CheckpointManager:
             if hasattr(respawner, k):
                 setattr(respawner, k, int(v))
 
+    # REPLACE THIS FUNCTION (exact name/signature) =================================
     @staticmethod
     def _extract_ppo_state(engine: Any) -> Dict[str, Any]:
         """
         Extract PPO trainer state from engine.
 
-        PPO basics (very short):
-        - PPO (Proximal Policy Optimization) maintains optimizer state, policy weights,
-          value weights, running buffers, etc.
-        - To resume training exactly, you must checkpoint that trainer state too.
-
-        Args:
-            engine: Simulation engine object
-
-        Returns:
-            Dictionary with PPO enabled flag and state
+        NOTE (bug fix):
+        The previous version returned before flushing telemetry, making that code unreachable.
         """
         ppo = getattr(engine, "_ppo", None)
         if ppo is None:
             return {"enabled": False, "state": {}}
 
-        return {"enabled": True, "state": ppo.get_checkpoint_state()}
-        # Telemetry safety: flush buffered telemetry chunks BEFORE freezing the checkpoint.
-        # This does not affect determinism; it is best-effort and failure-safe.
+        state = ppo.get_checkpoint_state()
+
+        # Telemetry safety: best-effort flush BEFORE freezing the checkpoint.
+        # This does not affect determinism; it just improves durability of logs.
         telemetry = getattr(engine, "telemetry", None)
         if telemetry is not None:
             try:
                 telemetry.flush(reason="checkpoint_save")
             except Exception:
-                # Never let telemetry break checkpointing.
                 pass
+
+        return {"enabled": True, "state": state}
+    # =============================================================================

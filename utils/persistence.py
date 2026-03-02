@@ -1,7 +1,4 @@
 """
-results_writer.py
-=================
-
 A **Windows-friendly**, **multiprocessing-based** background writer that records simulation/training
 results to disk *without* stalling the main simulation loop.
 
@@ -207,6 +204,19 @@ def _writer_loop(q: Queue) -> None:
     stats_writer = None
     deaths_writer = None
 
+    # --- NEW: Ignore Ctrl+C in this subprocess; main process coordinates shutdown. ---
+    # Why:
+    # - On Windows, Ctrl+C can be delivered to *all* processes in the console process group.
+    # - The main process is responsible for coordinated shutdown and for sending _MsgClose.
+    # - If this subprocess reacted to SIGINT by raising KeyboardInterrupt and exiting, you could
+    #   lose buffered logs and/or leave the main process confused about writer state.
+    try:
+        import signal as _signal
+        _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
+    except Exception:
+        # If setting signal handler fails (platform quirks), we fall back to runtime handling below.
+        pass
+
     try:
         while True:
             # -----------------------------------------------------------------
@@ -216,6 +226,10 @@ def _writer_loop(q: Queue) -> None:
                 # Wait up to 0.2 seconds for a message.
                 # If nothing arrives, we loop again.
                 msg = q.get(timeout=0.2)
+            except KeyboardInterrupt:
+                # On Windows, Ctrl+C can be delivered to the whole process group.
+                # This subprocess must not die noisily; it should keep serving until _MsgClose.
+                continue
             except queue.Empty:
                 # No message available right now.
                 continue
@@ -311,13 +325,17 @@ def _writer_loop(q: Queue) -> None:
 
     finally:
         # Always close file handles, even if an exception occurs.
-        for fp in (stats_fp, deaths_fp):
-            try:
-                if fp:
-                    fp.close()
-            except Exception:
-                # If closing fails, we swallow the error to avoid masking original exceptions.
-                pass
+        # We close each handle independently so one close failure doesn't block the other.
+        try:
+            if stats_fp is not None:
+                stats_fp.close()
+        except Exception:
+            pass
+        try:
+            if deaths_fp is not None:
+                deaths_fp.close()
+        except Exception:
+            pass
 
 
 # =============================================================================

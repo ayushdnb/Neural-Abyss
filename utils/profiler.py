@@ -37,6 +37,8 @@ import os, shutil, subprocess          # os: environment variables + filesystem
 import torch                           # PyTorch: needed for torch.cuda.is_available and torch.profiler usage
 
 
+_LEGACY_PROFILER_ENV_WARNED = False
+
 def profiler_enabled() -> bool:
     """
     Decide whether profiling is enabled.
@@ -52,7 +54,12 @@ def profiler_enabled() -> bool:
     - forgetting to turn it off (profiling adds overhead)
 
     Using an env var makes profiling a runtime switch:
-        FWS_PROFILE=1 python main.py
+        FWS_TORCH_PROFILER=1 python main.py
+
+    Backward compatibility:
+    - Legacy profiler toggle via FWS_PROFILE=1 is still supported temporarily.
+    - This collides with config.py profile-name semantics (FWS_PROFILE=debug/train_fast/...),
+      so a deprecation warning is emitted when legacy boolean-style values are used.
 
     Accepted values:
     - "1", "true", "True" => enabled
@@ -63,8 +70,35 @@ def profiler_enabled() -> bool:
     bool
         True if profiling should be activated; otherwise False.
     """
-    # opt-in via env var or config flag you can pass down
-    return os.getenv("FWS_PROFILE", "0") in {"1", "true", "True"}
+    global _LEGACY_PROFILER_ENV_WARNED
+
+    truthy = {"1", "true", "yes", "y", "on", "t"}
+    falsey = {"0", "false", "no", "n", "off", "f"}
+
+    # Preferred, non-colliding env key.
+    raw_new = os.getenv("FWS_TORCH_PROFILER", None)
+    if raw_new is not None:
+        return raw_new.strip().lower() in truthy
+
+    # Backward-compatible fallback: only treat FWS_PROFILE as profiler toggle if it
+    # looks like a boolean-ish value; otherwise leave it to config profile semantics.
+    raw_legacy = os.getenv("FWS_PROFILE", None)
+    if raw_legacy is None:
+        return False
+
+    legacy_norm = raw_legacy.strip().lower()
+    if legacy_norm in truthy:
+        if not _LEGACY_PROFILER_ENV_WARNED:
+            print(
+                "[profiler][WARN] Legacy profiler toggle via FWS_PROFILE is deprecated "
+                "and collides with config profile selection. Use FWS_TORCH_PROFILER=1 instead."
+            )
+            _LEGACY_PROFILER_ENV_WARNED = True
+        return True
+    if legacy_norm in falsey:
+        return False
+
+    return False
 
 
 @contextmanager
