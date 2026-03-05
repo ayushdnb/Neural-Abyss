@@ -1040,7 +1040,13 @@ class CheckpointManager:
             return {}
 
         # Keys to extract from respawner (private ints)
-        keys = ["_cooldown_red_until", "_cooldown_blue_until", "_last_period_tick"]
+        keys = [
+            "_cooldown_red_until",
+            "_cooldown_blue_until",
+            "_last_period_tick",
+            "_rare_mutation_pending_ticket",
+            "_rare_mutation_last_window_idx",
+        ]
         out: Dict[str, Any] = {}
 
         # Extract each key if present

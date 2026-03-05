@@ -377,6 +377,7 @@ class TelemetrySession:
         self.move_summary_path = self.telemetry_dir / "move_summary.csv"
         self.counters_path = self.telemetry_dir / "counters.csv"
         self.headless_summary_path = self.telemetry_dir / "telemetry_summary.csv"
+        self.ppo_training_telemetry_path = self.telemetry_dir / "ppo_training_telemetry.csv"
         self.mutation_events_path = self.telemetry_dir / "mutation_events.csv"
 
         # Create directories (safe even if they already exist).
@@ -419,6 +420,14 @@ class TelemetrySession:
         self.headless_summary_include_ppo: bool = bool(getattr(config, "TELEMETRY_HEADLESS_SUMMARY_INCLUDE_PPO", True))
         self.log_rare_mutations: bool = bool(getattr(config, "TELEMETRY_LOG_RARE_MUTATIONS", True))
 
+        # Dedicated PPO training diagnostics CSV (append-safe, separate from headless summary sidecar)
+        self.ppo_rich_csv_enabled: bool = bool(getattr(config, "TELEMETRY_PPO_RICH_CSV", True))
+        self.ppo_rich_level: str = str(getattr(config, "TELEMETRY_PPO_RICH_LEVEL", "update")).strip().lower()
+        self.ppo_rich_flush_every: int = max(1, int(getattr(config, "TELEMETRY_PPO_RICH_FLUSH_EVERY", 1)))
+        self.telemetry_append_schema_strict: bool = bool(
+            getattr(config, "TELEMETRY_APPEND_SCHEMA_STRICT", True)
+        )
+
         # ---------------------------------------------------------------------
         # Context references (never mutates; just pointers for reading data)
         # ---------------------------------------------------------------------
@@ -431,6 +440,11 @@ class TelemetrySession:
         # ---------------------------------------------------------------------
         self._move_agg_buf: List[Dict[str, Any]] = []
         self._counters_buf: List[Tuple[int, str, float]] = []
+        self._ppo_rich_buf: List[Dict[str, Any]] = []
+        # Telemetry-only fallback dedupe:
+        # if the PPO runtime rich queue is empty but last_train_summary advances,
+        # synthesize at most one row per update_seq.
+        self._ppo_rich_last_fallback_update_seq: int = 0
 
         # Headless summary runtime state (additive)
         self._headless_wall_start: Optional[float] = None
@@ -553,6 +567,15 @@ class TelemetrySession:
                 self.headless_summary_path,
                 fieldnames=self._headless_summary_fieldnames(),
                 rows=[],
+            )
+
+        # Dedicated rich PPO diagnostics CSV (append-safe; created only if enabled)
+        if self.enabled and self.ppo_rich_csv_enabled and (not self.ppo_training_telemetry_path.exists()):
+            self._append_csv_rows(
+                self.ppo_training_telemetry_path,
+                fieldnames=self._ppo_rich_fieldnames(),
+                rows=[],
+                strict_schema=self.telemetry_append_schema_strict,
             )
 
         # Rare mutation event CSV (append, low frequency)
@@ -748,7 +771,13 @@ class TelemetrySession:
         if agent_id not in self._life:
             self._anomaly(f"{context}: missing birth for agent_id={agent_id}")
 
-    def _append_csv_rows(self, path: Path, fieldnames: List[str], rows: List[Dict[str, Any]]) -> None:
+    def _append_csv_rows(
+        self,
+        path: Path,
+        fieldnames: List[str],
+        rows: List[Dict[str, Any]],
+        strict_schema: bool = False,
+    ) -> None:
         """
         Append rows to a CSV file, writing the header if the file does not exist.
 
@@ -763,13 +792,33 @@ class TelemetrySession:
         - DictWriter enforces consistent column order via fieldnames.
         """
         path.parent.mkdir(parents=True, exist_ok=True)
-        write_header = not path.exists()
+        exists = path.exists()
+        write_header = (not exists) or (exists and path.stat().st_size == 0)
+
+        if exists and (not write_header) and strict_schema:
+            try:
+                with path.open("r", newline="", encoding="utf-8") as rf:
+                    r = csv.reader(rf)
+                    existing_header = next(r, None)
+                if existing_header is not None and list(existing_header) != list(fieldnames):
+                    raise RuntimeError(
+                        f"[telemetry] CSV header mismatch for append: {path.name} "
+                        f"existing={existing_header} new={list(fieldnames)}"
+                    )
+            except RuntimeError:
+                raise
+            except Exception as e:
+                raise RuntimeError(f"[telemetry] Failed to validate CSV header for {path.name}: {e}")
 
         with path.open("a", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=fieldnames)
             if write_header:
                 w.writeheader()
             for r in rows:
+                # Emit only declared fields; stable schema + tolerant to extra keys.
+                # Missing fields become empty strings (analysis-friendly CSV).
+                if set(r.keys()) != set(fieldnames):
+                    r = {k: r.get(k, "") for k in fieldnames}
                 w.writerow(r)
 
     def _event_schema_version_int(self) -> int:
@@ -1375,6 +1424,230 @@ class TelemetrySession:
         self._registry = registry
         self._stats = stats
         self._ppo_runtime = ppo_runtime
+
+    def _ppo_rich_fieldnames(self) -> List[str]:
+        """
+        Stable schema for dedicated PPO training diagnostics CSV.
+        This file is append-only and intentionally explicit for downstream analysis.
+        """
+        return [
+            "schema_version",
+            "observed_tick",
+            "wall_time_unix",
+            "wall_time_iso",
+            "row_seq",
+            "granularity_requested",
+            "granularity_effective",
+            "update_seq",
+            "ppo_step",
+            "trained_slots",
+            "samples",
+            "optimizer_steps",
+            "epochs_run_total",
+            "lr_before_mean",
+            "lr_after_mean",
+            "loss_pi_mean",
+            "loss_v_mean",
+            "loss_ent_mean",
+            "loss_total_mean",
+            "entropy_mean",
+            "approx_kl_mean",
+            "approx_kl_max",
+            "clip_frac_mean",
+            "clip_frac_max",
+            "ratio_mean",
+            "ratio_std",
+            "ratio_min",
+            "ratio_max",
+            "adv_norm_mean",
+            "adv_norm_std",
+            "adv_norm_min",
+            "adv_norm_max",
+            "ret_mean",
+            "ret_std",
+            "ret_min",
+            "ret_max",
+            "rew_mean",
+            "rew_std",
+            "rew_min",
+            "rew_max",
+            "value_old_mean",
+            "value_old_std",
+            "value_old_min",
+            "value_old_max",
+            "value_pred_mean",
+            "value_pred_std",
+            "value_pred_min",
+            "value_pred_max",
+            "grad_norm_mean",
+            "grad_norm_max",
+            "explained_var_mean",
+            "explained_var_min",
+            "explained_var_max",
+            "mask_valid_actions_mean",
+            "mask_valid_actions_min",
+            "mask_valid_actions_max",
+            "clip_epsilon",
+            "target_kl",
+            "ppo_epochs_cfg",
+            "ppo_minibatches_cfg",
+            "max_grad_norm_cfg",
+            "notes",
+        ]
+
+    def _drain_and_flush_ppo_rich_telemetry(self, *, observed_tick: Optional[int] = None, force: bool = False) -> None:
+        """
+        Pull pending PPO training diagnostic rows from PPO runtime and append them to
+        telemetry/ppo_training_telemetry.csv in an append-safe way.
+        """
+        if (not self.enabled) or (not self.ppo_rich_csv_enabled):
+            return
+
+        p = getattr(self, "_ppo_runtime", None)
+        if p is None:
+            return
+
+        drain_fn = getattr(p, "drain_rich_telemetry_rows", None)
+        if not callable(drain_fn):
+            return
+
+        try:
+            pending = drain_fn()
+        except Exception as e:
+            self._anomaly(f"ppo rich telemetry drain failed: {e}")
+            return
+        # Telemetry-only fallback path:
+        # If PPO training summary advanced but no rich row was queued/drained, synthesize one row.
+        # This keeps telemetry resilient without changing PPO optimizer/training semantics.
+        if not pending:
+            try:
+                last_summary = getattr(p, "last_train_summary", None)
+                if isinstance(last_summary, dict):
+                    last_u = int(float(last_summary.get("update_seq", 0) or 0))
+                    if last_u > int(self._ppo_rich_last_fallback_update_seq):
+                        try:
+                            row_seq_val = float(getattr(p, "_rich_telemetry_row_seq", 0))
+                        except Exception:
+                            row_seq_val = ""
+
+                        pending = [{
+                            "row_seq": row_seq_val,
+                            "granularity_requested": str(getattr(self, "ppo_rich_level", "update")),
+                            "granularity_effective": "update",
+                            **dict(last_summary),
+                            "notes": "telemetry_fallback_from_last_train_summary",
+                        }]
+                        self._ppo_rich_last_fallback_update_seq = last_u
+            except Exception as e:
+                self._anomaly(f"ppo rich telemetry fallback synth failed: {e}")
+
+        if pending:
+            try:
+                import datetime as _dt
+                import time as _time
+
+                fields = self._ppo_rich_fieldnames()
+                wall_unix = float(_time.time())
+                wall_iso = _dt.datetime.utcfromtimestamp(wall_unix).isoformat(timespec="seconds") + "Z"
+                obs_tick = (int(observed_tick) if observed_tick is not None else "")
+
+                for row in pending:
+                    if not isinstance(row, dict):
+                        continue
+                    out = dict(row)
+                    out.setdefault("schema_version", self.schema_version)
+                    out.setdefault("observed_tick", obs_tick)
+                    out.setdefault("wall_time_unix", wall_unix)
+                    out.setdefault("wall_time_iso", wall_iso)
+                    self._ppo_rich_buf.append({k: out.get(k, "") for k in fields})
+            except Exception as e:
+                self._anomaly(f"ppo rich telemetry normalize failed: {e}")
+
+        if self._ppo_rich_buf and (force or (len(self._ppo_rich_buf) >= int(self.ppo_rich_flush_every))):
+            rows = list(self._ppo_rich_buf)
+            fields = self._ppo_rich_fieldnames()
+
+            try:
+                self._append_csv_rows(
+                    self.ppo_training_telemetry_path,
+                    fieldnames=fields,
+                    rows=rows,
+                    strict_schema=self.telemetry_append_schema_strict,
+                )
+                self._ppo_rich_buf.clear()
+
+            except Exception as e:
+                # Minimal, localized recovery path:
+                # On resume-in-place, ppo_training_telemetry.csv may exist with an older header.
+                # Strict append then fails silently (because _anomaly is silent by default).
+                # We auto-roll to a sibling file and continue logging instead of dropping rows.
+                msg = str(e)
+                recovered = False
+
+                try:
+                    if ("CSV header mismatch for append" in msg) and ("ppo_training_telemetry.csv" in msg):
+                        alt_path = self.telemetry_dir / "ppo_training_telemetry_resume.csv"
+                        primary_path = self.ppo_training_telemetry_path
+                        target_path = self.telemetry_dir / "ppo_training_telemetry_resume.csv"
+                        rewrote_header_only_primary = False
+
+                        # If the primary PPO rich CSV is header-only (no data rows), it is safe to
+                        # reinitialize it in-place with the current schema and keep the canonical filename.
+                        try:
+                            if primary_path.exists():
+                                with primary_path.open("r", newline="", encoding="utf-8") as rf:
+                                    r = csv.reader(rf)
+                                    _ = next(r, None)  # existing header
+                                    first_data = next(r, None)
+                                if first_data is None:
+                                    # Truncate so _append_csv_rows() can recreate header with current schema.
+                                    with primary_path.open("w", newline="", encoding="utf-8"):
+                                        pass
+                                    target_path = primary_path
+                                    rewrote_header_only_primary = True
+                        except Exception:
+                            # Fall back to sibling rollover path below.
+                            pass
+
+                        # True schema mismatch with existing data: roll to sibling and make it sticky
+                        # so subsequent flushes don't repeatedly retry the mismatched primary file.
+                        if target_path != primary_path:
+                            self.ppo_training_telemetry_path = target_path
+                        # Append to a fresh sibling file with current schema (safe; no corruption of old file).
+                        self._append_csv_rows(
+                            target_path,
+                            fieldnames=fields,
+                            rows=rows,
+                            strict_schema=False,
+                        )
+                        self._ppo_rich_buf.clear()
+                        recovered = True
+                        tail = (
+                            "rewrote header-only ppo_training_telemetry.csv in place and continued."
+                            if rewrote_header_only_primary
+                            else f"writing to {target_path.name} (current schema) instead."
+                        )
+                        # Tiny one-time style print is okay here because this is an actual data-loss prevention path.
+                        try:
+                            print(
+                                "[telemetry] ppo rich CSV header mismatch on resume; "
+                                + tail
+                            )
+                        except Exception:
+                            pass
+                except Exception as e2:
+                    try:
+                        print(f"[telemetry] ppo rich telemetry recovery failed: {type(e2).__name__}: {e2}")
+                    except Exception:
+                        pass
+
+                if not recovered:
+                    # Surface once (still keep _anomaly behavior)
+                    try:
+                        print(f"[telemetry] ppo rich telemetry flush failed: {type(e).__name__}: {e}")
+                    except Exception:
+                        pass
+                    self._anomaly(f"ppo rich telemetry flush failed: {e}")
 
     def _headless_summary_fieldnames(self) -> List[str]:
         fields = [
@@ -2365,6 +2638,9 @@ class TelemetrySession:
 
         self._last_tick_seen = int(tick)
 
+        # Drain PPO training rows every tick so repeated resumes append into one diagnostics CSV.
+        self._drain_and_flush_ppo_rich_telemetry(observed_tick=int(tick), force=False)
+
         if self.validate_every > 0 and (int(tick) % int(self.validate_every) == 0):
             self.validate()
 
@@ -2477,6 +2753,7 @@ class TelemetrySession:
         _safe("agent_life_snapshot", self._flush_agent_life_snapshot)
         _safe("move_summary", self._flush_move_summary)
         _safe("counters", self._flush_counters)
+        _safe("ppo_rich_csv", lambda: self._drain_and_flush_ppo_rich_telemetry(observed_tick=self._last_tick_seen, force=True))
 
         if self._last_tick_seen is not None and self.tick_summary_every > 0:
             _safe("tick_summary_final", lambda: self._write_tick_summary(tick=self._last_tick_seen))
@@ -2484,3 +2761,4 @@ class TelemetrySession:
         if errors:
             print("[telemetry] Close encountered errors:\n  - " + "\n  - ".join(errors))
     # =============================================================================
+

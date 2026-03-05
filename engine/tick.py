@@ -660,7 +660,32 @@ class TickEngine:
         # post-death readers do not observe "death event emitted but agent still alive on grid".
         gx = self._as_long(data[dead_idx, COL_X])
         gy = self._as_long(data[dead_idx, COL_Y])
+                # Back-compat structured death log for ResultsWriter -> dead_agents_log.csv.
+        # Legacy schema requires a killer_team field, so we only emit entries for
+        # combat deaths where kill credit is enabled (team-level attribution is known).
+        if death_cause == "combat" and credit_kills:
+            try:
+                rec_fn = getattr(self.stats, "record_death_entry", None)
+                if callable(rec_fn):
+                    n = min(len(dead_ids), len(dead_team_list), int(gx.numel()), int(gy.numel()))
+                    for i in range(n):
+                        victim_team = int(dead_team_list[i])
+                        if victim_team not in (2, 3):
+                            continue  # defensive: unknown team encoding
 
+                        # Team-level attribution only (legacy CSV stores killer_team, not killer_id)
+                        killer_team = 3 if victim_team == 2 else 2
+
+                        rec_fn(
+                            agent_id=int(dead_ids[i]),
+                            team_id_val=float(victim_team),
+                            x=int(gx[i].item()),
+                            y=int(gy[i].item()),
+                            killer_team_id_val=float(killer_team),
+                        )
+            except Exception:
+                # Fail-safe: legacy death CSV must never break the simulation tick.
+                pass
         # Clear occupancy / hp / slot-id in grid first (spatial truth for fast queries).
         self.grid[0][gy, gx], self.grid[1][gy, gx], self.grid[2][gy, gx] = self._g0, self._g0, self._gneg
 
@@ -957,7 +982,7 @@ class TickEngine:
         actions = torch.zeros_like(alive_idx, dtype=torch.long)
 
         # PPO record buffers (only used if PPO enabled)
-        rec_agent_ids, rec_obs, rec_logits, rec_values, rec_actions, rec_teams = [], [], [], [], [], []
+        rec_agent_ids, rec_obs, rec_logits, rec_values, rec_actions, rec_action_masks, rec_teams = [], [], [], [], [], [], []
 
         # ---------------------------------------------------------------------
         # 3) AI DECISION TIME (bucketed inference)
@@ -984,6 +1009,7 @@ class TickEngine:
                 rec_logits.append(logits32)
                 rec_values.append(vals)
                 rec_actions.append(a)
+                rec_action_masks.append(mask[loc])
                 rec_teams.append(data[bucket.indices, COL_TEAM])
 
             actions[loc] = a
@@ -1777,6 +1803,7 @@ class TickEngine:
                     actions=torch.cat(rec_actions),
                     rewards=final_rewards,
                     done=(data[ppo_slot_ids, COL_ALIVE] <= 0.5),
+                    action_masks=torch.cat(rec_action_masks),
                     bootstrap_values=bootstrap_values,
                 )
 

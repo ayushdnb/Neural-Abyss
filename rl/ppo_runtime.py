@@ -86,10 +86,11 @@ class _Buf:
     """
     obs: List[torch.Tensor]          # observations (obs_dim,)
     act: List[torch.Tensor]          # actions taken (scalar)
-    logp: List[torch.Tensor]         # log-probabilities of those actions (scalar)
-    val: List[torch.Tensor]          # value estimates from the critic (scalar)
-    rew: List[torch.Tensor]          # rewards received (scalar)
+    logp: List[torch.Tensor]         # log-probabilities of those actions (scalar, fp32)
+    val: List[torch.Tensor]          # value estimates from the critic (scalar, fp32)
+    rew: List[torch.Tensor]          # rewards received (scalar, fp32)
     done: List[torch.Tensor]         # done flags (episode end) (bool)
+    act_mask: List[torch.Tensor]     # legal-action mask used during rollout sampling (bool, shape=(act_dim,))
     bootstrap: Optional[torch.Tensor] = None  # V(s_{t+1}) for the last step of a rollout window
 
 
@@ -182,6 +183,22 @@ class PerAgentPPORuntime:
         self.last_train_summary: Optional[Dict[str, float]] = None
         self._train_update_seq: int = 0
 
+        # Dedicated rich PPO telemetry rows (append-only queue drained by TelemetrySession).
+        # Kept lightweight and observational only.
+        self._rich_telemetry_rows_pending: List[Dict[str, Any]] = []
+        self._rich_telemetry_row_seq: int = 0
+
+    def drain_rich_telemetry_rows(self) -> List[Dict[str, Any]]:
+        """
+        Return and clear pending rich PPO telemetry rows.
+        TelemetrySession polls this periodically and appends to CSV.
+        """
+        if not self._rich_telemetry_rows_pending:
+            return []
+        rows = self._rich_telemetry_rows_pending
+        self._rich_telemetry_rows_pending = []
+        return rows
+
     # ------------------------------------------------------------------
     # Shape & device assertions (fail loudly on mismatch)
     # ------------------------------------------------------------------
@@ -192,6 +209,7 @@ class PerAgentPPORuntime:
         logits: torch.Tensor,
         values: torch.Tensor,
         actions: torch.Tensor,
+        action_masks: Optional[torch.Tensor] = None,
     ) -> None:
         """
         Verify that all tensors have expected dimensions and are on the correct device.
@@ -237,6 +255,17 @@ class PerAgentPPORuntime:
         # actions must be (B,)
         if actions.dim() != 1 or int(actions.size(0)) != B:
             raise RuntimeError(f"[ppo] actions must be (B,), got {tuple(actions.shape)}")
+
+        # action_masks (optional) must be (B, act_dim) bool-like and on same device.
+        if action_masks is not None:
+            if action_masks.device != dev:
+                raise RuntimeError(
+                    f"[ppo] action_masks device mismatch: got {action_masks.device}, expected {dev}"
+                )
+            if action_masks.dim() != 2 or int(action_masks.size(0)) != B or int(action_masks.size(1)) != int(self.act_dim):
+                raise RuntimeError(
+                    f"[ppo] action_masks must be (B,{int(self.act_dim)}), got {tuple(action_masks.shape)}"
+                )
 
     def _assert_no_optimizer_sharing(self, aids: List[int]) -> None:
         """
@@ -318,7 +347,7 @@ class PerAgentPPORuntime:
         At training time we stack lists into batched tensors.
         """
         if aid not in self._buf:
-            self._buf[aid] = _Buf([], [], [], [], [], [])
+            self._buf[aid] = _Buf([], [], [], [], [], [], [])
         return self._buf[aid]
 
     def _get_opt(self, aid: int, model: nn.Module) -> optim.Optimizer:
@@ -364,6 +393,7 @@ class PerAgentPPORuntime:
         actions: torch.Tensor,
         rewards: torch.Tensor,
         done: torch.Tensor,
+        action_masks: Optional[torch.Tensor] = None,
         bootstrap_values: Optional[torch.Tensor] = None,
     ) -> None:
         """
@@ -386,11 +416,28 @@ class PerAgentPPORuntime:
           can bootstrap correctly at the boundary.
         """
         # Validate shapes/devices early.
-        self._assert_record_shapes(agent_ids, obs, logits, values, actions)
+        self._assert_record_shapes(agent_ids, obs, logits, values, actions, action_masks=action_masks)
 
-        # Compute log probabilities of chosen actions:
-        # logp(a|s) = log_softmax(logits)[a]
-        logp_a = F.log_softmax(logits, dim=-1).gather(1, actions.view(-1, 1)).squeeze(1)
+        if action_masks is None:
+            # Backward-compatible fallback for callers not yet passing masks.
+            action_masks = torch.ones(
+                (int(actions.size(0)), int(self.act_dim)),
+                device=logits.device,
+                dtype=torch.bool,
+            )
+        else:
+            action_masks = action_masks.to(dtype=torch.bool)
+
+        if not bool(action_masks.any(dim=-1).all().item()):
+            raise RuntimeError("[ppo] action_masks contains a row with no legal actions")
+        ar = torch.arange(actions.numel(), device=actions.device)
+        if not bool(action_masks[ar, actions.long()].all().item()):
+            raise RuntimeError("[ppo] chosen action is illegal under rollout action_masks")
+
+        # Compute log probabilities of chosen actions under the SAME masked rollout policy
+        # and keep PPO bookkeeping in fp32.
+        logits_masked = self._mask_logits(logits, action_masks)
+        logp_a = F.log_softmax(logits_masked.to(torch.float32), dim=-1).gather(1, actions.view(-1, 1)).squeeze(1)
 
         # Append each agent transition into its own buffer.
         for i in range(agent_ids.numel()):
@@ -398,18 +445,19 @@ class PerAgentPPORuntime:
             b = self._get_buf(aid)
 
             b.obs.append(obs[i])
-            b.act.append(actions[i])
-            b.logp.append(logp_a[i])
+            b.act.append(actions[i].detach())
+            b.logp.append(logp_a[i].detach().to(torch.float32))
 
             # Ensure value is stored as a (1,) tensor for consistent concatenation later.
-            b.val.append(values[i].reshape(1))
+            b.val.append(values[i].detach().reshape(1).to(torch.float32))
 
-            b.rew.append(rewards[i])
-            b.done.append(done[i])
+            b.rew.append(rewards[i].detach().to(torch.float32))
+            b.done.append(done[i].detach().to(torch.bool))
+            b.act_mask.append(action_masks[i].detach().to(torch.bool))
 
             # Store bootstrap V(s_{t+1}) if provided.
             if bootstrap_values is not None:
-                b.bootstrap = bootstrap_values[i].detach().reshape(1)
+                b.bootstrap = bootstrap_values[i].detach().reshape(1).to(torch.float32)
 
         # Advance global step.
         self._step += 1
@@ -471,19 +519,78 @@ class PerAgentPPORuntime:
 
         # Additive PPO telemetry aggregation (observational only).
         log_ppo_telem = bool(getattr(config, "TELEMETRY_LOG_PPO", False))
+        rich_ppo_telem = bool(getattr(config, "TELEMETRY_PPO_RICH_CSV", False))
+        rich_level_requested = str(getattr(config, "TELEMETRY_PPO_RICH_LEVEL", "update")).strip().lower()
+        rich_level_effective = "update"  # minimal-disturbance implementation emits update-level rows
+        collect_diag = bool(log_ppo_telem or rich_ppo_telem)
+
+        def _agg_tensor_stats(dst: Optional[Dict[str, Any]], prefix: str, x: torch.Tensor) -> None:
+            if dst is None:
+                return
+            try:
+                t = x.detach().to(torch.float32).reshape(-1)
+                if t.numel() <= 0:
+                    return
+                finite = torch.isfinite(t)
+                if not bool(finite.all().item()):
+                    t = t[finite]
+                    if t.numel() <= 0:
+                        return
+                n = int(t.numel())
+                s = float(t.sum().item())
+                ss = float((t * t).sum().item())
+                mn = float(t.min().item())
+                mx = float(t.max().item())
+            except Exception:
+                return
+
+            dst[f"{prefix}_count"] = int(dst.get(f"{prefix}_count", 0)) + n
+            dst[f"{prefix}_sum"] = float(dst.get(f"{prefix}_sum", 0.0)) + s
+            dst[f"{prefix}_sumsq"] = float(dst.get(f"{prefix}_sumsq", 0.0)) + ss
+            dst[f"{prefix}_min"] = mn if (f"{prefix}_min" not in dst) else min(float(dst[f"{prefix}_min"]), mn)
+            dst[f"{prefix}_max"] = mx if (f"{prefix}_max" not in dst) else max(float(dst[f"{prefix}_max"]), mx)
+
+        def _agg_scalar(dst: Optional[Dict[str, Any]], key: str, value: float) -> None:
+            if dst is None:
+                return
+            try:
+                v = float(value)
+            except Exception:
+                return
+            if not math.isfinite(v):
+                return
+            dst[f"{key}_sum"] = float(dst.get(f"{key}_sum", 0.0)) + v
+            dst[f"{key}_count"] = int(dst.get(f"{key}_count", 0)) + 1
+            dst[f"{key}_min"] = v if (f"{key}_min" not in dst) else min(float(dst[f"{key}_min"]), v)
+            dst[f"{key}_max"] = v if (f"{key}_max" not in dst) else max(float(dst[f"{key}_max"]), v)
+
         agg = {
             "trained_slots": 0,
             "samples": 0,
             "optimizer_steps": 0,
             "epochs_run": 0,
+            # Existing summary fields
             "loss_pi_sum": 0.0,
             "loss_v_sum": 0.0,
             "loss_ent_sum": 0.0,
             "entropy_sum": 0.0,
+            "approx_kl_sum": 0.0,
+            "approx_kl_count": 0,
             "approx_kl_max": 0.0,
             "lr_before_sum": 0.0,
             "lr_after_sum": 0.0,
-        } if log_ppo_telem else None
+            # Rich diagnostics (all additive / observational only)
+            "loss_total_sum": 0.0,
+            "loss_total_count": 0,
+            "clip_frac_sum": 0.0,
+            "clip_frac_count": 0,
+            "clip_frac_max": 0.0,
+            "grad_norm_sum": 0.0,
+            "grad_norm_count": 0,
+            "grad_norm_max": 0.0,
+            "explained_var_sum": 0.0,
+            "explained_var_count": 0,
+        } if collect_diag else None
 
         for aid in aids:
             aid = int(aid)
@@ -508,16 +615,44 @@ class PerAgentPPORuntime:
 
             # Stack rollout lists into tensors:
             # T here is "buffer length" (could be < self.T for flush cases).
-            obs = torch.stack(b.obs)               # (T, obs_dim)
-            act = torch.stack(b.act).long()        # (T,)
-            logp_old = torch.stack(b.logp)         # (T,)
-            val_old = torch.cat(b.val)             # (T,)
-            rew = torch.stack(b.rew)               # (T,)
-            done = torch.stack(b.done).bool()      # (T,)
+            obs = torch.stack(b.obs)                         # (T, obs_dim)
+            act = torch.stack(b.act).long()                  # (T,)
+            logp_old = torch.stack(b.logp).to(torch.float32) # (T,)
+            val_old = torch.cat(b.val).to(torch.float32)     # (T,)
+            rew = torch.stack(b.rew).to(torch.float32)       # (T,)
+            done = torch.stack(b.done).bool()                # (T,)
+
+            # Rollout action masks (new checkpoints). Older checkpoints may not have them.
+            if len(getattr(b, "act_mask", [])) == len(b.obs):
+                act_mask = torch.stack(b.act_mask).bool()    # (T, act_dim)
+            elif len(getattr(b, "act_mask", [])) == 0:
+                # Cannot recover exact rollout masks from old checkpoints (pre-patch schema).
+                # Drop this buffered segment instead of training with mismatched PPO semantics.
+                b.obs.clear()
+                b.act.clear()
+                b.logp.clear()
+                b.val.clear()
+                b.rew.clear()
+                b.done.clear()
+                if hasattr(b, "act_mask"):
+                    b.act_mask.clear()
+                b.bootstrap = None
+                continue
+            else:
+                raise RuntimeError(
+                    f"[ppo] act_mask buffer length mismatch for aid={aid}: "
+                    f"{len(getattr(b, 'act_mask', []))} vs {len(b.obs)}"
+                )
 
             # Compute advantages and returns using GAE.
             last_v = b.bootstrap
             adv, ret = self._gae(rew, val_old, done, last_value=last_v)
+            if adv.dtype != torch.float32 or ret.dtype != torch.float32:
+                raise RuntimeError(f"[ppo] GAE outputs must be float32, got adv={adv.dtype} ret={ret.dtype}")
+            if not bool(torch.isfinite(logp_old).all().item()):
+                raise RuntimeError("[ppo] non-finite logp_old in rollout buffer")
+            if not bool(torch.isfinite(adv).all().item()) or not bool(torch.isfinite(ret).all().item()):
+                raise RuntimeError("[ppo] non-finite adv/ret from GAE")
 
             # Minibatch preparation
             B = int(obs.size(0))
@@ -529,10 +664,23 @@ class PerAgentPPORuntime:
             n_mb = max(1, min(int(self.minibatches), B))
             mb_size = max(1, B // n_mb)
 
+            if collect_diag and agg is not None:
+                _agg_tensor_stats(agg, "rew", rew)
+                _agg_tensor_stats(agg, "adv_norm", adv)
+                _agg_tensor_stats(agg, "ret", ret)
+                _agg_tensor_stats(agg, "value_old", val_old)
+
+            aid_epochs_run = 0
+            aid_optimizer_steps = 0
+            aid_loss_pi_sum = 0.0
+            aid_loss_v_sum = 0.0
+            aid_loss_ent_sum = 0.0
+            aid_entropy_sum = 0.0
+            aid_approx_kl_max = 0.0
             with torch.enable_grad():
                 for _ in range(self.epochs):
-                    if log_ppo_telem:
-                        aid_epochs_run = locals().get("aid_epochs_run", 0) + 1
+                    if collect_diag:
+                        aid_epochs_run += 1
                     # Shuffle indices each epoch.
                     idx = torch.randperm(B, device=obs.device)
 
@@ -548,16 +696,17 @@ class PerAgentPPORuntime:
                         # Gather minibatch tensors
                         obs_mb = obs[mb_idx]
                         act_mb = act[mb_idx]
+                        act_mask_mb = act_mask[mb_idx]
                         logp_old_mb = logp_old[mb_idx].detach()
                         val_old_mb = val_old[mb_idx].detach()
                         adv_mb = adv[mb_idx].detach()
                         ret_mb = ret[mb_idx].detach()
 
-                        # Forward pass on minibatch
-                        logits, values, entropy = self._policy_value(model, obs_mb)
+                        # Forward pass on minibatch (masked policy for PPO consistency)
+                        logits, values, entropy = self._policy_value(model, obs_mb, action_masks=act_mask_mb)
 
-                        # Compute logp under current policy for taken actions
-                        logp = F.log_softmax(logits, dim=-1).gather(1, act_mb.view(-1, 1)).squeeze(1)
+                        # Compute logp under current masked policy for taken actions (fp32 math)
+                        logp = F.log_softmax(logits.to(torch.float32), dim=-1).gather(1, act_mb.view(-1, 1)).squeeze(1)
 
                         # --------------------------------------------------
                         # PPO policy loss (clipped surrogate)
@@ -591,7 +740,11 @@ class PerAgentPPORuntime:
                         loss.backward()
 
                         # Gradient clipping protects against exploding gradients.
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), float(self.max_grad_norm))
+                        grad_norm_raw = torch.nn.utils.clip_grad_norm_(model.parameters(), float(self.max_grad_norm))
+                        if torch.is_tensor(grad_norm_raw):
+                            grad_norm_val = float(grad_norm_raw.detach().item())
+                        else:
+                            grad_norm_val = float(grad_norm_raw)
                         opt.step()
 
                         # Approx KL divergence for early stopping:
@@ -599,14 +752,55 @@ class PerAgentPPORuntime:
                         approx_kl = (logp_old_mb - logp).mean().item()
                         approx_kl_epoch = max(approx_kl_epoch, approx_kl)
 
-                        if log_ppo_telem:
-                            # Observational scalars only; no effect on optimizer semantics.
-                            aid_optimizer_steps = locals().get("aid_optimizer_steps", 0) + 1
-                            aid_loss_pi_sum = locals().get("aid_loss_pi_sum", 0.0) + float(loss_pi.detach().item())
-                            aid_loss_v_sum = locals().get("aid_loss_v_sum", 0.0) + float(loss_v.detach().item())
-                            aid_loss_ent_sum = locals().get("aid_loss_ent_sum", 0.0) + float(loss_ent.detach().item())
-                            aid_entropy_sum = locals().get("aid_entropy_sum", 0.0) + float(entropy.mean().detach().item())
-                            aid_approx_kl_max = max(float(locals().get("aid_approx_kl_max", 0.0)), float(approx_kl))
+                        if collect_diag and agg is not None:
+                            ratio_det = ratio.detach().to(torch.float32)
+                            v_pred_det = v_pred.detach().to(torch.float32)
+                            _agg_tensor_stats(agg, "ratio", ratio_det)
+                            _agg_tensor_stats(agg, "value_pred", v_pred_det)
+                            _agg_tensor_stats(agg, "mask_valid_actions", act_mask_mb.to(torch.float32).sum(dim=-1))
+
+                            clip_frac = float(((ratio_det - 1.0).abs() > float(self.clip)).to(torch.float32).mean().item())
+                            agg["clip_frac_sum"] += clip_frac
+                            agg["clip_frac_count"] += 1
+                            agg["clip_frac_max"] = max(float(agg["clip_frac_max"]), clip_frac)
+
+                            agg["loss_total_sum"] += float(loss.detach().item())
+                            agg["loss_total_count"] += 1
+                            agg["approx_kl_sum"] += float(approx_kl)
+                            agg["approx_kl_count"] += 1
+
+                            if math.isfinite(grad_norm_val):
+                                agg["grad_norm_sum"] += grad_norm_val
+                                agg["grad_norm_count"] += 1
+                                agg["grad_norm_max"] = max(float(agg["grad_norm_max"]), grad_norm_val)
+
+                            # Explained variance (current minibatch, using current value predictions)
+                            try:
+                                ret_var_t = torch.var(ret_mb.detach().to(torch.float32), unbiased=False)
+                                ret_var = float(ret_var_t.item())
+                                if ret_var > 1e-12:
+                                    resid_var = float(torch.var((ret_mb.detach().to(torch.float32) - v_pred_det), unbiased=False).item())
+                                    ev = 1.0 - (resid_var / ret_var)
+                                    if math.isfinite(ev):
+                                        _agg_scalar(agg, "explained_var", ev)
+                            except Exception:
+                                pass
+
+                        if collect_diag:
+                            # NOTE:
+                            # Rich PPO CSV (TELEMETRY_PPO_RICH_CSV) also depends on these per-step
+                            # counters/sums. If we gate on `log_ppo_telem` only, then runs with:
+                            #   TELEMETRY_LOG_PPO = False
+                            #   TELEMETRY_PPO_RICH_CSV = True
+                            # will keep aid_optimizer_steps == 0 and never emit rich rows.
+                            #
+                            # This remains observational-only and does not affect optimizer semantics.
+                            aid_optimizer_steps += 1
+                            aid_loss_pi_sum += float(loss_pi.detach().item())
+                            aid_loss_v_sum += float(loss_v.detach().item())
+                            aid_loss_ent_sum += float(loss_ent.detach().item())
+                            aid_entropy_sum += float(entropy.mean().detach().item())
+                            aid_approx_kl_max = max(float(aid_approx_kl_max), float(approx_kl))
 
                     # Early stopping if KL exceeds target
                     if self.target_kl > 0.0 and approx_kl_epoch > self.target_kl:
@@ -617,18 +811,18 @@ class PerAgentPPORuntime:
                 self._sched[aid].step()
             lr_after = float(opt.param_groups[0]["lr"]) if len(getattr(opt, "param_groups", [])) > 0 else lr_before
 
-            if log_ppo_telem:
-                n_steps = int(locals().get("aid_optimizer_steps", 0))
+            if collect_diag and agg is not None:
+                n_steps = int(aid_optimizer_steps)
                 if n_steps > 0:
                     agg["trained_slots"] += 1
                     agg["samples"] += int(B)
                     agg["optimizer_steps"] += n_steps
-                    agg["epochs_run"] += int(locals().get("aid_epochs_run", 0))
-                    agg["loss_pi_sum"] += float(locals().get("aid_loss_pi_sum", 0.0))
-                    agg["loss_v_sum"] += float(locals().get("aid_loss_v_sum", 0.0))
-                    agg["loss_ent_sum"] += float(locals().get("aid_loss_ent_sum", 0.0))
-                    agg["entropy_sum"] += float(locals().get("aid_entropy_sum", 0.0))
-                    agg["approx_kl_max"] = max(float(agg["approx_kl_max"]), float(locals().get("aid_approx_kl_max", 0.0)))
+                    agg["epochs_run"] += int(aid_epochs_run)
+                    agg["loss_pi_sum"] += float(aid_loss_pi_sum)
+                    agg["loss_v_sum"] += float(aid_loss_v_sum)
+                    agg["loss_ent_sum"] += float(aid_loss_ent_sum)
+                    agg["entropy_sum"] += float(aid_entropy_sum)
+                    agg["approx_kl_max"] = max(float(agg["approx_kl_max"]), float(aid_approx_kl_max))
                     agg["lr_before_sum"] += float(lr_before)
                     agg["lr_after_sum"] += float(lr_after)
 
@@ -639,14 +833,29 @@ class PerAgentPPORuntime:
             b.val.clear()
             b.rew.clear()
             b.done.clear()
+            b.act_mask.clear()
             b.bootstrap = None
 
-        # Publish last train summary only after successful training work.
-        if log_ppo_telem and agg is not None and int(agg["trained_slots"]) > 0 and int(agg["optimizer_steps"]) > 0:
+        def _mean_from_agg(prefix: str) -> float:
+            c = int(agg.get(f"{prefix}_count", 0)) if agg is not None else 0
+            return (float(agg.get(f"{prefix}_sum", 0.0)) / float(c)) if c > 0 else float("nan")
+
+        def _std_from_agg(prefix: str) -> float:
+            c = int(agg.get(f"{prefix}_count", 0)) if agg is not None else 0
+            if c <= 0:
+                return float("nan")
+            s = float(agg.get(f"{prefix}_sum", 0.0))
+            ss = float(agg.get(f"{prefix}_sumsq", 0.0))
+            m = s / float(c)
+            var = max(0.0, (ss / float(c)) - (m * m))
+            return math.sqrt(var)
+
+        # Publish/update telemetry summary only after successful training work.
+        if collect_diag and agg is not None and int(agg["trained_slots"]) > 0 and int(agg["optimizer_steps"]) > 0:
             self._train_update_seq += 1
             slots = max(1, int(agg["trained_slots"]))
             steps = max(1, int(agg["optimizer_steps"]))
-            self.last_train_summary = {
+            summary_row = {
                 "update_seq": float(self._train_update_seq),
                 "ppo_step": float(self._step),
                 "trained_slots": float(agg["trained_slots"]),
@@ -657,10 +866,71 @@ class PerAgentPPORuntime:
                 "loss_v_mean": float(agg["loss_v_sum"]) / float(steps),
                 "loss_ent_mean": float(agg["loss_ent_sum"]) / float(steps),
                 "entropy_mean": float(agg["entropy_sum"]) / float(steps),
+                "loss_total_mean": (float(agg["loss_total_sum"]) / float(max(1, int(agg["loss_total_count"]))))
+                    if int(agg.get("loss_total_count", 0)) > 0 else float("nan"),
+                "approx_kl_mean": (float(agg["approx_kl_sum"]) / float(max(1, int(agg["approx_kl_count"]))))
+                    if int(agg.get("approx_kl_count", 0)) > 0 else float("nan"),
                 "approx_kl_max": float(agg["approx_kl_max"]),
                 "lr_before_mean": float(agg["lr_before_sum"]) / float(slots),
                 "lr_after_mean": float(agg["lr_after_sum"]) / float(slots),
+                "clip_frac_mean": (float(agg["clip_frac_sum"]) / float(max(1, int(agg["clip_frac_count"]))))
+                    if int(agg.get("clip_frac_count", 0)) > 0 else float("nan"),
+                "clip_frac_max": float(agg.get("clip_frac_max", 0.0)),
+                "ratio_mean": _mean_from_agg("ratio"),
+                "ratio_std": _std_from_agg("ratio"),
+                "ratio_min": float(agg.get("ratio_min", float("nan"))),
+                "ratio_max": float(agg.get("ratio_max", float("nan"))),
+                "adv_norm_mean": _mean_from_agg("adv_norm"),
+                "adv_norm_std": _std_from_agg("adv_norm"),
+                "adv_norm_min": float(agg.get("adv_norm_min", float("nan"))),
+                "adv_norm_max": float(agg.get("adv_norm_max", float("nan"))),
+                "ret_mean": _mean_from_agg("ret"),
+                "ret_std": _std_from_agg("ret"),
+                "ret_min": float(agg.get("ret_min", float("nan"))),
+                "ret_max": float(agg.get("ret_max", float("nan"))),
+                "rew_mean": _mean_from_agg("rew"),
+                "rew_std": _std_from_agg("rew"),
+                "rew_min": float(agg.get("rew_min", float("nan"))),
+                "rew_max": float(agg.get("rew_max", float("nan"))),
+                "value_old_mean": _mean_from_agg("value_old"),
+                "value_old_std": _std_from_agg("value_old"),
+                "value_old_min": float(agg.get("value_old_min", float("nan"))),
+                "value_old_max": float(agg.get("value_old_max", float("nan"))),
+                "value_pred_mean": _mean_from_agg("value_pred"),
+                "value_pred_std": _std_from_agg("value_pred"),
+                "value_pred_min": float(agg.get("value_pred_min", float("nan"))),
+                "value_pred_max": float(agg.get("value_pred_max", float("nan"))),
+                "grad_norm_mean": (float(agg["grad_norm_sum"]) / float(max(1, int(agg["grad_norm_count"]))))
+                    if int(agg.get("grad_norm_count", 0)) > 0 else float("nan"),
+                "grad_norm_max": float(agg.get("grad_norm_max", float("nan"))),
+                "explained_var_mean": _mean_from_agg("explained_var"),
+                "explained_var_min": float(agg.get("explained_var_min", float("nan"))),
+                "explained_var_max": float(agg.get("explained_var_max", float("nan"))),
+                "mask_valid_actions_mean": _mean_from_agg("mask_valid_actions"),
+                "mask_valid_actions_min": float(agg.get("mask_valid_actions_min", float("nan"))),
+                "mask_valid_actions_max": float(agg.get("mask_valid_actions_max", float("nan"))),
+                "clip_epsilon": float(self.clip),
+                "target_kl": float(self.target_kl),
+                "ppo_epochs_cfg": float(self.epochs),
+                "ppo_minibatches_cfg": float(self.minibatches),
+                "max_grad_norm_cfg": float(self.max_grad_norm),
             }
+            # Preserve existing lightweight cache used by telemetry_summary.csv.
+            self.last_train_summary = dict(summary_row)
+
+            # Dedicated rich CSV row (separate file; append-safe and drained by TelemetrySession).
+            if rich_ppo_telem:
+                self._rich_telemetry_row_seq += 1
+                note = ""
+                if rich_level_requested != "update":
+                    note = f"requested_granularity={rich_level_requested}; emitted=update (minimal patch path)"
+                self._rich_telemetry_rows_pending.append({
+                    "row_seq": float(self._rich_telemetry_row_seq),
+                    "granularity_requested": rich_level_requested,
+                    "granularity_effective": rich_level_effective,
+                    **summary_row,
+                    "notes": note,
+                })
 
     def _train_window_and_clear(self) -> None:
         """
@@ -708,6 +978,7 @@ class PerAgentPPORuntime:
                 "val":  cpuize(list(b.val)),
                 "rew":  cpuize(list(b.rew)),
                 "done": cpuize(list(b.done)),
+                "act_mask": cpuize(list(b.act_mask)),
                 # bootstrap not saved (ephemeral / window-boundary specific)
             }
 
@@ -716,6 +987,8 @@ class PerAgentPPORuntime:
 
         return {
             "step":  int(self._step),
+            "train_update_seq": int(self._train_update_seq),
+            "rich_telemetry_row_seq": int(self._rich_telemetry_row_seq),
             "buf":   buf_out,
             "opt":   opt_out,
             "sched": sched_out,
@@ -755,6 +1028,8 @@ class PerAgentPPORuntime:
 
         # Restore global step
         self._step = int(state.get("step", 0))
+        self._train_update_seq = int(state.get("train_update_seq", 0))
+        self._rich_telemetry_row_seq = int(state.get("rich_telemetry_row_seq", 0))
 
         # Restore buffers
         self._buf.clear()
@@ -768,6 +1043,7 @@ class PerAgentPPORuntime:
                 val=to_dev(payload.get("val", [])),
                 rew=to_dev(payload.get("rew", [])),
                 done=to_dev(payload.get("done", [])),
+                act_mask=to_dev(payload.get("act_mask", [])),
             )
 
         # Restore optimizers and schedulers
@@ -804,6 +1080,23 @@ class PerAgentPPORuntime:
     # ------------------------------------------------------------------
     # Helper methods for PPO computations
     # ------------------------------------------------------------------
+    def _mask_logits(self, logits: torch.Tensor, action_masks: torch.Tensor) -> torch.Tensor:
+        """
+        Apply rollout legality mask to policy logits.
+        action_masks=True means legal action.
+        """
+        if logits.dim() != 2:
+            raise RuntimeError(f"[ppo] logits must be (B,A) for masking, got {tuple(logits.shape)}")
+        if action_masks.dim() != 2 or tuple(action_masks.shape) != tuple(logits.shape):
+            raise RuntimeError(
+                f"[ppo] action_masks shape mismatch: logits={tuple(logits.shape)} masks={tuple(action_masks.shape)}"
+            )
+        masks_bool = action_masks.to(device=logits.device, dtype=torch.bool)
+        if not bool(masks_bool.any(dim=-1).all().item()):
+            raise RuntimeError("[ppo] action mask row has no legal actions")
+        neg = torch.tensor(torch.finfo(logits.dtype).min, device=logits.device, dtype=logits.dtype)
+        return torch.where(masks_bool, logits, neg)
+
     def _gae(
         self,
         rewards: torch.Tensor,
@@ -842,33 +1135,39 @@ class PerAgentPPORuntime:
           do not contribute. The factor (1 - done_t) zeros them out.
         - At the final time step, V(s_{t+1}) is unknown unless bootstrapped.
         """
-        T = rewards.numel()
-        adv = torch.zeros_like(rewards)
-        last_gae = rewards.new_zeros(())
+        # PPO bookkeeping/GAE math is intentionally forced to fp32 even when
+        # model forward/backward may use AMP half precision.
+        rewards32 = rewards.detach().to(torch.float32)
+        values32 = values.detach().to(torch.float32)
+        dones_b = dones.detach().to(torch.bool)
+
+        T = rewards32.numel()
+        adv = torch.zeros((T,), device=values32.device, dtype=torch.float32)
+        last_gae = torch.zeros((), device=values32.device, dtype=torch.float32)
 
         if last_value is not None:
-            last_value_t = last_value.detach().to(device=values.device, dtype=values.dtype).reshape(())
+            last_value_t = last_value.detach().to(device=values32.device, dtype=torch.float32).reshape(())
         else:
-            last_value_t = values.new_zeros(())
+            last_value_t = torch.zeros((), device=values32.device, dtype=torch.float32)
 
         for t in reversed(range(T)):
             # mask = 0 if done, else 1 (kept as tensor to avoid GPU->CPU sync)
-            mask = (~dones[t]).to(dtype=values.dtype)
+            mask = (~dones_b[t]).to(dtype=torch.float32)
 
             # Choose next value:
             # - interior steps: values[t+1]
             # - final step: bootstrap value (if provided), else 0
             if t < T - 1:
-                next_val_t = values[t + 1]
+                next_val_t = values32[t + 1]
             else:
                 next_val_t = last_value_t
 
-            delta = rewards[t] + self.gamma * next_val_t * mask - values[t]
+            delta = rewards32[t] + self.gamma * next_val_t * mask - values32[t]
             last_gae = delta + self.gamma * self.lam * mask * last_gae
             adv[t] = last_gae
 
         # Return targets:
-        ret = adv + values
+        ret = adv + values32
 
         # Advantage normalization stabilizes training:
         # It rescales advantages to roughly zero-mean, unit-variance.
@@ -880,7 +1179,8 @@ class PerAgentPPORuntime:
     def _policy_value(
         self,
         model: nn.Module,
-        obs: torch.Tensor
+        obs: torch.Tensor,
+        action_masks: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Run model to obtain logits, values, and policy entropy.
@@ -906,9 +1206,13 @@ class PerAgentPPORuntime:
             entropy: (B,)
         """
         logits, values = model(obs)
-        values = values.squeeze(-1)  # enforce (B,)
+        values = values.squeeze(-1).to(torch.float32)  # enforce (B,) and keep PPO loss math in fp32
 
-        logp = F.log_softmax(logits, dim=-1)
+        if action_masks is not None:
+            logits = self._mask_logits(logits, action_masks)
+
+        # Compute entropy in fp32 for numerical stability (especially under AMP).
+        logp = F.log_softmax(logits.to(torch.float32), dim=-1)
         entropy = -(logp.exp() * logp).sum(-1)
 
-        return logits, values, entropy  
+        return logits, values, entropy

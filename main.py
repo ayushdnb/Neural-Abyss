@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 Infinite War Simulation – Main entry point
 ==========================================
@@ -23,25 +23,11 @@ Instead it *coordinates* components and defines runtime behavior such as:
 - how checkpoints are loaded/saved
 - how shutdown is handled
 
-Beginner mental model (critical)
---------------------------------
-Think of the simulation as a "game loop":
-
-    while running:
-        read inputs (agents choose actions)
-        update world (combat, movement, respawns, zones)
-        update stats (kills, deaths, score)
-        log/telemetry/checkpoints
-        render (optional)
-
 A "tick" is one iteration of that loop. Everything in this file revolves around
 creating the objects needed for ticks, then repeatedly calling `engine.run_tick()`.
 
-Reproducibility
----------------
-Deterministic runs are vital in ML + simulation:
-- Debugging: if a bug happens at tick 117500, you want to re-run and see it again.
-- Science: you want experiments to be repeatable.
+
+Deterministic runs are vital in ML + simulation
 
 This file supports deterministic seeding via `FWS_SEED` environment variable.
 
@@ -111,7 +97,7 @@ from engine.mapgen import add_random_walls, make_zones
 from utils.persistence import ResultsWriter
 from utils.telemetry import TelemetrySession
 from ui.viewer import Viewer
-from utils.checkpointing import CheckpointManager
+from utils.checkpointing import CheckpointManager, resolve_checkpoint_path
 
 
 # =============================================================================
@@ -428,6 +414,41 @@ class _SimpleRecorder:
             print(f"[video] saved → {self.path}")
 
 
+
+class _NoopRecorder:
+    """No-op recorder used for explicit inspector/no-output mode."""
+
+    enabled = False
+
+    def write(self) -> None:
+        return
+
+    def close(self) -> None:
+        return
+
+
+def _inspector_no_output_mode_active() -> bool:
+    """True when explicit inspector viewer mode should avoid all run output creation."""
+    mode = str(getattr(config, "INSPECTOR_MODE", "off")).strip().lower()
+    if mode in ("ui_no_output", "inspect", "inspector", "no_output", "viewer_no_output"):
+        return True
+    return bool(getattr(config, "INSPECTOR_UI_NO_OUTPUT", False))
+
+
+def _infer_resume_run_dir_from_checkpoint_path(checkpoint_path: str) -> Path:
+    """Infer original run_dir from checkpoint path (supports file/dir/checkpoints-root inputs)."""
+    ckpt_dir, _ = resolve_checkpoint_path(str(checkpoint_path))
+    ckpt_base = ckpt_dir.parent
+    if ckpt_base.name.lower() != "checkpoints":
+        raise RuntimeError(
+            f"[main] Cannot infer run_dir from checkpoint path (expected parent folder 'checkpoints'): {ckpt_dir}"
+        )
+    run_dir = ckpt_base.parent
+    if (not run_dir.exists()) or (not run_dir.is_dir()):
+        raise RuntimeError(f"[main] Inferred run_dir does not exist: {run_dir}")
+    return run_dir
+
+
 # =============================================================================
 # Headless loop (no UI) – optimized for long runs
 # =============================================================================
@@ -694,6 +715,10 @@ def main() -> None:
     # Print a one-line banner summarizing config (useful for logs)
     print(config.summary_str())
 
+    inspector_no_output_mode = _inspector_no_output_mode_active()
+    if inspector_no_output_mode:
+        print("[main] Inspector UI no-output mode enabled (no results/telemetry/checkpoints/files).")
+
     # ------------------------------------------------------------------
     # 1) Checkpoint loading or fresh world creation
     # ------------------------------------------------------------------
@@ -765,72 +790,99 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 4) Results directory & background logging process
     # ------------------------------------------------------------------
-    rw = ResultsWriter()
-
-    # start() creates a run directory and writes config.json there
-    run_dir = Path(rw.start(config_obj=_config_snapshot()))
-
-    # Defensive: ensure directory exists (should already, but safe)
-    _mkdir_p(run_dir)
-
-    print(f"[main] Results → {run_dir}")
-
-    # ------------------------------------------------------------------
-    # 5) Checkpoint manager (saves into run_dir/checkpoints/)
-    # ------------------------------------------------------------------
-    ckpt_mgr = CheckpointManager(run_dir)
-
-    # ------------------------------------------------------------------
-    # 6) Telemetry (optional, must never crash sim)
-    # ------------------------------------------------------------------
+    resume_continuity_active = False
+    rw = None
+    run_dir: Optional[Path] = None
+    ckpt_mgr = None
     telemetry = None
-    try:
-        telemetry = TelemetrySession(run_dir)
 
-        if telemetry.enabled:
-            # Attach to engine so it can emit events
-            engine.telemetry = telemetry
+    if inspector_no_output_mode:
+        # Explicit no-output inspector UI mode: no results folder, no writer, no telemetry, no checkpoints.
+        recorder = _NoopRecorder()
+    else:
+        resume_requested = bool(ckpt is not None)
+        continuity_cfg = bool(getattr(config, "RESUME_OUTPUT_CONTINUITY", True))
+        force_new_on_resume = bool(getattr(config, "RESUME_FORCE_NEW_RUN", False))
+        resume_continuity_active = bool(resume_requested and continuity_cfg and (not force_new_on_resume))
 
-            # Give telemetry access to registry/stats for context
-            telemetry.attach_context(
-                registry=registry,
-                stats=stats,
-                ppo_runtime=getattr(engine, "_ppo", None),
+        rw = ResultsWriter()
+
+        if resume_continuity_active:
+            inferred_run_dir = _infer_resume_run_dir_from_checkpoint_path(checkpoint_path)
+            run_dir = Path(
+                rw.start(
+                    config_obj=_config_snapshot(),
+                    run_dir=str(inferred_run_dir),
+                    append_existing=True,
+                    strict_csv_schema=bool(getattr(config, "RESUME_APPEND_STRICT_CSV_SCHEMA", True)),
+                )
             )
+            print(f"[main] Results → {run_dir} (resume-in-place append)")
+        else:
+            # start() creates a fresh run directory and writes config.json there
+            run_dir = Path(rw.start(config_obj=_config_snapshot()))
+            # Defensive: ensure directory exists (should already, but safe)
+            _mkdir_p(run_dir)
+            print(f"[main] Results → {run_dir}")
 
-            # Write run metadata for provenance
-            telemetry.write_run_meta(
-                {
-                    "schema_version": getattr(config, "TELEMETRY_SCHEMA_VERSION", "v2"),
-                    "config": _config_snapshot(),
-                    "seed": int(getattr(config, "RNG_SEED", getattr(config, "SEED", 42))),
-                    "device": str(grid.device),
-                    "grid_h": int(grid.shape[1]),
-                    "grid_w": int(grid.shape[2]),
-                    "start_tick": int(stats.tick),
-                    "resume": bool(ckpt is not None),
-                    "resume_from": (checkpoint_path if ckpt is not None else None),
-                }
-            )
+        # ------------------------------------------------------------------
+        # 5) Checkpoint manager (saves into run_dir/checkpoints/)
+        # ------------------------------------------------------------------
+        ckpt_mgr = CheckpointManager(run_dir)
 
-            if ckpt is not None:
-                telemetry.record_resume(tick=int(stats.tick), checkpoint_path=str(checkpoint_path))
+        # ------------------------------------------------------------------
+        # 6) Telemetry (optional, must never crash sim)
+        # ------------------------------------------------------------------
+        try:
+            telemetry = TelemetrySession(run_dir)
 
-            # Bootstrap initial population as "birth events" so lineage tracking is consistent
-            telemetry.bootstrap_from_registry(registry, tick=int(stats.tick), note="bootstrap_run_start")
+            if telemetry.enabled:
+                # Attach to engine so it can emit events
+                engine.telemetry = telemetry
 
-    except Exception as e:
-        print(f"[main] Telemetry init failed: {e}")
+                # Give telemetry access to registry/stats for context
+                telemetry.attach_context(
+                    registry=registry,
+                    stats=stats,
+                    ppo_runtime=getattr(engine, "_ppo", None),
+                )
 
-    # ------------------------------------------------------------------
-    # 7) Optional video recorder
-    # ------------------------------------------------------------------
-    recorder = _SimpleRecorder(
-        run_dir,
-        grid,
-        fps=getattr(config, "VIDEO_FPS", 30),
-        scale=getattr(config, "VIDEO_SCALE", 4),
-    )
+                # Resume-in-place: preserve original run_meta.json by default (avoid overwrite).
+                if not (resume_continuity_active and ckpt is not None):
+                    telemetry.write_run_meta(
+                        {
+                            "schema_version": getattr(config, "TELEMETRY_SCHEMA_VERSION", "v2"),
+                            "config": _config_snapshot(),
+                            "seed": int(getattr(config, "RNG_SEED", getattr(config, "SEED", 42))),
+                            "device": str(grid.device),
+                            "grid_h": int(grid.shape[1]),
+                            "grid_w": int(grid.shape[2]),
+                            "start_tick": int(stats.tick),
+                            "resume": bool(ckpt is not None),
+                            "resume_from": (checkpoint_path if ckpt is not None else None),
+                        }
+                    )
+
+                if ckpt is not None:
+                    telemetry.record_resume(tick=int(stats.tick), checkpoint_path=str(checkpoint_path))
+
+                # Bootstrap initial population as "birth events" so lineage tracking is consistent.
+                # Skip on resume-in-place to avoid duplicate bootstrap birth rows in the same lineage files.
+                if not (resume_continuity_active and ckpt is not None):
+                    telemetry.bootstrap_from_registry(registry, tick=int(stats.tick), note="bootstrap_run_start")
+
+        except Exception as e:
+            print(f"[main] Telemetry init failed: {e}")
+
+        # ------------------------------------------------------------------
+        # 7) Optional video recorder
+        # ------------------------------------------------------------------
+        recorder = _SimpleRecorder(
+            run_dir,
+            grid,
+            fps=getattr(config, "VIDEO_FPS", 30),
+            scale=getattr(config, "VIDEO_SCALE", 4),
+        )
 
     # Wrap engine.run_tick so we can record frames without modifying TickEngine itself.
     _orig_run_tick = engine.run_tick
@@ -902,7 +954,7 @@ def main() -> None:
     crash_trace = None
 
     try:
-        if config.ENABLE_UI:
+        if config.ENABLE_UI or inspector_no_output_mode:
             # UI mode: viewer handles rendering and stepping at target FPS
             viewer = Viewer(grid, cell_size=config.CELL_SIZE)
 
@@ -913,7 +965,7 @@ def main() -> None:
                 stats,
                 tick_limit=config.TICK_LIMIT,
                 target_fps=config.TARGET_FPS,
-                run_dir=run_dir,
+                run_dir=(None if inspector_no_output_mode else run_dir),
             )
         else:
             # Headless mode: run as fast as possible (or as configured)
@@ -946,8 +998,9 @@ def main() -> None:
         error_msg = str(e)
         crash_trace = "".join(traceback.format_exc())
 
-        _mkdir_p(run_dir)
-        (run_dir / "crash_trace.txt").write_text(crash_trace, encoding="utf-8")
+        if run_dir is not None:
+            _mkdir_p(run_dir)
+            (run_dir / "crash_trace.txt").write_text(crash_trace, encoding="utf-8")
 
         raise
 
@@ -968,7 +1021,7 @@ def main() -> None:
         # ------------------------------------------------------------------
         try:
             deaths = stats.drain_dead_log()
-            if deaths:
+            if deaths and rw is not None:
                 rw.write_deaths(deaths)
         except Exception:
             pass
@@ -986,15 +1039,17 @@ def main() -> None:
                 "scores": {"red": float(stats.red.score), "blue": float(stats.blue.score)},
                 "error": error_msg,
             }
-            _mkdir_p(run_dir)
-            _atomic_json_dump(summary, run_dir / "summary.json")
+            if run_dir is not None:
+                _mkdir_p(run_dir)
+                _atomic_json_dump(summary, run_dir / "summary.json")
         except Exception as e:
             # Worst-case fallback: plain text summary
             try:
-                (run_dir / "summary_fallback.txt").write_text(
-                    f"FAILED TO WRITE JSON SUMMARY: {e}\n{summary!r}",
-                    encoding="utf-8",
-                )
+                if run_dir is not None:
+                    (run_dir / "summary_fallback.txt").write_text(
+                        f"FAILED TO WRITE JSON SUMMARY: {e}\n{summary!r}",
+                        encoding="utf-8",
+                    )
             except Exception:
                 pass
 
@@ -1011,7 +1066,8 @@ def main() -> None:
         # 14) Shutdown background writer and recorder
         # ------------------------------------------------------------------
         try:
-            rw.close()
+            if rw is not None:
+                rw.close()
         except Exception:
             pass
 

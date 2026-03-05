@@ -104,6 +104,8 @@ class _MsgInit:
     """
     run_dir: str
     config_obj: Dict[str, Any]
+    append_existing: bool = False
+    strict_csv_schema: bool = False
 
 
 @dataclass
@@ -204,6 +206,11 @@ def _writer_loop(q: Queue) -> None:
     stats_writer = None
     deaths_writer = None
 
+    # Expected headers when appending to an existing run directory (optional strict mode).
+    stats_fieldnames_expected = None
+    deaths_fieldnames_expected = None
+    strict_csv_schema = False
+
     # --- NEW: Ignore Ctrl+C in this subprocess; main process coordinates shutdown. ---
     # Why:
     # - On Windows, Ctrl+C can be delivered to *all* processes in the console process group.
@@ -239,25 +246,57 @@ def _writer_loop(q: Queue) -> None:
             # -----------------------------------------------------------------
             if isinstance(msg, _MsgInit):
                 run_dir = msg.run_dir
+                append_existing = bool(getattr(msg, "append_existing", False))
+                strict_csv_schema = bool(getattr(msg, "strict_csv_schema", False))
 
                 # Make sure the output directory exists.
                 # exist_ok=True means: do not error if it already exists.
                 os.makedirs(run_dir, exist_ok=True)
 
-                # Save config.json (human-readable with indent=2)
-                with open(os.path.join(run_dir, "config.json"), "w", encoding="utf-8") as f:
-                    json.dump(msg.config_obj, f, indent=2)
+                config_path = os.path.join(run_dir, "config.json")
+                if append_existing and os.path.exists(config_path):
+                    # Resume-in-place: preserve original config snapshot; do not overwrite.
+                    pass
+                else:
+                    # Save config.json (human-readable with indent=2)
+                    with open(config_path, "w", encoding="utf-8") as f:
+                        json.dump(msg.config_obj, f, indent=2)
 
-                # Open CSV files for writing (overwrite mode).
-                #
-                # newline="" is important for CSV correctness on Windows:
-                # it prevents extra blank lines.
-                stats_fp = open(os.path.join(run_dir, "stats.csv"), "w", newline="", encoding="utf-8")
-                deaths_fp = open(os.path.join(run_dir, "dead_agents_log.csv"), "w", newline="", encoding="utf-8")
+                stats_path = os.path.join(run_dir, "stats.csv")
+                deaths_path = os.path.join(run_dir, "dead_agents_log.csv")
+
+                # Open CSV files in append mode when resuming-in-place, else overwrite for fresh runs.
+                # newline="" is important for CSV correctness on Windows (avoids blank lines).
+                stats_mode = "a" if append_existing else "w"
+                deaths_mode = "a" if append_existing else "w"
+                stats_fp = open(stats_path, stats_mode, newline="", encoding="utf-8")
+                deaths_fp = open(deaths_path, deaths_mode, newline="", encoding="utf-8")
 
                 # We don't yet know CSV header columns until first row arrives.
                 stats_writer = None
                 deaths_writer = None
+
+                # If appending, capture existing headers (if any) so header duplication is avoided and
+                # optional schema checks can fail-fast on mismatch.
+                if append_existing and os.path.exists(stats_path) and os.path.getsize(stats_path) > 0:
+                    try:
+                        with open(stats_path, "r", newline="", encoding="utf-8") as rf:
+                            r = csv.reader(rf)
+                            stats_fieldnames_expected = next(r, None)
+                    except Exception:
+                        stats_fieldnames_expected = None
+                else:
+                    stats_fieldnames_expected = None
+
+                if append_existing and os.path.exists(deaths_path) and os.path.getsize(deaths_path) > 0:
+                    try:
+                        with open(deaths_path, "r", newline="", encoding="utf-8") as rf:
+                            r = csv.reader(rf)
+                            deaths_fieldnames_expected = next(r, None)
+                    except Exception:
+                        deaths_fieldnames_expected = None
+                else:
+                    deaths_fieldnames_expected = None
 
             # -----------------------------------------------------------------
             # 3) Handle tick stats row
@@ -267,8 +306,15 @@ def _writer_loop(q: Queue) -> None:
                 if stats_writer is None:
                     # Header is derived from keys of the first row dictionary.
                     # NOTE: CSV column order is the order in this fieldnames list.
-                    stats_writer = csv.DictWriter(stats_fp, fieldnames=list(msg.row.keys()))
-                    stats_writer.writeheader()
+                    fieldnames = list(msg.row.keys())
+                    if strict_csv_schema and stats_fieldnames_expected is not None and list(stats_fieldnames_expected) != fieldnames:
+                        raise RuntimeError(
+                            f"[ResultsWriter] stats.csv header mismatch on append. "
+                            f"existing={stats_fieldnames_expected} new={fieldnames}"
+                        )
+                    stats_writer = csv.DictWriter(stats_fp, fieldnames=fieldnames)
+                    if not stats_fieldnames_expected:
+                        stats_writer.writeheader()
 
                 # Write one row.
                 stats_writer.writerow(msg.row)
@@ -286,8 +332,15 @@ def _writer_loop(q: Queue) -> None:
 
                 if deaths_writer is None:
                     # Columns come from the first row's keys.
-                    deaths_writer = csv.DictWriter(deaths_fp, fieldnames=list(msg.rows[0].keys()))
-                    deaths_writer.writeheader()
+                    fieldnames = list(msg.rows[0].keys())
+                    if strict_csv_schema and deaths_fieldnames_expected is not None and list(deaths_fieldnames_expected) != fieldnames:
+                        raise RuntimeError(
+                            f"[ResultsWriter] dead_agents_log.csv header mismatch on append. "
+                            f"existing={deaths_fieldnames_expected} new={fieldnames}"
+                        )
+                    deaths_writer = csv.DictWriter(deaths_fp, fieldnames=fieldnames)
+                    if not deaths_fieldnames_expected:
+                        deaths_writer.writeheader()
 
                 # Write many rows efficiently.
                 deaths_writer.writerows(msg.rows)
@@ -412,7 +465,14 @@ class ResultsWriter:
         ts = datetime.datetime.now().strftime("sim_%Y-%m-%d_%H-%M-%S")
         return os.path.join(base, ts)
 
-    def start(self, config_obj: Dict[str, Any], run_dir: Optional[str] = None) -> str:
+    def start(
+        self,
+        config_obj: Dict[str, Any],
+        run_dir: Optional[str] = None,
+        *,
+        append_existing: bool = False,
+        strict_csv_schema: bool = False,
+    ) -> str:
         """
         Start the writer process and initialize output files.
 
@@ -438,6 +498,11 @@ class ResultsWriter:
         """
         self.run_dir = run_dir or self._timestamp_dir()
 
+        if append_existing and run_dir is None:
+            raise ValueError("append_existing=True requires an explicit run_dir")
+        if append_existing and (not os.path.isdir(self.run_dir)):
+            raise FileNotFoundError(f"append_existing run_dir does not exist: {self.run_dir}")
+
         # Create the background process.
         #
         # target=_writer_loop: function executed in child process
@@ -451,7 +516,14 @@ class ResultsWriter:
         # - create directory
         # - write config.json
         # - open stats.csv and dead_agents_log.csv
-        self.q.put(_MsgInit(run_dir=self.run_dir, config_obj=config_obj))
+        self.q.put(
+            _MsgInit(
+                run_dir=self.run_dir,
+                config_obj=config_obj,
+                append_existing=bool(append_existing),
+                strict_csv_schema=bool(strict_csv_schema),
+            )
+        )
 
         return self.run_dir
 

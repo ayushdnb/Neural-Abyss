@@ -190,6 +190,20 @@ RESULTS_DIR: str = _env_str("FWS_RESULTS_DIR", "results").strip()
 # Validation/loading is typically handled in main/runtime, not here.
 CHECKPOINT_PATH: str = _env_str("FWS_CHECKPOINT_PATH", "").strip()
 
+# Resume output continuity: when resuming from a checkpoint, reuse the original run folder
+# (same stats/telemetry/checkpoints lineage) instead of creating a new results folder.
+# Env: FWS_RESUME_OUTPUT_CONTINUITY
+RESUME_OUTPUT_CONTINUITY: bool = _env_bool("FWS_RESUME_OUTPUT_CONTINUITY", True)
+
+# Force a new run folder even when CHECKPOINT_PATH is set (overrides continuity).
+# Env: FWS_RESUME_FORCE_NEW_RUN
+RESUME_FORCE_NEW_RUN: bool = _env_bool("FWS_RESUME_FORCE_NEW_RUN", False)
+
+# Strict append schema guard for append-mode CSV streams where headers are expected stable.
+# When enabled, append writers may fail-fast on header mismatch instead of silently corrupting rows.
+# Env: FWS_RESUME_APPEND_STRICT_CSV_SCHEMA
+RESUME_APPEND_STRICT_CSV_SCHEMA: bool = _env_bool("FWS_RESUME_APPEND_STRICT_CSV_SCHEMA", True)
+
 # Autosave interval in seconds (UI mode usage note mentioned in your original comments).
 # Env: FWS_AUTOSAVE_EVERY_SEC
 # 0 or negative behavior depends on downstream code (not enforced here).
@@ -358,6 +372,26 @@ TELEMETRY_LOG_MOVES: bool = _env_bool("FWS_TELEM_MOVES", True)   # can be huge i
 # PPO telemetry logging (losses, KL, entropy, etc., depending on implementation).
 # Env: FWS_TELEM_PPO
 TELEMETRY_LOG_PPO: bool = _env_bool("FWS_TELEM_PPO", True)
+
+# Dedicated rich PPO training diagnostics CSV (separate from headless summary).
+# File: telemetry/ppo_training_telemetry.csv
+# Env: FWS_TELEM_PPO_RICH_CSV
+TELEMETRY_PPO_RICH_CSV: bool = _env_bool("FWS_TELEM_PPO_RICH_CSV", True)
+
+# Rich PPO telemetry write granularity: "update", "epoch", or "minibatch".
+# Higher detail gives better diagnostics but increases I/O/CSV size.
+# Env: FWS_TELEM_PPO_RICH_LEVEL
+TELEMETRY_PPO_RICH_LEVEL: str = _env_str("FWS_TELEM_PPO_RICH_LEVEL", "update").strip().lower()
+
+# Flush rich PPO telemetry CSV every N appended rows (1 = flush every row batch append).
+# Env: FWS_TELEM_PPO_RICH_FLUSH_EVERY
+TELEMETRY_PPO_RICH_FLUSH_EVERY: int = _env_int("FWS_TELEM_PPO_RICH_FLUSH_EVERY", 1)
+
+# Fail-fast on telemetry CSV header mismatch when appending to an existing file.
+# Applies to telemetry append helpers (including rich PPO CSV).
+# Env: FWS_TELEM_APPEND_SCHEMA_STRICT
+TELEMETRY_APPEND_SCHEMA_STRICT: bool = _env_bool("FWS_TELEM_APPEND_SCHEMA_STRICT", True)
+
 # ----------------------------------------------------------------------
 # Headless live CSV summary sidecar (additive; does NOT affect console prints)
 # ----------------------------------------------------------------------
@@ -505,7 +539,7 @@ USE_VMAP = _env_bool("FWS_USE_VMAP", True)
 # Minimum bucket size before attempting vmap (below this, overhead may dominate).
 # Env: FWS_VMAP_MIN_BUCKET
 # Increase if vmap overhead hurts small buckets; decrease if buckets are usually moderate.
-VMAP_MIN_BUCKET = _env_int("FWS_VMAP_MIN_BUCKET", 16)
+VMAP_MIN_BUCKET = _env_int("FWS_VMAP_MIN_BUCKET", 8)
 
 # Debug prints for vmap fallback/diagnostics.
 # Env: FWS_VMAP_DEBUG
@@ -522,22 +556,22 @@ VMAP_DEBUG = _env_bool("FWS_VMAP_DEBUG", False)
 # Grid width in cells.
 # Env: FWS_GRID_W
 # Larger maps reduce encounter frequency at fixed population and may increase pathing/raycast work.
-GRID_WIDTH  = _env_int("FWS_GRID_W", 64)
+GRID_WIDTH  = _env_int("FWS_GRID_W", 100)
 
 # Grid height in cells.
 # Env: FWS_GRID_H
-GRID_HEIGHT = _env_int("FWS_GRID_H", 64)
+GRID_HEIGHT = _env_int("FWS_GRID_H", 100)
 
 # Initial starting agents per team.
 # Env: FWS_START_PER_TEAM
 # Higher => more immediate pressure/contact, more compute.
 # Ensure MAX_AGENTS can accommodate both teams + respawn dynamics.
-START_AGENTS_PER_TEAM = _env_int("FWS_START_PER_TEAM", 140)
+START_AGENTS_PER_TEAM = _env_int("FWS_START_PER_TEAM", 300)
 
 # Maximum total agent slots/capacity (global).
 # Env: FWS_MAX_AGENTS
 # If too low, respawn may be slot-constrained. If too high, memory/compute increases.
-MAX_AGENTS  = _env_int("FWS_MAX_AGENTS", 250)
+MAX_AGENTS  = _env_int("FWS_MAX_AGENTS", 700)
 
 # Hard tick limit for run termination.
 # Env: FWS_TICK_LIMIT
@@ -600,18 +634,18 @@ MAP_WALL_GAP_PROB      = _env_float("FWS_MAP_WALL_GAP_PROB", 0.20)
 # Env: FWS_HEAL_COUNT
 # More small zones often increase probability of uncontested camping.
 # Fewer zones (especially 1) tends to force shared contention.
-HEAL_ZONE_COUNT      = _env_int("FWS_HEAL_COUNT", 9)
+HEAL_ZONE_COUNT      = _env_int("FWS_HEAL_COUNT", 15)
 
 # Heal zone size as ratio (engine interprets exact geometry).
 # Env: FWS_HEAL_SIZE_RATIO
 # Larger ratios make zones easier to find/reach and more likely to overlap strategic routes.
-HEAL_ZONE_SIZE_RATIO = _env_float("FWS_HEAL_SIZE_RATIO", 7/64)
+HEAL_ZONE_SIZE_RATIO = _env_float("FWS_HEAL_SIZE_RATIO", 5/64)
 
 # HP healed per tick on heal tiles.
 # Env: FWS_HEAL_RATE
 # Compare against metabolism to understand net sustain:
 #   net ≈ HEAL_RATE - META_*_HP_PER_TICK
-HEAL_RATE            = _env_float("FWS_HEAL_RATE", 0.0025)
+HEAL_RATE            = _env_float("FWS_HEAL_RATE", 0.003)
 
 # Capture Points ("King of the Hill")
 # -----------------------------------
@@ -620,12 +654,12 @@ HEAL_RATE            = _env_float("FWS_HEAL_RATE", 0.0025)
 # Number of capture points.
 # Env: FWS_CP_COUNT
 # 1 large CP often creates strongest convergence to a shared objective.
-CP_COUNT           = _env_int("FWS_CP_COUNT", 1)
+CP_COUNT           = _env_int("FWS_CP_COUNT", 3)
 
 # Capture point size ratio.
 # Env: FWS_CP_SIZE_RATIO
 # Larger values increase contact probability but may reduce tactical variety.
-CP_SIZE_RATIO      = _env_float("FWS_CP_SIZE_RATIO", 0.20)
+CP_SIZE_RATIO      = _env_float("FWS_CP_SIZE_RATIO", 0.11)
 
 # Team reward per tick for owning/outnumbering on CP (fed into team reward path).
 # Env: FWS_CP_REWARD
@@ -659,15 +693,15 @@ ARCHER_HP  = _env_float("FWS_ARCHER_HP", 0.65)
 
 # Base attack reference (generic/shared fallback).
 # Env: FWS_BASE_ATK
-BASE_ATK    = _env_float("FWS_BASE_ATK", 0.35)
+BASE_ATK    = _env_float("FWS_BASE_ATK", 0.20)
 
 # Soldier attack damage coefficient.
 # Env: FWS_SOLDIER_ATK
-SOLDIER_ATK = _env_float("FWS_SOLDIER_ATK", 0.35)
+SOLDIER_ATK = _env_float("FWS_SOLDIER_ATK", 0.15)
 
 # Archer attack damage coefficient.
 # Env: FWS_ARCHER_ATK
-ARCHER_ATK  = _env_float("FWS_ARCHER_ATK", 0.20)
+ARCHER_ATK  = _env_float("FWS_ARCHER_ATK", 0.10)
 
 # Maximum attack among configured attack stats (with lower bound epsilon to avoid zero divisions).
 # This is a derived helper constant used for normalization/scaling elsewhere.
@@ -804,16 +838,16 @@ RESPAWN_ENABLED = _env_bool("FWS_RESPAWN", True)
 
 # Minimum population floor per team (hysteresis/fill system may try to maintain this).
 # Env: FWS_RESP_FLOOR_PER_TEAM
-RESP_FLOOR_PER_TEAM      = _env_int("FWS_RESP_FLOOR_PER_TEAM", 100)
+RESP_FLOOR_PER_TEAM      = _env_int("FWS_RESP_FLOOR_PER_TEAM", 190)
 
 # Hard cap of respawns applied per tick.
 # Env: FWS_RESP_MAX_PER_TICK
 # Prevents large bursts from causing frame/tick spikes.
-RESP_MAX_PER_TICK        = _env_int("FWS_RESP_MAX_PER_TICK", 15)
+RESP_MAX_PER_TICK        = _env_int("FWS_RESP_MAX_PER_TICK", 5)
 
 # Periodic reinforcement cycle length in ticks.
 # Env: FWS_RESP_PERIOD_TICKS
-RESP_PERIOD_TICKS        = _env_int("FWS_RESP_PERIOD_TICKS", 2000)
+RESP_PERIOD_TICKS        = _env_int("FWS_RESP_PERIOD_TICKS", 20000)
 
 # Budget available per reinforcement period (implementation-defined accounting).
 # Env: FWS_RESP_PERIOD_BUDGET
@@ -821,7 +855,7 @@ RESP_PERIOD_BUDGET       = _env_int("FWS_RESP_PERIOD_BUDGET", 40)
 
 # Hysteresis cooldown in ticks to prevent oscillatory refill behavior.
 # Env: FWS_RESP_HYST_COOLDOWN_TICKS
-RESP_HYST_COOLDOWN_TICKS = _env_int("FWS_RESP_HYST_COOLDOWN_TICKS", 45)
+RESP_HYST_COOLDOWN_TICKS = _env_int("FWS_RESP_HYST_COOLDOWN_TICKS", 100)
 
 # Spawn wall margin (avoid spawning too close to walls).
 # Env: FWS_RESP_WALL_MARGIN
@@ -889,7 +923,66 @@ RESPAWN_ARCHER_SHARE         = _env_float("FWS_RESPAWN_ARCHER_SHARE", 0.50)
 # Bias for spawning toward interior regions vs edges.
 # Env: FWS_RESPAWN_INTERIOR_BIAS
 # Higher values can reduce edge/corner camping and improve contact probability.
-RESPAWN_INTERIOR_BIAS        = _env_float("FWS_RESPAWN_INTERIOR_BIAS", 0.40)
+RESPAWN_INTERIOR_BIAS        = _env_float("FWS_RESPAWN_INTERIOR_BIAS", 0.50)
+
+# ----------------------------------------------------------------------
+# Respawn evolution layer (optional; all switches default to safe/backward-compatible)
+# ----------------------------------------------------------------------
+# Tick-window anomaly ticket generator (new rare-mutation trigger).
+# Env: FWS_RESP_RARE_TICK_WINDOW_ENABLE
+RESPAWN_RARE_MUTATION_TICK_WINDOW_ENABLE: bool = _env_bool("FWS_RESP_RARE_TICK_WINDOW_ENABLE", True)
+
+# Rare-mutation ticket cadence in ticks (global; at most one pending ticket).
+# Env: FWS_RESP_RARE_TICK_WINDOW
+RESPAWN_RARE_MUTATION_TICK_WINDOW_TICKS: int = _env_int("FWS_RESP_RARE_TICK_WINDOW", 5000)
+
+# Apply slight physical drift to anomaly newborns (tick-window mode).
+# Env: FWS_RESP_RARE_PHYS_ENABLE
+RESPAWN_RARE_MUTATION_PHYSICAL_ENABLE: bool = _env_bool("FWS_RESP_RARE_PHYS_ENABLE", True)
+
+# Physical drift magnitude (fractional std, e.g., 0.03 = 3% std per trait multiplier).
+# Env: FWS_RESP_RARE_PHYS_STD
+RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_STD_FRAC: float = _env_float("FWS_RESP_RARE_PHYS_STD", 0.03)
+
+# Physical drift clamp (fractional absolute cap on multiplier delta).
+# Env: FWS_RESP_RARE_PHYS_CLIP
+RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_CLIP_FRAC: float = _env_float("FWS_RESP_RARE_PHYS_CLIP", 0.10)
+
+# Apply heavy extra brain noise only on inherited/cloned anomaly path.
+# Env: FWS_RESP_RARE_BRAIN_NOISE_ENABLE
+RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_ENABLE: bool = _env_bool("FWS_RESP_RARE_BRAIN_NOISE_ENABLE", True)
+
+# Std for heavy anomaly inherited-brain noise (in addition to RESPAWN_MUTATION_STD).
+# Env: FWS_RESP_RARE_BRAIN_NOISE_STD
+RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_STD: float = _env_float("FWS_RESP_RARE_BRAIN_NOISE_STD", 0.20)
+
+# Parent selection policy for clone path.
+# Env: FWS_RESP_PARENT_SELECT_MODE
+# Supported: "random", "topk_weighted"
+RESPAWN_PARENT_SELECTION_MODE: str = _env_str("FWS_RESP_PARENT_SELECT_MODE", "topk_weighted").strip().lower()
+if RESPAWN_PARENT_SELECTION_MODE not in ("random", "topk_weighted"):
+    _config_warn(f"Unknown RESPAWN_PARENT_SELECTION_MODE={RESPAWN_PARENT_SELECTION_MODE!r}; falling back to 'random'")
+    RESPAWN_PARENT_SELECTION_MODE = "random"
+
+# Fraction of parent candidates kept in the top-k pool for weighted sampling.
+# Env: FWS_RESP_PARENT_TOPK_FRAC
+RESPAWN_PARENT_SELECTION_TOPK_FRAC: float = _env_float("FWS_RESP_PARENT_TOPK_FRAC", 0.25)
+
+# Exponent applied to parent score weights (higher => stronger bias inside top-k).
+# Env: FWS_RESP_PARENT_SCORE_POWER
+RESPAWN_PARENT_SELECTION_SCORE_POWER: float = _env_float("FWS_RESP_PARENT_SCORE_POWER", 1.0)
+
+# Spawn location policy for respawn.
+# Env: FWS_RESP_SPAWN_LOCATION_MODE
+# Supported: "uniform", "near_parent"
+RESPAWN_SPAWN_LOCATION_MODE: str = _env_str("FWS_RESP_SPAWN_LOCATION_MODE", "near_parent").strip().lower()
+if RESPAWN_SPAWN_LOCATION_MODE not in ("uniform", "near_parent"):
+    _config_warn(f"Unknown RESPAWN_SPAWN_LOCATION_MODE={RESPAWN_SPAWN_LOCATION_MODE!r}; falling back to 'uniform'")
+    RESPAWN_SPAWN_LOCATION_MODE = "uniform"
+
+# Radius for near-parent spawn search (Chebyshev neighborhood).
+# Env: FWS_RESP_SPAWN_NEAR_PARENT_RADIUS
+RESPAWN_SPAWN_NEAR_PARENT_RADIUS: int = _env_int("FWS_RESP_SPAWN_NEAR_PARENT_RADIUS", max(1, int(RESPAWN_JITTER_RADIUS)))
 
 # =============================================================================
 # 🏆 REWARD SHAPING (RL Feedback Loop)
@@ -935,12 +1028,12 @@ PPO_HP_REWARD_MODE         = _env_str("FWS_PPO_HP_REWARD_MODE", "threshold_ramp"
 # HP percentage threshold used by threshold-ramp HP reward mode.
 # Env: FWS_PPO_HP_REWARD_THRESHOLD
 # Example: 0.60 => no HP PPO reward at <=60% HP, smooth ramp above it.
-PPO_HP_REWARD_THRESHOLD    = _env_float("FWS_PPO_HP_REWARD_THRESHOLD", 0.70)
+PPO_HP_REWARD_THRESHOLD    = _env_float("FWS_PPO_HP_REWARD_THRESHOLD", 0.60)
 
 # Individual PPO reward for damage dealt (dense combat shaping, per-agent only).
 # Env: FWS_PPO_REW_DMG_DEALT_AGENT
 # 0 disables this shaping channel.
-PPO_REWARD_DMG_DEALT_INDIVIDUAL = _env_float("FWS_PPO_REW_DMG_DEALT_AGENT", 0.02)
+PPO_REWARD_DMG_DEALT_INDIVIDUAL = _env_float("FWS_PPO_REW_DMG_DEALT_AGENT", 0.2)
 
 # Individual PPO penalty magnitude for damage taken (dense combat shaping, per-agent only).
 # Env: FWS_PPO_PEN_DMG_TAKEN_AGENT
@@ -950,7 +1043,7 @@ PPO_PENALTY_DMG_TAKEN_INDIVIDUAL = _env_float("FWS_PPO_PEN_DMG_TAKEN_AGENT", 0.0
 # Individual kill reward for PPO agent signal.
 # Env: FWS_PPO_REW_KILL_AGENT
 # Larger => direct combat success becomes strongly reinforced.
-PPO_REWARD_KILL_INDIVIDUAL = _env_float("FWS_PPO_REW_KILL_AGENT", 10.0)
+PPO_REWARD_KILL_INDIVIDUAL = _env_float("FWS_PPO_REW_KILL_AGENT", 20.0)
 
 # Death penalty for PPO agent signal.
 # Env: FWS_PPO_REW_DEATH
@@ -960,7 +1053,7 @@ PPO_REWARD_DEATH           = _env_float("FWS_PPO_REW_DEATH", -0.5)
 # Reward for contested CP participation/control signal (implementation-dependent exact condition).
 # Env: FWS_PPO_REW_CONTEST
 # Increasing this pushes policies toward objective zones rather than isolated survival.
-PPO_REWARD_CONTESTED_CP    = _env_float("FWS_PPO_REW_CONTEST", 0.40)
+PPO_REWARD_CONTESTED_CP    = _env_float("FWS_PPO_REW_CONTEST", 1.5)
 
 # =============================================================================
 # 🧠 REINFORCEMENT LEARNING (PROXIMAL POLICY OPTIMIZATION)
@@ -1066,7 +1159,7 @@ PER_AGENT_BRAINS        = _env_bool("FWS_PER_AGENT_BRAINS", True)
 # Global mutation period (ticks) for periodic mutation events.
 # Env: FWS_MUTATE_EVERY
 # Larger => rarer perturbation; smaller => more frequent diversity injection.
-MUTATION_PERIOD_TICKS   = _env_int("FWS_MUTATE_EVERY", 10000000)
+MUTATION_PERIOD_TICKS   = _env_int("FWS_MUTATE_EVERY", 1000000000)
 
 # Fraction of alive agents mutated during mutation event.
 # Env: FWS_MUTATE_FRAC
@@ -1116,7 +1209,7 @@ TEAM_BRAIN_MIX_SEED: int = _env_int("FWS_TEAM_BRAIN_MIX_SEED", int(globals().get
 # Env: FWS_TRON_DMODEL
 # Must be divisible by TRON_HEADS.
 # Larger => more capacity, more compute and memory.
-TRON_D_MODEL       = _env_int("FWS_TRON_DMODEL", 8)
+TRON_D_MODEL       = _env_int("FWS_TRON_DMODEL", 16)
 
 # Number of attention heads.
 # Env: FWS_TRON_HEADS
@@ -1203,7 +1296,19 @@ MIRROR_USE_PRENORM   = _env_bool("FWS_MIRROR_PRENORM", bool(TRON_USE_PRENORM))
 # UI enable flag.
 # Env: FWS_UI
 # True by default here (UI-on). Set False for headless speed / training throughput.
-ENABLE_UI  = _env_bool("FWS_UI", True)
+ENABLE_UI  = _env_bool("FWS_UI", False)
+
+# Explicit inspector mode selector (no-output viewer mode).
+# Values:
+#   - "off" (default): normal behavior
+#   - "ui_no_output": launch viewer/inspection mode without creating results/telemetry/checkpoints files
+# Env: FWS_INSPECTOR_MODE
+INSPECTOR_MODE: str = _env_str("FWS_INSPECTOR_MODE", "off").strip().lower()
+
+# Backward-compatible explicit flag for no-output inspector UI mode.
+# If True, behaves like INSPECTOR_MODE="ui_no_output".
+# Env: FWS_INSPECTOR_UI_NO_OUTPUT
+INSPECTOR_UI_NO_OUTPUT: bool = _env_bool("FWS_INSPECTOR_UI_NO_OUTPUT", False)
 
 # How often (ticks/frames) viewer refreshes full state from sim.
 # Env: FWS_VIEWER_STATE_REFRESH_EVERY
@@ -1434,11 +1539,21 @@ def _validate_config_invariants() -> None:
     _prob("RESPAWN_CLONE_PROB", RESPAWN_CLONE_PROB)
     _prob("RESPAWN_ARCHER_SHARE", RESPAWN_ARCHER_SHARE)
     _prob("RESPAWN_INTERIOR_BIAS", RESPAWN_INTERIOR_BIAS)
+    _prob("RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_STD_FRAC", RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_STD_FRAC)
+    _prob("RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_CLIP_FRAC", RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_CLIP_FRAC)
+    _prob("RESPAWN_PARENT_SELECTION_TOPK_FRAC", RESPAWN_PARENT_SELECTION_TOPK_FRAC)
     _prob("MUTATION_FRACTION_ALIVE", MUTATION_FRACTION_ALIVE)
     _prob("TEAM_BRAIN_MIX_P_TRON", TEAM_BRAIN_MIX_P_TRON)
     _prob("MAP_WALL_STRAIGHT_PROB", MAP_WALL_STRAIGHT_PROB)
     _prob("MAP_WALL_GAP_PROB", MAP_WALL_GAP_PROB)
     _prob("TELEMETRY_MOVE_EVENTS_SAMPLE_RATE", TELEMETRY_MOVE_EVENTS_SAMPLE_RATE)
+
+    _positive_int("RESPAWN_RARE_MUTATION_TICK_WINDOW_TICKS", RESPAWN_RARE_MUTATION_TICK_WINDOW_TICKS)
+    _positive_int("RESPAWN_SPAWN_NEAR_PARENT_RADIUS", RESPAWN_SPAWN_NEAR_PARENT_RADIUS)
+    if float(RESPAWN_PARENT_SELECTION_SCORE_POWER) < 0.0:
+        _config_issue(f"RESPAWN_PARENT_SELECTION_SCORE_POWER must be >= 0 (got {RESPAWN_PARENT_SELECTION_SCORE_POWER})")
+    if float(RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_STD) < 0.0:
+        _config_issue(f"RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_STD must be >= 0 (got {RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_STD})")
 
     # Mirror divisibility is dangerous only when Mirror is used; warn/strict here.
     try:

@@ -203,6 +203,22 @@ class RespawnCfg:
     # Vision ranges come from a dict in config (VISION_RANGE_BY_UNIT) if present.
     # If config does not define it, fall back to reasonable defaults.
 
+    # ---------- Optional evolution layer knobs (all backward-compatible) ----------
+    rare_mutation_tick_window_enable: bool = field(default_factory=lambda: bool(getattr(config, "RESPAWN_RARE_MUTATION_TICK_WINDOW_ENABLE", False)))
+    rare_mutation_tick_window_ticks: int = field(default_factory=lambda: int(getattr(config, "RESPAWN_RARE_MUTATION_TICK_WINDOW_TICKS", 1000)))
+    rare_mutation_physical_enable: bool = field(default_factory=lambda: bool(getattr(config, "RESPAWN_RARE_MUTATION_PHYSICAL_ENABLE", False)))
+    rare_mutation_physical_drift_std_frac: float = field(default_factory=lambda: float(getattr(config, "RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_STD_FRAC", 0.03)))
+    rare_mutation_physical_drift_clip_frac: float = field(default_factory=lambda: float(getattr(config, "RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_CLIP_FRAC", 0.10)))
+    rare_mutation_inherited_brain_noise_enable: bool = field(default_factory=lambda: bool(getattr(config, "RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_ENABLE", False)))
+    rare_mutation_inherited_brain_noise_std: float = field(default_factory=lambda: float(getattr(config, "RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_STD", 0.20)))
+
+    parent_selection_mode: str = field(default_factory=lambda: str(getattr(config, "RESPAWN_PARENT_SELECTION_MODE", "random")))
+    parent_selection_topk_frac: float = field(default_factory=lambda: float(getattr(config, "RESPAWN_PARENT_SELECTION_TOPK_FRAC", 0.25)))
+    parent_selection_score_power: float = field(default_factory=lambda: float(getattr(config, "RESPAWN_PARENT_SELECTION_SCORE_POWER", 1.0)))
+
+    spawn_location_mode: str = field(default_factory=lambda: str(getattr(config, "RESPAWN_SPAWN_LOCATION_MODE", "uniform")))
+    spawn_near_parent_radius: int = field(default_factory=lambda: int(getattr(config, "RESPAWN_SPAWN_NEAR_PARENT_RADIUS", max(1, int(getattr(config, "RESPAWN_JITTER_RADIUS", 1))))))
+
 
 # ----------------------------------------------------------------------
 # Global counter for rare mutation events
@@ -678,20 +694,49 @@ def _pick_uniform(grid: torch.Tensor, cfg: RespawnCfg) -> Tuple[int, int]:
     return -1, -1
 
 
-def _pick_location(grid: torch.Tensor, cfg: RespawnCfg) -> Tuple[int, int]:
-    """Main entry point for spawn cell selection. Currently uniform.
+def _pick_near_parent(grid: torch.Tensor, cfg: RespawnCfg, parent_xy: Tuple[int, int]) -> Tuple[int, int]:
+    """Try to place child near parent; fall back to failure so caller can fallback safely."""
+    px, py = int(parent_xy[0]), int(parent_xy[1])
+    r = max(1, int(getattr(cfg, "spawn_near_parent_radius", 1)))
 
-    ARCHITECTURE NOTE
-    -----------------
-    This wrapper exists to allow future extension:
-      - spawn near team base
-      - spawn away from enemies
-      - spawn with spatial clustering / dispersion
-      - spawn near objectives (e.g., capture points)
+    # Generate local offsets (excluding (0,0)), shuffled for stochasticity.
+    offsets: List[Tuple[int, int]] = []
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            if dx == 0 and dy == 0:
+                continue
+            offsets.append((dx, dy))
+    random.shuffle(offsets)
 
-    Maintaining a single entry point makes it easier to change spawn policy
-    without refactoring call sites.
-    """
+    tried = 0
+    max_tries = max(1, int(cfg.spawn_tries))
+    while tried < max_tries:
+        for dx, dy in offsets:
+            x = px + dx
+            y = py + dy
+            tried += 1
+            if _cell_free(grid, x, y, cfg):
+                return x, y
+            if tried >= max_tries:
+                break
+
+    # Also allow exact parent cell only if it became free (usually not, but harmless fallback).
+    if _cell_free(grid, px, py, cfg):
+        return px, py
+    return -1, -1
+
+
+def _pick_location(
+    grid: torch.Tensor,
+    cfg: RespawnCfg,
+    parent_xy: Optional[Tuple[int, int]] = None,
+) -> Tuple[int, int]:
+    """Main entry point for spawn cell selection (uniform by default; near-parent optional)."""
+    mode = str(getattr(cfg, "spawn_location_mode", "uniform")).strip().lower()
+    if mode in ("near_parent", "parent_near") and parent_xy is not None:
+        x, y = _pick_near_parent(grid, cfg, parent_xy)
+        if x >= 0:
+            return x, y
     return _pick_uniform(grid, cfg)
 
 
@@ -823,6 +868,68 @@ def _write_agent_to_registry(
 
 
 # ----------------------------------------------------------------------
+# Parent selection + anomaly helpers
+# ----------------------------------------------------------------------
+def _pick_parent_slot(parents: torch.Tensor, data: torch.Tensor, cfg: RespawnCfg) -> int:
+    """Choose a parent slot according to configured policy (defaults to uniform random)."""
+    n = int(parents.numel())
+    if n <= 0:
+        raise RuntimeError("_pick_parent_slot called with empty parents")
+
+    mode = str(getattr(cfg, "parent_selection_mode", "random")).strip().lower()
+    if mode in ("random", "uniform", "baseline"):
+        return int(parents[random.randrange(n)].item())
+
+    # Use cheap, local scalar score from current registry state.
+    hp = data[parents, COL_HP].detach().float().cpu()
+    atk = data[parents, COL_ATK].detach().float().cpu()
+    scores = (hp + atk).tolist()
+    if not scores:
+        return int(parents[random.randrange(n)].item())
+
+    # Clamp negatives and avoid all-zero weights.
+    scores = [max(float(s), 0.0) for s in scores]
+
+    if mode in ("topk_weighted", "stronger_biased", "elite_weighted"):
+        frac = float(getattr(cfg, "parent_selection_topk_frac", 0.25))
+        frac = min(max(frac, 0.0), 1.0)
+        k = max(1, int(round(n * frac))) if frac > 0.0 else 1
+        order = sorted(range(n), key=lambda i: scores[i], reverse=True)
+        cand_idx = order[:k]
+        power = max(float(getattr(cfg, "parent_selection_score_power", 1.0)), 0.0)
+        weights = [(scores[i] if scores[i] > 0.0 else 1e-12) ** power for i in cand_idx]
+        if not any(w > 0.0 for w in weights):
+            return int(parents[cand_idx[random.randrange(len(cand_idx))]].item())
+        chosen_local = random.choices(cand_idx, weights=weights, k=1)[0]
+        return int(parents[chosen_local].item())
+
+    # Unknown mode: safe fallback to baseline random.
+    return int(parents[random.randrange(n)].item())
+
+
+def _apply_rare_physical_drift(hp0: float, atk0: float, vision0: int, cfg: RespawnCfg) -> Tuple[float, float, int]:
+    """Apply small bounded multiplicative drift to physical traits."""
+    std = max(float(getattr(cfg, "rare_mutation_physical_drift_std_frac", 0.03)), 0.0)
+    clip = max(float(getattr(cfg, "rare_mutation_physical_drift_clip_frac", 0.10)), 0.0)
+
+    def _mult() -> float:
+        if std <= 0.0:
+            return 1.0
+        d = random.gauss(0.0, std)
+        if d > clip:
+            d = clip
+        elif d < -clip:
+            d = -clip
+        m = 1.0 + d
+        return max(0.05, m)
+
+    hp1 = float(hp0) * _mult()
+    atk1 = float(atk0) * _mult()
+    vis1 = max(1, int(round(float(vision0) * _mult())))
+    return hp1, atk1, vis1
+
+
+# ----------------------------------------------------------------------
 # Core respawn function (spawns a given number of agents for a team)
 # ----------------------------------------------------------------------
 @torch.no_grad()
@@ -834,6 +941,7 @@ def _respawn_some(
     cfg: RespawnCfg,
     tick: int,
     meta_out: Optional[List[Dict[str, object]]] = None,
+    controller: Optional["RespawnController"] = None,
 ) -> int:
     """
     Attempt to spawn up to `count` agents of the given team.
@@ -887,8 +995,28 @@ def _respawn_some(
     for k in range(min(count, dead_slots.numel())):
         slot = int(dead_slots[k].item())
 
+        # Decide whether to clone an existing parent or create a fresh brain.
+        #
+        # use_clone is True only if:
+        #   - there exists at least one alive parent in this team (parents.numel() > 0)
+        #   - random coin flip < clone_prob
+        use_clone = (parents.numel() > 0) and (random.random() < cfg.clone_prob)
+
+        # Optional near-parent spawn placement is only meaningful on clone path.
+        pj = None  # Parent slot index (only defined if cloning).
+        parent_xy: Optional[Tuple[int, int]] = None
+        if use_clone:
+            pj = _pick_parent_slot(parents, data, cfg)
+            if str(getattr(cfg, "spawn_location_mode", "uniform")).strip().lower() in ("near_parent", "parent_near"):
+                try:
+                    px = int(round(float(data[pj, COL_X].item())))
+                    py = int(round(float(data[pj, COL_Y].item())))
+                    parent_xy = (px, py)
+                except Exception:
+                    parent_xy = None
+
         # Choose spawn coordinates.
-        x, y = _pick_location(grid, cfg)
+        x, y = _pick_location(grid, cfg, parent_xy=parent_xy)
         if x < 0:
             # If location selection fails, break early.
             # This prevents repeated failures and wasted computation.
@@ -898,46 +1026,51 @@ def _respawn_some(
         unit_id = _choose_unit(cfg)
         hp0, atk0, vision0 = _unit_stats(unit_id, cfg)
 
-        # Rare mutation event (every 1000th respawn globally).
-        #
-        # This introduces occasional large random scaling to stats.
-        # Mechanically:
-        #   hp0    *= (1 + U(0.5, 2.0))
-        #   atk0   *= (1 + U(0.5, 2.0))
-        #   vision0 = int(vision0 * (1 + U(0.5, 2.0)))
-        #
-        # Note: random.uniform(0.5, 2.0) returns value in [0.5, 2.0].
-        # Thus multiplier is in [1.5, 3.0].
+        # Rare mutation trigger path:
+        # - legacy behavior (every 1000th respawn globally) is preserved unless
+        #   the tick-window trigger is explicitly enabled.
         rare_mutation = False
-        _respawn_counter += 1
-        if _respawn_counter % 1000 == 0:
-            rare_mutation = True
-            hp0 *= (1.0 + random.uniform(0.5, 2.0))
-            atk0 *= (1.0 + random.uniform(0.5, 2.0))
-            vision0 = int(vision0 * (1.0 + random.uniform(0.5, 2.0)))
+        if bool(getattr(cfg, "rare_mutation_tick_window_enable", False)) and controller is not None:
+            rare_mutation = bool(controller._consume_pending_rare_mutation_ticket())
+        else:
+            _respawn_counter += 1
+            if _respawn_counter % 1000 == 0:
+                rare_mutation = True
+                hp0 *= (1.0 + random.uniform(0.5, 2.0))
+                atk0 *= (1.0 + random.uniform(0.5, 2.0))
+                vision0 = int(vision0 * (1.0 + random.uniform(0.5, 2.0)))
+
+        # New anomaly physical effect (small drift) is independently switchable.
+        # If disabled under tick-window mode, the ticket still produces an anomaly birth
+        # without stat drift (brain-side effect may still apply on clone path).
+        if rare_mutation and bool(getattr(cfg, "rare_mutation_tick_window_enable", False)):
+            if bool(getattr(cfg, "rare_mutation_physical_enable", False)):
+                hp0, atk0, vision0 = _apply_rare_physical_drift(hp0, atk0, vision0, cfg)
+            print(
+                f"** Rare Mutation on slot {slot} (team {'red' if team_id==TEAM_RED_ID else 'blue'})! "
+                f"HP:{hp0:.2f}, ATK:{atk0:.2f}, VIS:{vision0} **"
+            )
+        elif rare_mutation:
+            # Legacy path still prints after legacy large-scaling mutation.
             print(
                 f"** Rare Mutation on slot {slot} (team {'red' if team_id==TEAM_RED_ID else 'blue'})! "
                 f"HP:{hp0:.2f}, ATK:{atk0:.2f}, VIS:{vision0} **"
             )
 
-        # Decide whether to clone an existing parent or create a fresh brain.
-        #
-        # use_clone is True only if:
-        #   - there exists at least one alive parent in this team (parents.numel() > 0)
-        #   - random coin flip < clone_prob
-        use_clone = (parents.numel() > 0) and (random.random() < cfg.clone_prob)
-
-        pj = None  # Parent slot index (only defined if cloning).
         if use_clone:
-            # Choose a random parent index from the parents list.
-            # random.randrange(n) returns integer in [0, n).
-            pj = int(parents[random.randrange(parents.numel())].item())
-
             # Clone the parent's brain, preserving architecture rules.
             brain = _clone_brain(reg.brains[pj], reg.device, team_id=team_id)
 
-            # Apply small Gaussian perturbation to weights for diversity.
+            # Apply standard Gaussian perturbation to weights for diversity.
             _perturb_brain_(brain, cfg.mutation_std)
+
+            # Optional heavy anomaly noise applies only on inherited/cloned path.
+            if (
+                rare_mutation
+                and bool(getattr(cfg, "rare_mutation_inherited_brain_noise_enable", False))
+                and float(getattr(cfg, "rare_mutation_inherited_brain_noise_std", 0.0)) > 0.0
+            ):
+                _perturb_brain_(brain, float(cfg.rare_mutation_inherited_brain_noise_std))
         else:
             # Create a brand-new brain using team-aware assignment rules.
             brain = _new_brain(reg.device, team_id=team_id)
@@ -974,6 +1107,10 @@ def _respawn_some(
                 "mutation_std": float(cfg.mutation_std),
                 # Additive observability fields (no behavior impact)
                 "rare_mutation": bool(rare_mutation),
+                "rare_mutation_trigger_tick_window": bool(getattr(cfg, "rare_mutation_tick_window_enable", False)),
+                "rare_mutation_heavy_brain_noise_applied": bool(
+                    rare_mutation and use_clone and bool(getattr(cfg, "rare_mutation_inherited_brain_noise_enable", False))
+                ),
                 "spawn_hp": float(hp0),
                 "spawn_atk": float(atk0),
                 "spawn_vis": int(vision0),
@@ -1035,8 +1172,37 @@ class RespawnController:
         # Tracks last tick when periodic budget was distributed.
         self._last_period_tick = 0
 
+        # Rare-mutation ticket state (tick-window mode; checkpoint-safe via checkpointing.py).
+        self._rare_mutation_pending_ticket = 0  # int for easy serialization
+        self._rare_mutation_last_window_idx = -1
+
         # Per-step metadata for all spawns performed in the most recent step.
         self.last_spawn_meta: List[Dict[str, object]] = []
+
+    def _update_rare_mutation_ticket(self, tick: int) -> None:
+        """Tick-window anomaly ticket generator (at most one pending ticket, no stacking)."""
+        if not bool(getattr(self.cfg, "rare_mutation_tick_window_enable", False)):
+            return
+
+        window_ticks = max(1, int(getattr(self.cfg, "rare_mutation_tick_window_ticks", 1000)))
+        window_idx = int(tick) // window_ticks
+
+        # Initialize baseline without granting a ticket at tick 0.
+        if self._rare_mutation_last_window_idx < 0:
+            self._rare_mutation_last_window_idx = window_idx
+            return
+
+        if window_idx > self._rare_mutation_last_window_idx:
+            if int(self._rare_mutation_pending_ticket) <= 0:
+                self._rare_mutation_pending_ticket = 1
+            # Advance to the latest observed window (no ticket stacking).
+            self._rare_mutation_last_window_idx = window_idx
+
+    def _consume_pending_rare_mutation_ticket(self) -> bool:
+        if int(self._rare_mutation_pending_ticket) > 0:
+            self._rare_mutation_pending_ticket = 0
+            return True
+        return False
 
     def step(self, tick: int, reg: AgentsRegistry, grid: torch.Tensor) -> Tuple[int, int]:
         """
@@ -1069,6 +1235,8 @@ class RespawnController:
         if not self.cfg.enabled:
             return 0, 0
 
+        self._update_rare_mutation_ticket(int(tick))
+
         counts = _team_counts(reg)
         spawned_r = spawned_b = 0
 
@@ -1090,7 +1258,8 @@ class RespawnController:
                 _cap(need, self.cfg),
                 self.cfg,
                 tick,
-                self.last_spawn_meta
+                self.last_spawn_meta,
+                controller=self
             )
             spawned_r += spawned
             if counts.red + spawned >= self.cfg.floor_per_team:
@@ -1103,7 +1272,8 @@ class RespawnController:
                 _cap(need, self.cfg),
                 self.cfg,
                 tick,
-                self.last_spawn_meta
+                self.last_spawn_meta,
+                controller=self
             )
             spawned_b += spawned
             if counts.blue + spawned >= self.cfg.floor_per_team:
@@ -1126,14 +1296,16 @@ class RespawnController:
                     _cap(q_r, self.cfg),
                     self.cfg,
                     tick,
-                    self.last_spawn_meta
+                    self.last_spawn_meta,
+                    controller=self
                 )
                 spawned_b += _respawn_some(
                     reg, grid, TEAM_BLUE_ID,
                     _cap(q_b, self.cfg),
                     self.cfg,
                     tick,
-                    self.last_spawn_meta
+                    self.last_spawn_meta,
+                    controller=self
                 )
 
         return spawned_r, spawned_b
