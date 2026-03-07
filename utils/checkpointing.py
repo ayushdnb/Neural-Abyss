@@ -987,13 +987,18 @@ class CheckpointManager:
         for i, payload in enumerate(brains_payload):
             if payload is None:
                 # Empty slot
-                registry.brains[i] = None
+                registry.set_brain(i, None)
                 continue
 
             # Create brain of appropriate kind and load state
             b = _make_brain(payload["kind"], device)
             b.load_state_dict(payload["state_dict"])
-            registry.brains[i] = b
+            registry.set_brain(i, b)
+
+        # Rebuild architecture metadata from the restored brains so checkpoint
+        # loads remain backward-compatible without storing extra bucket state.
+        if hasattr(registry, "rebuild_arch_metadata"):
+            registry.rebuild_arch_metadata()
         if hasattr(registry, "agent_uids"):
             valid_uid_mask = (registry.agent_uids >= 0)
             if bool(valid_uid_mask.any().item()):

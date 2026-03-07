@@ -889,8 +889,8 @@ def _write_agent_to_registry(
         # If dtype is not floating or finfo fails, store directly.
         reg.agent_data[slot, COL_AGENT_ID] = float(new_aid)
 
-    # Replace brain and clear optimizer (optimizer will be recreated by PPO if needed)
-    reg.brains[slot] = brain
+    # Replace brain and keep architecture metadata synchronized.
+    reg.set_brain(slot, brain)
     if hasattr(reg, "optimizers"):
         reg.optimizers[slot] = None
     if hasattr(reg, "generations") and 0 <= int(slot) < len(reg.generations):

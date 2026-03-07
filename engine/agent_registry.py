@@ -128,6 +128,9 @@ TEAM_BLUE_ID = 3.0
 UNIT_SOLDIER = float(getattr(config, "UNIT_SOLDIER", 1.0))
 UNIT_ARCHER  = float(getattr(config, "UNIT_ARCHER", 2.0))
 
+# Sentinel architecture class id for slots without a valid brain assignment.
+ARCH_CLASS_INVALID = -1
+
 # =============================================================================
 # Buckets: allow grouping agents with same NN architecture
 # =============================================================================
@@ -265,6 +268,31 @@ class AgentsRegistry:
         self.generations: List[int] = [0] * self.capacity
 
         # ---------------------------------------------------------------------
+        # Persistent per-slot architecture metadata
+        # ---------------------------------------------------------------------
+        # brain_arch_ids[slot] stores a small integer class id describing the
+        # architecture of the brain currently assigned to that slot.
+        #
+        # Important:
+        #   • This is NOT a parameter hash.
+        #   • Distinct brains with the same structure share the same class id.
+        #   • Empty / invalid slots use ARCH_CLASS_INVALID.
+        #
+        # This tensor lives on the registry device so build_buckets() can group
+        # alive slots without per-agent Python signature recomputation.
+        self.brain_arch_ids = torch.full(
+            (self.capacity,),
+            ARCH_CLASS_INVALID,
+            dtype=torch.int64,
+            device=self.device,
+        )
+
+        # Stable bidirectional mapping between signature strings and compact
+        # integer architecture ids.
+        self.signature_to_arch_id: Dict[str, int] = {}
+        self.arch_id_to_signature: Dict[int, str] = {}
+
+        # ---------------------------------------------------------------------
         # Expose column constants as instance attributes
         # ---------------------------------------------------------------------
         # This is a convenience so external code can access:
@@ -307,6 +335,9 @@ class AgentsRegistry:
         self.agent_uids.fill_(-1)
         self.brains = [None] * self.capacity
         self.generations = [0] * self.capacity
+        self.brain_arch_ids.fill_(ARCH_CLASS_INVALID)
+        self.signature_to_arch_id.clear()
+        self.arch_id_to_signature.clear()
         self._next_agent_id = 0
 
     def get_next_id(self) -> int:
@@ -333,6 +364,57 @@ class AgentsRegistry:
         agent_id = self._next_agent_id
         self._next_agent_id += 1
         return agent_id
+
+
+    def _resolve_arch_id(self, brain: nn.Module) -> int:
+        """
+        Resolve a stable small integer architecture id for the given brain.
+
+        The signature is computed once per distinct architecture string and then
+        reused across slots. This keeps the hot-path grouping key tensor-native.
+        """
+        sig = self._signature(brain)
+        arch_id = self.signature_to_arch_id.get(sig)
+        if arch_id is None:
+            arch_id = int(len(self.signature_to_arch_id))
+            self.signature_to_arch_id[sig] = arch_id
+            self.arch_id_to_signature[arch_id] = sig
+        return arch_id
+
+    def set_brain(self, slot: int, brain: Optional[nn.Module]) -> Optional[nn.Module]:
+        """
+        Assign or clear the brain for a slot while keeping architecture metadata in sync.
+
+        This is the single choke point that should be used whenever a slot's brain
+        module is created, replaced, restored, or invalidated.
+        """
+        assert 0 <= int(slot) < self.capacity
+
+        if brain is None:
+            self.brains[int(slot)] = None
+            self.brain_arch_ids[int(slot)] = ARCH_CLASS_INVALID
+            return None
+
+        moved = brain.to(self.device)
+        self.brains[int(slot)] = moved
+        self.brain_arch_ids[int(slot)] = self._resolve_arch_id(moved)
+        return moved
+
+    def rebuild_arch_metadata(self) -> None:
+        """
+        Recompute architecture ids for all slots from the current brains list.
+
+        This is intentionally O(capacity) and meant for cold paths such as
+        checkpoint restore or defensive repair, not the per-tick inference path.
+        """
+        self.brain_arch_ids.fill_(ARCH_CLASS_INVALID)
+        self.signature_to_arch_id.clear()
+        self.arch_id_to_signature.clear()
+
+        for slot, brain in enumerate(self.brains):
+            if brain is None:
+                continue
+            self.brain_arch_ids[slot] = self._resolve_arch_id(brain)
 
     def register(
         self,
@@ -469,7 +551,7 @@ class AgentsRegistry:
         # Note: this mutates brain in-place in the sense that it returns a module
         # placed on the target device; PyTorch modules are typically moved by
         # calling .to(...) which returns the same module reference.
-        self.brains[slot]  = brain.to(self.device)
+        self.set_brain(slot, brain)
 
         # Store generation marker as a Python int.
         self.generations[slot] = int(generation)
@@ -579,7 +661,7 @@ class AgentsRegistry:
 
     def build_buckets(self, alive_idx: torch.Tensor) -> List[Bucket]:
         """
-        Group alive agents by model signature for batched inference.
+        Group alive agents by persistent architecture class for batched inference.
 
         Input:
         ------
@@ -592,70 +674,130 @@ class AgentsRegistry:
         and contains:
           • indices: slot indices in that bucket
           • models: corresponding brain modules
+          • locs: positions of those slots inside alive_idx
 
-        Algorithm:
-        ----------
-        1) Iterate over alive_idx (converted to Python list for iteration).
-        2) For each agent slot:
-            • retrieve brain module
-            • if brain is None: mark agent dead and skip
-            • else compute signature and append slot to dict[signature]
-        3) Convert each dict entry into a Bucket:
-            • indices stored as a LongTensor on the registry device
-            • models list retrieved in the same order
-
-        Design implications:
-        --------------------
-        The presence of per-agent brain modules suggests agents may undergo
-        mutation, specialization, or per-agent learning. Grouping by signature
-        enables future optimizations such as:
-          • batching observation tensors for all agents in the same bucket
-          • running inference in fewer forward passes
-          • reducing Python overhead from per-agent calls
+        Hot-path design:
+        ----------------
+        The expensive architecture signature computation is no longer performed
+        per alive agent on every tick. Instead:
+          1) per-slot architecture ids are maintained persistently whenever a
+             brain is assigned or cleared;
+          2) alive slots gather those ids with one tensor index_select;
+          3) grouping is performed with tensor sorting and boundary detection;
+          4) only the final Bucket.models assembly touches Python lists.
 
         Correctness note:
         -----------------
-        If an alive agent has brain=None, the code forcefully sets its alive flag
-        to 0.0. This indicates that the registry treats "missing brain" as an
-        invalid agent state and resolves it by killing the agent.
+        If an alive agent has brain=None or invalid metadata, the method repairs
+        that inconsistency on a slow fallback path for the affected slots only.
         """
-        # Each entry is (local_pos_in_alive_idx, global_slot_id).
-        buckets_dict: Dict[str, List] = {}
+        if alive_idx is None or alive_idx.numel() == 0:
+            return []
 
-        # Iterate over agent indices. alive_idx.tolist() materializes data to CPU
-        # and creates a Python list; this is fine when the number of alive agents
-        # is not enormous, but it is a deliberate trade-off for simplicity.
-        for local_pos, i in enumerate(alive_idx.tolist()):
-            brain = self.brains[i]
+        if alive_idx.dtype != torch.long:
+            alive_idx = alive_idx.to(torch.long)
 
-            # If brain is missing, declare the agent dead as a consistency fix.
-            if brain is None:
-                self.agent_data[i, COL_ALIVE] = 0.0
-                continue
+        # local_pos[j] is the position of alive_idx[j] inside alive_idx itself.
+        local_pos = torch.arange(alive_idx.numel(), device=alive_idx.device, dtype=torch.long)
 
-            # Compute signature key and append slot index into bucket dictionary.
-            key = self._signature(brain)
-            buckets_dict.setdefault(key, []).append((local_pos, i))
+        # Primary grouping key: persistent per-slot architecture class ids.
+        arch_ids = self.brain_arch_ids.index_select(0, alive_idx)
+
+        # Slow-path repair only for slots whose metadata is invalid.
+        invalid_mask = (arch_ids == ARCH_CLASS_INVALID)
+        if bool(invalid_mask.any().item()):
+            bad_slots = alive_idx[invalid_mask]
+            bad_locs = local_pos[invalid_mask]
+
+            for loc_i, slot_i in zip(bad_locs.tolist(), bad_slots.tolist()):
+                brain = self.brains[slot_i]
+                if brain is None:
+                    self.agent_data[slot_i, COL_ALIVE] = 0.0
+                    self.set_brain(slot_i, None)
+                    continue
+
+                self.set_brain(slot_i, brain)
+                arch_ids[loc_i] = self.brain_arch_ids[slot_i]
+
+        valid_mask = (arch_ids != ARCH_CLASS_INVALID)
+        if not bool(valid_mask.any().item()):
+            return []
+
+        valid_arch_ids = arch_ids[valid_mask]
+        valid_slots = alive_idx[valid_mask]
+        valid_locs = local_pos[valid_mask]
+
+        # Stable sort by architecture id. Because the sort is stable, the order of
+        # slots within each architecture bucket remains the same as in alive_idx.
+        sort_order = torch.argsort(valid_arch_ids, stable=True)
+        sorted_arch_ids = valid_arch_ids[sort_order]
+        sorted_slots = valid_slots[sort_order]
+        sorted_locs = valid_locs[sort_order]
+
+        # Find group boundaries in the sorted architecture-id stream.
+        group_start_mask = torch.ones_like(sorted_arch_ids, dtype=torch.bool)
+        group_start_mask[1:] = (sorted_arch_ids[1:] != sorted_arch_ids[:-1])
+        group_starts = group_start_mask.nonzero(as_tuple=False).squeeze(1)
+
+        group_ends = torch.empty_like(group_starts)
+        group_ends[:-1] = group_starts[1:]
+        group_ends[-1] = sorted_arch_ids.numel()
+
+        # Preserve the historical bucket ordering: buckets appear in the order of
+        # first occurrence inside alive_idx, not sorted by architecture id.
+        first_locs = sorted_locs.index_select(0, group_starts)
+        bucket_order = torch.argsort(first_locs, stable=True)
 
         out: List[Bucket] = []
 
-        # Construct Bucket objects from the dictionary.
-        for key, lst in buckets_dict.items():
-            # Convert slot list into a LongTensor on the registry device.
-            locs_list  = [lp for lp, _  in lst]
-            slots_list = [gs for _,  gs in lst]
+        for order_i in bucket_order.tolist():
+            start = int(group_starts[order_i].item())
+            end = int(group_ends[order_i].item())
 
-            idx  = torch.tensor(slots_list, dtype=torch.long, device=self.device)
-            locs = torch.tensor(locs_list,  dtype=torch.long, device=self.device)
+            bucket_slots = sorted_slots[start:end]
+            bucket_locs = sorted_locs[start:end]
+            arch_id = int(sorted_arch_ids[start].item())
 
-            models = [
-                self.brains[j]
-                for j in slots_list
-                if j < len(self.brains) and self.brains[j] is not None
-            ]
+            signature = self.arch_id_to_signature.get(arch_id)
+            if signature is None:
+                first_slot = int(bucket_slots[0].item())
+                first_brain = self.brains[first_slot]
+                if first_brain is None:
+                    self.agent_data[first_slot, COL_ALIVE] = 0.0
+                    self.set_brain(first_slot, None)
+                    continue
+                signature = self._signature(first_brain)
+                self.signature_to_arch_id.setdefault(signature, arch_id)
+                self.arch_id_to_signature[arch_id] = signature
 
-            # Only append non-empty buckets.
-            if models:
-                out.append(Bucket(signature=key, indices=idx, models=models, locs=locs))
+            slot_list = bucket_slots.tolist()
+            loc_list = bucket_locs.tolist()
+
+            models: List[nn.Module] = []
+            keep_slots: List[int] = []
+            keep_locs: List[int] = []
+
+            for slot_i, loc_i in zip(slot_list, loc_list):
+                brain = self.brains[slot_i]
+                if brain is None:
+                    self.agent_data[slot_i, COL_ALIVE] = 0.0
+                    self.set_brain(slot_i, None)
+                    continue
+
+                models.append(brain)
+                keep_slots.append(int(slot_i))
+                keep_locs.append(int(loc_i))
+
+            if not models:
+                continue
+
+            if len(keep_slots) == len(slot_list):
+                idx = bucket_slots
+                locs = bucket_locs
+            else:
+                idx = torch.tensor(keep_slots, dtype=torch.long, device=self.device)
+                locs = torch.tensor(keep_locs, dtype=torch.long, device=self.device)
+
+            out.append(Bucket(signature=signature, indices=idx, models=models, locs=locs))
 
         return out
