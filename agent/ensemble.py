@@ -2,6 +2,8 @@ from __future__ import annotations
 # ^ Postpones evaluation of type hints (PEP 563 / modern Python behavior via __future__).
 #   This helps avoid issues when using forward references (types not yet defined at parse time).
 
+from collections import OrderedDict
+from dataclasses import dataclass
 from typing import List, Tuple, Optional, Any
 # ^ Standard typing imports:
 #   - List[T]: list of T
@@ -46,6 +48,126 @@ class _DistWrap:
 
 # Global state used to ensure we only emit the "warn once" message a single time.
 _VMAP_WARNED: bool = False
+
+
+# Cache for stacked torch.func module state used by the vmap inference path.
+#
+# Safety model:
+# - Cache reuse is keyed by the ordered model identities and an explicit
+#   fingerprint of every parameter/buffer tensor currently owned by those models.
+# - The fingerprint includes each tensor object identity plus its in-place
+#   mutation version counter, so optimizer.step() / load_state_dict() / buffer
+#   updates naturally invalidate the cache without changing external code paths.
+# - Brain replacement naturally misses because registry/respawn paths replace the
+#   nn.Module object stored for a slot.
+# - Entries retain strong references to the models they were built from so Python
+#   cannot recycle an object id into a false cache hit while the entry is alive.
+# - Size is bounded to avoid unbounded memory growth if bucket compositions churn.
+
+
+@dataclass
+class _StackedStateCacheEntry:
+    models: Tuple[nn.Module, ...]
+    fingerprints: Tuple[Tuple[Any, ...], ...]
+    params_batched: Any
+    buffers_batched: Any
+
+
+_VMAP_STACK_CACHE: "OrderedDict[Tuple[Any, ...], _StackedStateCacheEntry]" = OrderedDict()
+
+
+def _stack_cache_max_entries() -> int:
+    """Return the configured max number of cached stacked-state entries.
+
+    A value <= 0 disables the cache entirely.
+    """
+    try:
+        return int(getattr(config, "VMAP_STACK_CACHE_MAX", 128))
+    except Exception:
+        return 128
+
+
+def clear_stacked_vmap_cache() -> None:
+    """Clear all cached stacked vmap parameter/buffer entries."""
+    _VMAP_STACK_CACHE.clear()
+
+
+def _evict_old_stack_cache_entries(max_entries: int) -> None:
+    """Bound the number of cached bucket entries to avoid memory growth."""
+    while len(_VMAP_STACK_CACHE) > max_entries:
+        _VMAP_STACK_CACHE.popitem(last=False)
+
+
+def _tensor_state_token(t: torch.Tensor) -> Tuple[Any, ...]:
+    """Return a lightweight identity+freshness token for one tensor.
+
+    The private tensor version counter increments on in-place mutations, which is
+    exactly what optimizer.step() and state_dict restoration do to parameters and
+    buffers in this codebase.
+    """
+    return (
+        id(t),
+        int(getattr(t, "_version", -1)),
+        t.device.type,
+        t.device.index,
+        str(t.dtype),
+        tuple(t.shape),
+    )
+
+
+def _model_state_fingerprint(model: nn.Module) -> Tuple[Any, ...]:
+    """Build a deterministic fingerprint of one model's current tensor state."""
+    parts: List[Tuple[Any, ...]] = []
+    for p in model.parameters():
+        parts.append(_tensor_state_token(p))
+    for b in model.buffers():
+        parts.append(_tensor_state_token(b))
+    return tuple(parts)
+
+
+def _make_stack_cache_key(models: List[nn.Module], device: torch.device) -> Tuple[Tuple[Any, ...], Tuple[Tuple[Any, ...], ...]]:
+    """Build a cache key from ordered model identities, tensor freshness, and device."""
+    fingerprints = tuple(_model_state_fingerprint(m) for m in models)
+    key = (device.type, device.index, tuple((id(m), fp) for m, fp in zip(models, fingerprints)))
+    return key, fingerprints
+
+
+def _stacked_module_state_cached(models: List[nn.Module], device: torch.device) -> Tuple[Any, Any]:
+    """Return stacked module state, reusing a safe cache entry when possible.
+
+    Reuse is allowed only when:
+    - the ordered model list is the exact same list of nn.Module objects, and
+    - every parameter/buffer freshness token in every model matches.
+    """
+    max_entries = _stack_cache_max_entries()
+    if max_entries <= 0:
+        return stack_module_state(models)
+
+    key, fingerprints = _make_stack_cache_key(models, device)
+    entry = _VMAP_STACK_CACHE.get(key)
+    if entry is not None:
+        same_models = (
+            len(entry.models) == len(models)
+            and entry.fingerprints == fingerprints
+            and all(cached is current for cached, current in zip(entry.models, models))
+        )
+        if same_models:
+            _VMAP_STACK_CACHE.move_to_end(key)
+            return entry.params_batched, entry.buffers_batched
+
+        # Defensive cleanup: if identities/fingerprints mismatched despite a key
+        # hit (for example after manual tampering), drop the stale entry.
+        _VMAP_STACK_CACHE.pop(key, None)
+
+    params_batched, buffers_batched = stack_module_state(models)
+    _VMAP_STACK_CACHE[key] = _StackedStateCacheEntry(
+        models=tuple(models),
+        fingerprints=fingerprints,
+        params_batched=params_batched,
+        buffers_batched=buffers_batched,
+    )
+    _evict_old_stack_cache_entries(max_entries)
+    return params_batched, buffers_batched
 
 def _is_torchscript_module(m: nn.Module) -> bool:
     """
@@ -218,7 +340,11 @@ def _ensemble_forward_vmap(models: List[nn.Module], obs: torch.Tensor) -> Tuple[
     # Stack parameters and buffers from each model:
     # - params_batched: pytree-like structure where each tensor has leading dim K
     # - buffers_batched: same idea for buffers (e.g., running stats in BatchNorm)
-    params_batched, buffers_batched = stack_module_state(models)
+    #
+    # The expensive stack_module_state(models) reconstruction is cached as long as
+    # the ordered model list and each model's parameter/buffer freshness tokens
+    # remain unchanged.
+    params_batched, buffers_batched = _stacked_module_state_cached(models, obs.device)
 
     # Ensure obs matches (K, F) exactly.
     x = obs
