@@ -54,6 +54,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Any, Optional
 import math  # (imported; may be unused in this snippet but kept as-is)
+import os
 
 import torch
 import torch.nn.functional as F
@@ -165,6 +166,15 @@ class PerAgentPPORuntime:
         self.minibatches = int(getattr(config, "PPO_MINIBATCHES", 1))
         self.max_grad_norm = float(getattr(config, "PPO_MAX_GRAD_NORM", 1.0))
         self.target_kl = float(getattr(config, "PPO_TARGET_KL", 0.0))
+
+        # Strict rollout validation is kept available, but it is opt-in on the
+        # record_step() hot path unless the broader config strict mode is enabled.
+        # Fast-path correctness is still preserved because rollout sampling and
+        # log-prob recording both use the same masked policy logits.
+        self.strict_rollout_validation = (
+            bool(getattr(config, "CONFIG_STRICT", False))
+            or os.getenv("FWS_PPO_STRICT_ROLLOUT_VALIDATE", "0") in ("1", "true", "True")
+        )
 
         # ------------------------------------------------------------------
         # Per-slot PPO state
@@ -428,11 +438,26 @@ class PerAgentPPORuntime:
         else:
             action_masks = action_masks.to(dtype=torch.bool)
 
-        if not bool(action_masks.any(dim=-1).all().item()):
-            raise RuntimeError("[ppo] action_masks contains a row with no legal actions")
-        ar = torch.arange(actions.numel(), device=actions.device)
-        if not bool(action_masks[ar, actions.long()].all().item()):
-            raise RuntimeError("[ppo] chosen action is illegal under rollout action_masks")
+        # Expensive rollout legality assertions remain available, but they are
+        # guarded so the common record_step() fast path does not force an
+        # unconditional device->host synchronization every tick. In normal
+        # runtime the chosen action is still produced from the exact same masked
+        # logits recorded below, so agent behavior and PPO semantics do not change.
+        if self.strict_rollout_validation:
+            bad_rows = (~action_masks.any(dim=-1)).nonzero(as_tuple=False).squeeze(1)
+            if bad_rows.numel() != 0:
+                bad_rows_list = bad_rows[:8].detach().cpu().to(torch.int64).tolist()
+                raise RuntimeError(
+                    f"[ppo] action_masks contains row(s) with no legal actions: first_bad_rows={bad_rows_list}"
+                )
+
+            ar = torch.arange(actions.numel(), device=actions.device)
+            bad_actions = (~action_masks[ar, actions.long()]).nonzero(as_tuple=False).squeeze(1)
+            if bad_actions.numel() != 0:
+                bad_actions_list = bad_actions[:8].detach().cpu().to(torch.int64).tolist()
+                raise RuntimeError(
+                    f"[ppo] chosen action is illegal under rollout action_masks: first_bad_rows={bad_actions_list}"
+                )
 
         # Compute log probabilities of chosen actions under the SAME masked rollout policy (fp32).
         logits_masked = self._mask_logits(logits, action_masks)

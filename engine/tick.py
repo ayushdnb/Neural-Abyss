@@ -652,51 +652,78 @@ class TickEngine:
             raise RuntimeError(f"[tick] unsupported death_cause={death_cause!r}")
 
         # Snapshot metadata BEFORE mutation (positions/teams/units/uids are still readable now).
-        dead_slots = [int(s) for s in dead_idx.tolist()]
+        dead_slots = dead_idx.detach().cpu().to(torch.int64).tolist()
+        dead_rows = data.index_select(0, dead_idx)
+        dead_team_list = dead_rows[:, COL_TEAM].detach().cpu().to(torch.int64).tolist()
+        dead_unit_list = dead_rows[:, COL_UNIT].detach().cpu().to(torch.int64).tolist()
         dead_ids = self._slot_ids_to_agent_uids_list(dead_idx)
-        dead_team_list = [int(data[slot, COL_TEAM].item()) for slot in dead_slots]
-        dead_unit_list = [int(data[slot, COL_UNIT].item()) for slot in dead_slots]
 
-        # Structured killer alignment for telemetry/death forensics.
+        # Structured killer alignment for telemetry/death forensics. Batch-extract
+        # killer metadata once so the remaining bookkeeping loop consumes plain
+        # Python values rather than triggering repeated per-element tensor reads.
         killer_slots_list: List[Optional[int]] = []
         killer_ids_list: List[Optional[int]] = []
         killer_team_list: List[Optional[int]] = []
 
         if killer_slot_by_victim is not None and len(killer_slot_by_victim) > 0:
+            raw_killer_slots: List[Optional[int]] = []
+            valid_killer_slots: List[int] = []
+            capacity = int(data.shape[0])
+
             for dead_slot in dead_slots:
                 ks = killer_slot_by_victim.get(int(dead_slot), None)
-                if ks is None or int(ks) < 0:
+                ks = (int(ks) if ks is not None else None)
+                if ks is None or ks < 0:
+                    raw_killer_slots.append(None)
+                    continue
+                if ks >= capacity:
+                    raise RuntimeError(f"[tick] killer slot out of range: victim_slot={dead_slot} killer_slot={ks}")
+                raw_killer_slots.append(ks)
+                valid_killer_slots.append(ks)
+
+            killer_team_by_slot: Dict[int, int] = {}
+            killer_id_by_slot: Dict[int, int] = {}
+            if valid_killer_slots:
+                uniq_killer_slots = sorted(set(valid_killer_slots))
+                uniq_killer_tensor = torch.tensor(uniq_killer_slots, device=self.device, dtype=torch.long)
+                killer_rows = data.index_select(0, uniq_killer_tensor)
+                killer_teams_cpu = killer_rows[:, COL_TEAM].detach().cpu().to(torch.int64).tolist()
+                if hasattr(self.registry, "agent_uids"):
+                    killer_ids_cpu = self.registry.agent_uids.index_select(0, uniq_killer_tensor).detach().cpu().to(torch.int64).tolist()
+                else:
+                    killer_ids_cpu = killer_rows[:, COL_AGENT_ID].detach().cpu().to(torch.int64).tolist()
+                killer_team_by_slot = {slot: team for slot, team in zip(uniq_killer_slots, killer_teams_cpu)}
+                killer_id_by_slot = {slot: kid for slot, kid in zip(uniq_killer_slots, killer_ids_cpu)}
+
+            for dead_slot, dead_team_val, ks in zip(dead_slots, dead_team_list, raw_killer_slots):
+                if ks is None:
                     killer_slots_list.append(None)
                     killer_ids_list.append(None)
                     killer_team_list.append(None)
                     continue
 
-                ks = int(ks)
-                if ks >= int(data.shape[0]):
-                    raise RuntimeError(f"[tick] killer slot out of range: victim_slot={dead_slot} killer_slot={ks}")
-                if ks == int(dead_slot):
+                if ks == dead_slot:
                     raise RuntimeError(f"[tick] self-kill attribution detected for slot={ks}")
-                if int(data[ks, COL_TEAM].item()) == int(data[int(dead_slot), COL_TEAM].item()):
+
+                killer_team_val = killer_team_by_slot.get(ks, None)
+                if killer_team_val is None:
+                    raise RuntimeError(f"[tick] missing killer metadata for killer_slot={ks}")
+                if killer_team_val == dead_team_val:
                     raise RuntimeError(
                         f"[tick] friendly-fire killer attribution detected: victim_slot={dead_slot} killer_slot={ks}"
                     )
+
                 killer_slots_list.append(ks)
-
-                if hasattr(self.registry, "agent_uids"):
-                    killer_ids_list.append(int(self.registry.agent_uids[ks].item()))
-                else:
-                    killer_ids_list.append(int(data[ks, COL_AGENT_ID].item()))
-
-                killer_team_list.append(int(data[ks, COL_TEAM].item()))
+                killer_ids_list.append(killer_id_by_slot.get(ks, None))
+                killer_team_list.append(killer_team_val)
         else:
             killer_slots_list = [None] * len(dead_slots)
             killer_ids_list = [None] * len(dead_slots)
             killer_team_list = [None] * len(dead_slots)
 
         # Count deaths by team encoding (read before ALIVE zeroing).
-        dead_team = data[dead_idx, COL_TEAM]
-        red_deaths = int((dead_team == 2.0).sum().item())
-        blue_deaths = int((dead_team == 3.0).sum().item())
+        red_deaths = dead_team_list.count(2)
+        blue_deaths = dead_team_list.count(3)
 
         # Update global stats (semantic counters).
         if red_deaths:
@@ -716,6 +743,8 @@ class TickEngine:
         # post-death readers do not observe "death event emitted but agent still alive on grid".
         gx = self._as_long(data[dead_idx, COL_X])
         gy = self._as_long(data[dead_idx, COL_Y])
+        gx_list = gx.detach().cpu().to(torch.int64).tolist()
+        gy_list = gy.detach().cpu().to(torch.int64).tolist()
 
         # Root structured death log for ResultsWriter -> dead_agents_log.csv.
         # For clean runs from tick 0, emit explicit cause + real killer metadata when known.
@@ -735,8 +764,8 @@ class TickEngine:
                     rec_fn(
                         agent_id=int(dead_ids[i]),
                         team_id_val=float(victim_team),
-                        x=int(gx[i].item()),
-                        y=int(gy[i].item()),
+                        x=int(gx_list[i]),
+                        y=int(gy_list[i]),
                         killer_team_id_val=(float(killer_team) if killer_team in (2, 3) else None),
                         killer_agent_id=(int(killer_id) if killer_id is not None else None),
                         killer_slot=(int(killer_slot) if killer_slot is not None else None),
@@ -1101,12 +1130,16 @@ class TickEngine:
 
         if force or os.getenv("FWS_DEBUG_VALIDATE_ACTIONS", "0") in ("1", "true", "True"):
             if actions.numel() > 0:
-                if (actions < 0).any() or (actions >= config.NUM_ACTIONS).any():
-                    raise RuntimeError("[tick] sampled action out of range (mask/sampling bug)")
+                bad_range = ((actions < 0) | (actions >= config.NUM_ACTIONS)).nonzero(as_tuple=False).squeeze(1)
+                if bad_range.numel() != 0:
+                    bad_range_list = bad_range[:8].detach().cpu().to(torch.int64).tolist()
+                    raise RuntimeError(
+                        f"[tick] sampled action out of range (first_bad_local_idx={bad_range_list}; mask/sampling bug)"
+                    )
                 ar = torch.arange(actions.numel(), device=actions.device)
-                ok = mask[ar, actions]
-                if not bool(ok.all().item()):
-                    bad = ar[~ok][:8].detach().cpu().tolist()
+                bad_masked = (~mask[ar, actions]).nonzero(as_tuple=False).squeeze(1)
+                if bad_masked.numel() != 0:
+                    bad = bad_masked[:8].detach().cpu().to(torch.int64).tolist()
                     raise RuntimeError(
                         f"[tick] chosen action is masked out (first_bad_local_idx={bad}, use FWS_DEBUG_FORCE_ACTIONS to reproduce)"
                     )
@@ -2003,3 +2036,4 @@ class TickEngine:
 
         # Return metrics as a dict
         return vars(metrics)
+

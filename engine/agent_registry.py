@@ -704,26 +704,28 @@ class AgentsRegistry:
         arch_ids = self.brain_arch_ids.index_select(0, alive_idx)
 
         # Slow-path repair only for slots whose metadata is invalid.
+        # We batch the host transfer for the rare invalid subset instead of
+        # doing repeated per-slot scalar extraction from device tensors.
         invalid_mask = (arch_ids == ARCH_CLASS_INVALID)
-        if bool(invalid_mask.any().item()):
-            bad_slots = alive_idx[invalid_mask]
-            bad_locs = local_pos[invalid_mask]
+        bad_slots = alive_idx[invalid_mask]
+        bad_locs = local_pos[invalid_mask]
+        bad_pairs = torch.stack((bad_locs, bad_slots), dim=1).detach().cpu().to(torch.int64).tolist() if bad_slots.numel() > 0 else []
 
-            for loc_i, slot_i in zip(bad_locs.tolist(), bad_slots.tolist()):
-                brain = self.brains[slot_i]
-                if brain is None:
-                    self.agent_data[slot_i, COL_ALIVE] = 0.0
-                    self.set_brain(slot_i, None)
-                    continue
+        for loc_i, slot_i in bad_pairs:
+            brain = self.brains[slot_i]
+            if brain is None:
+                self.agent_data[slot_i, COL_ALIVE] = 0.0
+                self.set_brain(slot_i, None)
+                continue
 
-                self.set_brain(slot_i, brain)
-                arch_ids[loc_i] = self.brain_arch_ids[slot_i]
+            self.set_brain(slot_i, brain)
+            arch_ids[loc_i] = self.brain_arch_ids[slot_i]
 
         valid_mask = (arch_ids != ARCH_CLASS_INVALID)
-        if not bool(valid_mask.any().item()):
+        valid_arch_ids = arch_ids[valid_mask]
+        if valid_arch_ids.numel() == 0:
             return []
 
-        valid_arch_ids = arch_ids[valid_mask]
         valid_slots = alive_idx[valid_mask]
         valid_locs = local_pos[valid_mask]
 
@@ -750,17 +752,21 @@ class AgentsRegistry:
 
         out: List[Bucket] = []
 
-        for order_i in bucket_order.tolist():
-            start = int(group_starts[order_i].item())
-            end = int(group_ends[order_i].item())
+        # Batch the small per-bucket metadata needed by the Python assembly loop
+        # so we avoid repeated .item() extraction for every group boundary.
+        group_arch_ids = sorted_arch_ids.index_select(0, group_starts)
+        group_meta = torch.stack((group_starts, group_ends, group_arch_ids), dim=1).detach().cpu().to(torch.int64).tolist()
+        bucket_order_list = bucket_order.detach().cpu().to(torch.int64).tolist()
+
+        for order_i in bucket_order_list:
+            start, end, arch_id = group_meta[order_i]
 
             bucket_slots = sorted_slots[start:end]
             bucket_locs = sorted_locs[start:end]
-            arch_id = int(sorted_arch_ids[start].item())
 
             signature = self.arch_id_to_signature.get(arch_id)
             if signature is None:
-                first_slot = int(bucket_slots[0].item())
+                first_slot = int(bucket_slots[0].detach().cpu().item())
                 first_brain = self.brains[first_slot]
                 if first_brain is None:
                     self.agent_data[first_slot, COL_ALIVE] = 0.0
@@ -770,14 +776,13 @@ class AgentsRegistry:
                 self.signature_to_arch_id.setdefault(signature, arch_id)
                 self.arch_id_to_signature[arch_id] = signature
 
-            slot_list = bucket_slots.tolist()
-            loc_list = bucket_locs.tolist()
+            slot_loc_pairs = torch.stack((bucket_slots, bucket_locs), dim=1).detach().cpu().to(torch.int64).tolist()
 
             models: List[nn.Module] = []
             keep_slots: List[int] = []
             keep_locs: List[int] = []
 
-            for slot_i, loc_i in zip(slot_list, loc_list):
+            for slot_i, loc_i in slot_loc_pairs:
                 brain = self.brains[slot_i]
                 if brain is None:
                     self.agent_data[slot_i, COL_ALIVE] = 0.0
@@ -791,7 +796,7 @@ class AgentsRegistry:
             if not models:
                 continue
 
-            if len(keep_slots) == len(slot_list):
+            if len(keep_slots) == len(slot_loc_pairs):
                 idx = bucket_slots
                 locs = bucket_locs
             else:
@@ -801,3 +806,4 @@ class AgentsRegistry:
             out.append(Bucket(signature=signature, indices=idx, models=models, locs=locs))
 
         return out
+
