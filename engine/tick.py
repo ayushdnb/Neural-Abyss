@@ -77,7 +77,7 @@ from engine.respawn import RespawnController, RespawnCfg
 from engine.mapgen import Zones
 
 from agent.ensemble import ensemble_forward
-from agent.transformer_brain import TransformerBrain  # (Imported, may be used elsewhere / kept as-is)
+
 
 # -------------------------------------------------------------------------
 # TYPE_CHECKING is True only for static analysis / IDE type checking.

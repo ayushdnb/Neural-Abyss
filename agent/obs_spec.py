@@ -170,6 +170,53 @@ def split_obs_flat(obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch
     return rays_flat, rich_base, instinct
 
 
+def split_obs_for_mlp(obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Shared preprocessing entry point for the new two-token MLP brain family.
+
+    Returns:
+        rays_raw:
+            Shape (B, RAY_TOKEN_COUNT, RAY_FEAT_DIM)
+            This preserves the existing ray-token interpretation exactly.
+
+        rich_vec:
+            Shape (B, RICH_BASE_DIM + INSTINCT_DIM)
+            This is the full non-ray tail packed into one vector so the brain
+            can project it into a single rich token.
+
+    Design intent:
+    - Keep the observation schema authoritative in one place.
+    - Do NOT duplicate hard-coded slicing logic inside each brain variant.
+    - Do NOT change feature ordering or semantic meaning.
+    """
+    rays_flat, rich_base, instinct = split_obs_flat(obs)
+
+    B = int(obs.shape[0])
+    num_rays = int(config.RAY_TOKEN_COUNT)
+    ray_feat_dim = int(config.RAY_FEAT_DIM)
+    expected_rays_flat = num_rays * ray_feat_dim
+
+    if int(rays_flat.shape[1]) != expected_rays_flat:
+        raise RuntimeError(
+            f"rays_flat dim mismatch for MLP path: got {int(rays_flat.shape[1])}, "
+            f"expected {expected_rays_flat} = {num_rays}*{ray_feat_dim}"
+        )
+
+    # reshape is used instead of view so the helper is robust even if the input
+    # tensor is non-contiguous.
+    rays_raw = rays_flat.reshape(B, num_rays, ray_feat_dim)
+
+    rich_vec = torch.cat([rich_base, instinct], dim=1)
+    expected_rich = int(config.RICH_BASE_DIM) + int(config.INSTINCT_DIM)
+    if int(rich_vec.shape[1]) != expected_rich:
+        raise RuntimeError(
+            f"rich_vec dim mismatch for MLP path: got {int(rich_vec.shape[1])}, "
+            f"expected {expected_rich}"
+        )
+
+    return rays_raw, rich_vec
+
+
 def build_semantic_tokens(
     rich_base: torch.Tensor,
     instinct: torch.Tensor,

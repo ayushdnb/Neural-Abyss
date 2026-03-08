@@ -28,9 +28,7 @@ import config
 from .agent_registry import AgentsRegistry
 
 # Brains
-from agent.transformer_brain import TransformerBrain, scripted_transformer_brain
-from agent.tron_brain import TronBrain
-from agent.mirror_brain import MirrorBrain
+from agent.mlp_brain import create_mlp_brain
 
 
 def _rect_dims(n: int, max_cols: int, max_rows: int) -> Tuple[int, int, int]:
@@ -156,8 +154,7 @@ _TEAM_BRAIN_MIX_RNG = {True: _make_team_mix_rng(True), False: _make_team_mix_rng
 
 def _resolve_team_brain_kind(team_is_red: bool) -> str:
     """
-    Returns: "tron" | "mirror" | "transformer"
-    Default behavior remains: exclusive split (red=tron, blue=mirror).
+    Returns one of the configured MLP brain kinds.
 
     HIGH-LEVEL POLICY
     -----------------
@@ -166,27 +163,20 @@ def _resolve_team_brain_kind(team_is_red: bool) -> str:
 
     Supported modes (TEAM_BRAIN_ASSIGNMENT_MODE):
       1) "exclusive" / "split" / "team"
-         - Fixed architecture per team:
-             red  -> tron
-             blue -> mirror
-         - This preserves older behavior and makes comparisons stable.
+         - Fixed architecture per team.
 
       2) "mix" / "hybrid" / "both"
-         - Each team may spawn both architectures according to a strategy:
+         - Each team may spawn configured MLP variants according to a strategy:
              a) alternate / roundrobin / rr
              b) random / prob / probabilistic
 
     STRATEGIES
     ----------
     alternate:
-      - deterministic toggling based on per-team counter
-      - guarantees near-50/50 split over time for each team
+      - deterministic cycling based on per-team counter and configured sequence
 
     probabilistic:
-      - independent Bernoulli trial:
-            tron with probability p_tron
-            mirror otherwise
-      - p_tron is clamped to [0, 1] for safety.
+      - weighted random draw across the configured MLP family
 
     ERROR HANDLING
     --------------
@@ -194,26 +184,45 @@ def _resolve_team_brain_kind(team_is_red: bool) -> str:
     an intentionally "fail fast" policy: misconfiguration should surface early.
     """
     mode = str(getattr(config, "TEAM_BRAIN_ASSIGNMENT_MODE", "exclusive")).strip().lower()
+    default_kind = str(getattr(config, "BRAIN_KIND", "whispering_abyss")).strip().lower()
 
-    # Old behavior
     if mode in ("exclusive", "split", "team"):
-        return "tron" if team_is_red else "mirror"
+        if team_is_red:
+            return str(getattr(config, "TEAM_BRAIN_EXCLUSIVE_RED", default_kind)).strip().lower()
+        return str(getattr(config, "TEAM_BRAIN_EXCLUSIVE_BLUE", default_kind)).strip().lower()
 
     if mode in ("mix", "hybrid", "both"):
         strategy = str(getattr(config, "TEAM_BRAIN_MIX_STRATEGY", "alternate")).strip().lower()
+        seq = tuple(
+            str(x).strip().lower()
+            for x in getattr(config, "TEAM_BRAIN_MIX_SEQUENCE", (default_kind,))
+            if str(x).strip()
+        ) or (default_kind,)
 
-        # Deterministic 50/50: tron, mirror, tron, mirror...
         if strategy in ("alternate", "roundrobin", "rr"):
             i = _TEAM_BRAIN_MIX_COUNTER[team_is_red]
             _TEAM_BRAIN_MIX_COUNTER[team_is_red] = i + 1
-            return "tron" if (i % 2 == 0) else "mirror"
+            return seq[i % len(seq)]
 
-        # Probabilistic: P(tron)=TEAM_BRAIN_MIX_P_TRON
         if strategy in ("random", "prob", "probabilistic"):
-            p_tron = float(getattr(config, "TEAM_BRAIN_MIX_P_TRON", 0.5))
-            p_tron = max(0.0, min(1.0, p_tron))
             r = _TEAM_BRAIN_MIX_RNG[team_is_red].random()
-            return "tron" if (r < p_tron) else "mirror"
+            weighted = (
+                ("whispering_abyss", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_WHISPERING_ABYSS", 0.0)))),
+                ("veil_of_echoes", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_VEIL_OF_ECHOES", 0.0)))),
+                ("cathedral_of_ash", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_CATHEDRAL_OF_ASH", 0.0)))),
+                ("dreamer_in_black_fog", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_DREAMER_IN_BLACK_FOG", 0.0)))),
+                ("obsidian_pulse", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_OBSIDIAN_PULSE", 0.0)))),
+            )
+            total = sum(w for _, w in weighted)
+            if total <= 0.0:
+                return default_kind
+            r *= total
+            acc = 0.0
+            for kind, w in weighted:
+                acc += w
+                if r <= acc:
+                    return kind
+            return weighted[-1][0]
 
         raise ValueError(f"Unknown TEAM_BRAIN_MIX_STRATEGY={strategy!r}")
 
@@ -225,28 +234,18 @@ def _mk_brain(device: torch.device, *, team_is_red: Optional[bool] = None) -> to
 
     MODES OF OPERATION
     ------------------
-    There are two major execution regimes indicated by config.PPO_ENABLED:
-
-    (A) Non-PPO mode
-        - Returns scripted_transformer_brain(obs_dim, act_dim)
-        - That function likely returns a TorchScript-compatible module.
-        - Rationale: Inference-only / non-training runs benefit from scripting
-          for performance and portability.
-
-    (B) PPO mode
-        - Returns one of: TransformerBrain, MirrorBrain, TronBrain
-        - Architecture selection depends on TEAM_BRAIN_ASSIGNMENT and team identity.
+    This function returns one of the configured MLP brain variants for both PPO
+    and non-PPO contexts.
 
     CONFIGURATION LOGIC
     -------------------
     obs_dim = OBS_DIM in config (default 0)
     act_dim = NUM_ACTIONS in config (default 41)
 
-    If PPO is enabled:
-      - If TEAM_BRAIN_ASSIGNMENT is enabled AND team_is_red is provided:
-          choose by TEAM_BRAIN_ASSIGNMENT_MODE and strategy via _resolve_team_brain_kind.
-      - Else:
-          choose config.BRAIN_KIND (default "tron").
+    - If TEAM_BRAIN_ASSIGNMENT is enabled AND team_is_red is provided:
+        choose by TEAM_BRAIN_ASSIGNMENT_MODE and strategy via _resolve_team_brain_kind.
+    - Else:
+        choose config.BRAIN_KIND (default "whispering_abyss").
 
     TYPE DISCUSSION
     ---------------
@@ -263,21 +262,13 @@ def _mk_brain(device: torch.device, *, team_is_red: Optional[bool] = None) -> to
     obs_dim = int(getattr(config, "OBS_DIM", 0))
     act_dim = int(getattr(config, "NUM_ACTIONS", 41))
 
-    is_ppo = bool(getattr(config, "PPO_ENABLED", False))
-    if not is_ppo:
-        return scripted_transformer_brain(obs_dim, act_dim).to(device)
-
     team_assign = bool(getattr(config, "TEAM_BRAIN_ASSIGNMENT", True))
     if team_assign and team_is_red is not None:
         brain_kind = _resolve_team_brain_kind(bool(team_is_red))
     else:
-        brain_kind = str(getattr(config, "BRAIN_KIND", "tron")).strip().lower()
+        brain_kind = str(getattr(config, "BRAIN_KIND", "whispering_abyss")).strip().lower()
 
-    if brain_kind == "transformer":
-        return TransformerBrain(obs_dim, act_dim).to(device)
-    if brain_kind == "mirror":
-        return MirrorBrain(obs_dim, act_dim).to(device)
-    return TronBrain(obs_dim, act_dim).to(device)
+    return create_mlp_brain(brain_kind, obs_dim, act_dim).to(device)
 
 
 def _choose_unit(is_archer_prob: float) -> float:

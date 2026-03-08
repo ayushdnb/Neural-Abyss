@@ -73,6 +73,12 @@ import torch.nn as nn
 import numpy as np
 
 import config
+from agent.mlp_brain import (
+    brain_kind_from_module,
+    brain_kind_display_name,
+    brain_kind_short_label,
+    describe_brain_module,
+)
 from .camera import Camera
 from engine.agent_registry import (
     # These are column indices into `registry.agent_data` tensor.
@@ -227,26 +233,10 @@ def _get_model_summary(model: nn.Module) -> str:
       attention presence.
     - Otherwise, attempt to infer an MLP structure by collecting Linear layers.
     """
-    name = model.__class__.__name__.lower()
-
-    # Transformer-like model summary
-    if "transformer" in name:
-        try:
-            d = model.embed_dim
-            num_cross = 1 if hasattr(model, "cross_attention") else 0
-            num_self = 1 if hasattr(model, "self_attention") else 0
-            return f"Transformer(d={d}, Cross={num_cross}, Self={num_self})"
-        except Exception:
-            return "TransformerBrain"
-
-    # Generic MLP-like summary based on linear layers
     try:
-        linears = [m for m in model.modules() if isinstance(m, nn.Linear)]
-        dims = [linears[0].in_features] + [m.out_features for m in linears]
-        # Example output: "128→256→256→41"
-        return "→".join(map(str, dims))
+        return describe_brain_module(model)
     except Exception:
-        return "Unknown"
+        return model.__class__.__name__
 
 
 def _param_count(model: nn.Module) -> int:
@@ -1156,7 +1146,7 @@ class SidePanel:
             unit_name = "Archer" if unit_val == 2.0 else "Soldier"
 
             brain = self.registry.brains[slot_id]
-            brain_name = type(brain).__name__ if brain is not None else "<none>"
+            brain_name = describe_brain_module(brain)
 
             # Per-agent accumulated score (tracked via PPO hook)
             agent_score = self.viewer.agent_scores.get(int(unique_id), 0.0)
@@ -1547,7 +1537,9 @@ class Viewer:
             filename = f"brain_agent_{uid}_t_{tick}.pth"
             try:
                 torch.save(brain.state_dict(), filename)
-                print(f"[Viewer] Saved brain for agent {uid} to '{filename}'")
+                kind = brain_kind_from_module(brain)
+                label = brain_kind_display_name(kind) if kind else brain.__class__.__name__
+                print(f"[Viewer] Saved {label} brain for agent {uid} to '{filename}'")
             except Exception as e:
                 print(f"[Viewer] Error saving brain: {e}")
 
@@ -1641,15 +1633,8 @@ class Viewer:
                     if br is None:
                         btype = "?"
                     else:
-                        name = type(br).__name__
-                        if "Tron" in name:
-                            btype = "T"
-                        elif "Mirror" in name:
-                            btype = "M"
-                        elif "Transformer" in name:
-                            btype = "Tr"
-                        else:
-                            btype = "U"
+                        kind = brain_kind_from_module(br)
+                        btype = brain_kind_short_label(kind) if kind else "?"
 
                     agent_map[slot_id] = (
                         float(x), float(y), float(unit), float(team), float(uid), btype

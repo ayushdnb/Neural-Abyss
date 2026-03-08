@@ -571,7 +571,7 @@ START_AGENTS_PER_TEAM = _env_int("FWS_START_PER_TEAM", 150)
 # Maximum total agent slots/capacity (global).
 # Env: FWS_MAX_AGENTS
 # If too low, respawn may be slot-constrained. If too high, memory/compute increases.
-MAX_AGENTS  = _env_int("FWS_MAX_AGENTS", 350)
+MAX_AGENTS  = _env_int("FWS_MAX_AGENTS", 400)
 
 # Hard tick limit for run termination.
 # Env: FWS_TICK_LIMIT
@@ -654,12 +654,12 @@ HEAL_RATE            = _env_float("FWS_HEAL_RATE", 0.003)
 # Number of capture points.
 # Env: FWS_CP_COUNT
 # 1 large CP often creates strongest convergence to a shared objective.
-CP_COUNT           = _env_int("FWS_CP_COUNT", 5)
+CP_COUNT           = _env_int("FWS_CP_COUNT", 7)
 
 # Capture point size ratio.
 # Env: FWS_CP_SIZE_RATIO
 # Larger values increase contact probability but may reduce tactical variety.
-CP_SIZE_RATIO      = _env_float("FWS_CP_SIZE_RATIO", 0.09)
+CP_SIZE_RATIO      = _env_float("FWS_CP_SIZE_RATIO", 0.08)
 
 # Team reward per tick for owning/outnumbering on CP (fed into team reward path).
 # Env: FWS_CP_REWARD
@@ -838,7 +838,7 @@ RESPAWN_ENABLED = _env_bool("FWS_RESPAWN", True)
 
 # Minimum population floor per team (hysteresis/fill system may try to maintain this).
 # Env: FWS_RESP_FLOOR_PER_TEAM
-RESP_FLOOR_PER_TEAM      = _env_int("FWS_RESP_FLOOR_PER_TEAM", 100)
+RESP_FLOOR_PER_TEAM      = _env_int("FWS_RESP_FLOOR_PER_TEAM", 120)
 
 # Hard cap of respawns applied per tick.
 # Env: FWS_RESP_MAX_PER_TICK
@@ -887,7 +887,7 @@ RESPAWN_SPAWN_TRIES          = _env_int("FWS_RESPAWN_TRIES", 200)
 # Standard deviation of mutation noise applied on respawned brains (when mutation is used).
 # Env: FWS_MUT_STD
 # Larger => more behavioral disruption/exploration, less stability/inheritance fidelity.
-RESPAWN_MUTATION_STD         = _env_float("FWS_MUT_STD", 0.05)
+RESPAWN_MUTATION_STD         = _env_float("FWS_MUT_STD", 0.1)
 
 # Probability of cloning path vs alternate respawn path (runtime-defined semantics).
 # Env: FWS_CLONE_PROB
@@ -934,7 +934,7 @@ RESPAWN_RARE_MUTATION_TICK_WINDOW_ENABLE: bool = _env_bool("FWS_RESP_RARE_TICK_W
 
 # Rare-mutation ticket cadence in ticks (global; at most one pending ticket).
 # Env: FWS_RESP_RARE_TICK_WINDOW
-RESPAWN_RARE_MUTATION_TICK_WINDOW_TICKS: int = _env_int("FWS_RESP_RARE_TICK_WINDOW", 5000)
+RESPAWN_RARE_MUTATION_TICK_WINDOW_TICKS: int = _env_int("FWS_RESP_RARE_TICK_WINDOW", 7000)
 
 # Apply slight physical drift to anomaly newborns (tick-window mode).
 # Env: FWS_RESP_RARE_PHYS_ENABLE
@@ -942,11 +942,11 @@ RESPAWN_RARE_MUTATION_PHYSICAL_ENABLE: bool = _env_bool("FWS_RESP_RARE_PHYS_ENAB
 
 # Physical drift magnitude (fractional std, e.g., 0.03 = 3% std per trait multiplier).
 # Env: FWS_RESP_RARE_PHYS_STD
-RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_STD_FRAC: float = _env_float("FWS_RESP_RARE_PHYS_STD", 0.03)
+RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_STD_FRAC: float = _env_float("FWS_RESP_RARE_PHYS_STD", 0.09)
 
 # Physical drift clamp (fractional absolute cap on multiplier delta).
 # Env: FWS_RESP_RARE_PHYS_CLIP
-RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_CLIP_FRAC: float = _env_float("FWS_RESP_RARE_PHYS_CLIP", 0.10)
+RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_CLIP_FRAC: float = _env_float("FWS_RESP_RARE_PHYS_CLIP", 0.15)
 
 # Apply heavy extra brain noise only on inherited/cloned anomaly path.
 # Env: FWS_RESP_RARE_BRAIN_NOISE_ENABLE
@@ -954,7 +954,7 @@ RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_ENABLE: bool = _env_bool("FWS_RESP_R
 
 # Std for heavy anomaly inherited-brain noise (in addition to RESPAWN_MUTATION_STD).
 # Env: FWS_RESP_RARE_BRAIN_NOISE_STD
-RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_STD: float = _env_float("FWS_RESP_RARE_BRAIN_NOISE_STD", 0.20)
+RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_STD: float = _env_float("FWS_RESP_RARE_BRAIN_NOISE_STD", 0.30)
 
 # Parent selection policy for clone path.
 # Env: FWS_RESP_PARENT_SELECT_MODE
@@ -966,11 +966,11 @@ if RESPAWN_PARENT_SELECTION_MODE not in ("random", "topk_weighted"):
 
 # Fraction of parent candidates kept in the top-k pool for weighted sampling.
 # Env: FWS_RESP_PARENT_TOPK_FRAC
-RESPAWN_PARENT_SELECTION_TOPK_FRAC: float = _env_float("FWS_RESP_PARENT_TOPK_FRAC", 0.05)
+RESPAWN_PARENT_SELECTION_TOPK_FRAC: float = _env_float("FWS_RESP_PARENT_TOPK_FRAC", 0.1)
 
 # Exponent applied to parent score weights (higher => stronger bias inside top-k).
 # Env: FWS_RESP_PARENT_SCORE_POWER
-RESPAWN_PARENT_SELECTION_SCORE_POWER: float = _env_float("FWS_RESP_PARENT_SCORE_POWER", 1.0)
+RESPAWN_PARENT_SELECTION_SCORE_POWER: float = _env_float("FWS_RESP_PARENT_SCORE_POWER", 0.75)
 
 # Spawn location policy for respawn.
 # Env: FWS_RESP_SPAWN_LOCATION_MODE
@@ -1028,7 +1028,7 @@ PPO_HP_REWARD_MODE         = _env_str("FWS_PPO_HP_REWARD_MODE", "threshold_ramp"
 # HP percentage threshold used by threshold-ramp HP reward mode.
 # Env: FWS_PPO_HP_REWARD_THRESHOLD
 # Example: 0.60 => no HP PPO reward at <=60% HP, smooth ramp above it.
-PPO_HP_REWARD_THRESHOLD    = _env_float("FWS_PPO_HP_REWARD_THRESHOLD", 0.40)
+PPO_HP_REWARD_THRESHOLD    = _env_float("FWS_PPO_HP_REWARD_THRESHOLD", 0.60)
 
 # Individual PPO reward for damage dealt (dense combat shaping, per-agent only).
 # Env: FWS_PPO_REW_DMG_DEALT_AGENT
@@ -1073,7 +1073,7 @@ PPO_RESET_LOG     = _env_bool("FWS_PPO_RESET_LOG", False)
 # PPO rollout window length in ticks (trajectory horizon before update).
 # Env: FWS_PPO_TICKS
 # Larger windows => more temporal context, more memory/latency before updates.
-PPO_WINDOW_TICKS  = _env_int("FWS_PPO_TICKS", 128)
+PPO_WINDOW_TICKS  = _env_int("FWS_PPO_TICKS", 256)
 
 # Learning rate.
 # Env: FWS_PPO_LR
@@ -1172,10 +1172,9 @@ MUTATION_FRACTION_ALIVE = _env_float("FWS_MUTATE_FRAC", 0.02)
 # Brain-type selection and assignment policy knobs. These choose which model class is used
 # and how teams mix or split architectures.
 
-# Primary brain kind selector.
+# Primary brain kind selector for the experimental no-attention family.
 # Env: FWS_BRAIN
-# Example values likely include "tron", "mirror", "transformer" depending on runtime factory.
-BRAIN_KIND: str = _env_str("FWS_BRAIN", "tron").strip().lower()
+BRAIN_KIND: str = _env_str("FWS_BRAIN", "whispering_abyss").strip().lower()
 
 # Whether teams are explicitly assigned specific brain variants/policies.
 # Env: FWS_TEAM_BRAIN_ASSIGNMENT
@@ -1183,110 +1182,136 @@ TEAM_BRAIN_ASSIGNMENT: bool = _env_bool("FWS_TEAM_BRAIN_ASSIGNMENT", True)
 
 # Team brain assignment mode.
 # Env: FWS_TEAM_BRAIN_MODE
-# Default "mix" suggests both variants may appear (runtime-defined semantics).
+# Supported by the new MLP family:
+#   - "exclusive" / "split" / "team"
+#   - "mix" / "hybrid" / "both"
 TEAM_BRAIN_ASSIGNMENT_MODE: str = _env_str("FWS_TEAM_BRAIN_MODE", "mix").strip().lower()
 
 # Strategy for mixing brain types across teams/slots.
 # Env: FWS_TEAM_BRAIN_MIX_STRATEGY
-# Example "alternate" suggests deterministic alternation.
-TEAM_BRAIN_MIX_STRATEGY: str = _env_str("FWS_TEAM_BRAIN_MIX_STRATEGY", "alternate").strip().lower()
+# Supported:
+#   - "alternate" / "roundrobin" / "rr"
+#   - "random" / "prob" / "probabilistic"
+TEAM_BRAIN_MIX_STRATEGY: str = _env_str("FWS_TEAM_BRAIN_MIX_STRATEGY", "random").strip().lower()
 
-# Probability of choosing Tron in mixed mode.
-# Env: FWS_TEAM_BRAIN_MIX_P_TRON
-# Range typically [0,1].
-TEAM_BRAIN_MIX_P_TRON: float = _env_float("FWS_TEAM_BRAIN_MIX_P_TRON", 0.45)
+# Fixed architecture per team in exclusive mode.
+# Env: FWS_TEAM_BRAIN_RED / FWS_TEAM_BRAIN_BLUE
+TEAM_BRAIN_EXCLUSIVE_RED: str = _env_str("FWS_TEAM_BRAIN_RED", "whispering_abyss").strip().lower()
+TEAM_BRAIN_EXCLUSIVE_BLUE: str = _env_str("FWS_TEAM_BRAIN_BLUE", "veil_of_echoes").strip().lower()
+
+# Deterministic sequence used by alternate/round-robin mix mode.
+# Env: FWS_TEAM_BRAIN_MIX_SEQUENCE
+TEAM_BRAIN_MIX_SEQUENCE = tuple(
+    s.strip().lower()
+    for s in _env_str(
+        "FWS_TEAM_BRAIN_MIX_SEQUENCE",
+        "whispering_abyss,veil_of_echoes,cathedral_of_ash,dreamer_in_black_fog,obsidian_pulse",
+    ).split(",")
+    if s.strip()
+)
+
+# Weighted probabilities used by random/probabilistic mix mode.
+# Env:
+#   FWS_TEAM_BRAIN_P_WHISPERING_ABYSS
+#   FWS_TEAM_BRAIN_P_VEIL_OF_ECHOES
+#   FWS_TEAM_BRAIN_P_CATHEDRAL_OF_ASH
+#   FWS_TEAM_BRAIN_P_DREAMER_IN_BLACK_FOG
+#   FWS_TEAM_BRAIN_P_OBSIDIAN_PULSE
+TEAM_BRAIN_MIX_P_WHISPERING_ABYSS: float = _env_float("FWS_TEAM_BRAIN_P_WHISPERING_ABYSS", 0.20)
+TEAM_BRAIN_MIX_P_VEIL_OF_ECHOES: float = _env_float("FWS_TEAM_BRAIN_P_VEIL_OF_ECHOES", 0.20)
+TEAM_BRAIN_MIX_P_CATHEDRAL_OF_ASH: float = _env_float("FWS_TEAM_BRAIN_P_CATHEDRAL_OF_ASH", 0.20)
+TEAM_BRAIN_MIX_P_DREAMER_IN_BLACK_FOG: float = _env_float("FWS_TEAM_BRAIN_P_DREAMER_IN_BLACK_FOG", 0.20)
+TEAM_BRAIN_MIX_P_OBSIDIAN_PULSE: float = _env_float("FWS_TEAM_BRAIN_P_OBSIDIAN_PULSE", 0.20)
 
 # RNG seed for brain mixing assignment.
 # Env: FWS_TEAM_BRAIN_MIX_SEED
-# Defaults to RNG_SEED if available.
 TEAM_BRAIN_MIX_SEED: int = _env_int("FWS_TEAM_BRAIN_MIX_SEED", int(globals().get("RNG_SEED", 0)))
 
-# --- Tron Transformer Hyperparameters ---
-# These define the transformer size/depth for the Tron architecture.
-# They strongly affect memory, throughput, and learning capacity.
-
-# Model embedding dimension.
-# Env: FWS_TRON_DMODEL
-# Must be divisible by TRON_HEADS.
-# Larger => more capacity, more compute and memory.
-TRON_D_MODEL       = _env_int("FWS_TRON_DMODEL", 8)
-
-# Number of attention heads.
-# Env: FWS_TRON_HEADS
-# More heads can improve representational diversity but adds overhead.
-TRON_HEADS         = _env_int("FWS_TRON_HEADS", 2)
-
-# Dropout rate in Tron model.
-# Env: FWS_TRON_DROPOUT
-# Lower for stable RL + speed; higher can regularize but may slow convergence.
-TRON_DROPOUT       = _env_float("FWS_TRON_DROPOUT", 0.05)
-
-# Number of ray-encoder transformer layers.
-# Env: FWS_TRON_RAY_LAYERS
-TRON_RAY_LAYERS    = _env_int("FWS_TRON_RAY_LAYERS", 2)
-
-# Number of semantic-token encoder layers.
-# Env: FWS_TRON_SEM_LAYERS
-TRON_SEM_LAYERS    = _env_int("FWS_TRON_SEM_LAYERS", 2)
-
-# Number of fusion layers between streams.
-# Env: FWS_TRON_FUSION_LAYERS
-TRON_FUSION_LAYERS = _env_int("FWS_TRON_FUSION_LAYERS", 2)
-
-# Hidden width of Tron MLP heads.
-# Env: FWS_TRON_MLP_HID
-TRON_MLP_HIDDEN    = _env_int("FWS_TRON_MLP_HID", 128)
-
-# Whether to use RoPE (rotary positional encoding), if implemented by Tron brain.
-# Env: FWS_TRON_ROPE
-TRON_USE_ROPE      = _env_bool("FWS_TRON_ROPE", True)
-
-# Whether to use pre-norm transformer blocks.
-# Env: FWS_TRON_PRENORM
-TRON_USE_PRENORM   = _env_bool("FWS_TRON_PRENORM", True)
-
 # =============================================================================
-# 🪞 MIRROR TRANSFORMER HYPERPARAMETERS
+# 🌑 SIMPLE MLP BRAIN FAMILY (NO ATTENTION)
 # =============================================================================
-# Mirror defaults inherit from Tron values unless explicitly overridden.
-# This keeps architectures comparable by default.
+# Shared two-token contract for every variant:
+#   1) 32 ray tokens -> embedded -> aggregated into 1 ray summary token
+#   2) [rich_base | instinct] -> projected into 1 rich token
+#   3) [ray_token, rich_token] -> flatten -> normalize
+#   4) final input width = 2 * BRAIN_MLP_D_MODEL
 
-# Mirror embedding dimension.
-# Env: FWS_MIRROR_DMODEL
-# Defaults to TRON_D_MODEL if not set.
-MIRROR_D_MODEL       = _env_int("FWS_MIRROR_DMODEL", int(TRON_D_MODEL))
+# Shared embedding width for the two tokens.
+# Env: FWS_BRAIN_MLP_DMODEL
+BRAIN_MLP_D_MODEL = _env_int("FWS_BRAIN_MLP_DMODEL", 32)
 
-# Mirror attention heads.
-# Env: FWS_MIRROR_HEADS
-MIRROR_HEADS         = _env_int("FWS_MIRROR_HEADS", int(TRON_HEADS))
+# Final flattened MLP input width. Derived, never hard-coded elsewhere.
+BRAIN_MLP_FINAL_INPUT_WIDTH = 2 * BRAIN_MLP_D_MODEL
 
-# Mirror dropout.
-# Env: FWS_MIRROR_DROPOUT
-MIRROR_DROPOUT       = _env_float("FWS_MIRROR_DROPOUT", float(TRON_DROPOUT))
+# Shared activation and normalization families.
+# Env: FWS_BRAIN_MLP_ACT / FWS_BRAIN_MLP_NORM
+BRAIN_MLP_ACTIVATION: str = _env_str("FWS_BRAIN_MLP_ACT", "gelu").strip().lower()
+BRAIN_MLP_NORM: str = _env_str("FWS_BRAIN_MLP_NORM", "layernorm").strip().lower()
 
-# Mirror ray layers.
-# Env: FWS_MIRROR_RAY_LAYERS
-MIRROR_RAY_LAYERS    = _env_int("FWS_MIRROR_RAY_LAYERS", int(TRON_RAY_LAYERS))
+# Ray token aggregation rule.
+# Env: FWS_BRAIN_MLP_RAY_SUMMARY
+# Current implementation supports "mean".
+BRAIN_MLP_RAY_SUMMARY: str = _env_str("FWS_BRAIN_MLP_RAY_SUMMARY", "mean").strip().lower()
 
-# Mirror semantic/plan layers.
-# Env: FWS_MIRROR_SEM_LAYERS
-MIRROR_SEM_LAYERS    = _env_int("FWS_MIRROR_SEM_LAYERS", int(TRON_SEM_LAYERS))
+# PPO-friendly head initialization gains.
+# Env: FWS_BRAIN_MLP_ACTOR_GAIN / FWS_BRAIN_MLP_CRITIC_GAIN
+BRAIN_MLP_ACTOR_INIT_GAIN: float = _env_float("FWS_BRAIN_MLP_ACTOR_GAIN", 0.01)
+BRAIN_MLP_CRITIC_INIT_GAIN: float = _env_float("FWS_BRAIN_MLP_CRITIC_GAIN", 1.0)
 
-# Mirror fusion layers.
-# Env: FWS_MIRROR_FUSION_LAYERS
-MIRROR_FUSION_LAYERS = _env_int("FWS_MIRROR_FUSION_LAYERS", int(TRON_FUSION_LAYERS))
+# Stable ordering used by config validation, UI, telemetry, and mix logic.
+BRAIN_MLP_KIND_ORDER = (
+    "whispering_abyss",
+    "veil_of_echoes",
+    "cathedral_of_ash",
+    "dreamer_in_black_fog",
+    "obsidian_pulse",
+)
 
-# Mirror MLP hidden size.
-# Env: FWS_MIRROR_MLP_HID
-MIRROR_MLP_HIDDEN    = _env_int("FWS_MIRROR_MLP_HID", int(TRON_MLP_HIDDEN))
+# Poetic labels shown in viewer, inspector, logs, telemetry, and mutation reports.
+BRAIN_KIND_DISPLAY_NAMES = {
+    "whispering_abyss": "Whispering Abyss",
+    "veil_of_echoes": "Veil of Echoes",
+    "cathedral_of_ash": "Cathedral of Ash",
+    "dreamer_in_black_fog": "Dreamer in the Black Fog",
+    "obsidian_pulse": "Obsidian Pulse",
+}
 
-# Mirror RoPE usage.
-# Env: FWS_MIRROR_ROPE
-MIRROR_USE_ROPE      = _env_bool("FWS_MIRROR_ROPE", bool(TRON_USE_ROPE))
+# Tiny cell-safe labels for the renderer overlay.
+BRAIN_KIND_SHORT_LABELS = {
+    "whispering_abyss": "WA",
+    "veil_of_echoes": "VE",
+    "cathedral_of_ash": "CA",
+    "dreamer_in_black_fog": "DB",
+    "obsidian_pulse": "OP",
+}
 
-# Mirror pre-norm usage.
-# Env: FWS_MIRROR_PRENORM
-MIRROR_USE_PRENORM   = _env_bool("FWS_MIRROR_PRENORM", bool(TRON_USE_PRENORM))
+# Variant definitions. These are fully wired in the new brain module.
+BRAIN_MLP_VARIANTS = {
+    "whispering_abyss": {
+        "family": "plain",
+        "hidden": (96, 96),
+    },
+    "veil_of_echoes": {
+        "family": "plain",
+        "hidden": (128, 96, 64),
+    },
+    "cathedral_of_ash": {
+        "family": "residual",
+        "width": 80,
+        "blocks": 3,
+    },
+    "dreamer_in_black_fog": {
+        "family": "gated",
+        "width": 80,
+        "blocks": 2,
+    },
+    "obsidian_pulse": {
+        "family": "bottleneck",
+        "outer_width": 128,
+        "inner_width": 48,
+        "blocks": 2,
+    },
+}
 
 # =============================================================================
 # 🖥️ UI, VIEWER & SCREEN RECORDING
@@ -1428,23 +1453,13 @@ def _apply_profile_overrides() -> None:
             # Fast training profile: headless + reduced-ish model complexity for throughput.
             ("FWS_UI", "ENABLE_UI", False),
             ("FWS_USE_VMAP", "USE_VMAP", True),
-            ("FWS_TRON_DMODEL", "TRON_D_MODEL", 96),
-            ("FWS_TRON_HEADS", "TRON_HEADS", 4),
-            ("FWS_TRON_RAY_LAYERS", "TRON_RAY_LAYERS", 2),
-            ("FWS_TRON_SEM_LAYERS", "TRON_SEM_LAYERS", 2),
-            ("FWS_TRON_FUSION_LAYERS", "TRON_FUSION_LAYERS", 1),
-            ("FWS_TRON_MLP_HID", "TRON_MLP_HIDDEN", 192),
+            ("FWS_BRAIN_MLP_DMODEL", "BRAIN_MLP_D_MODEL", 24),
         ],
         "train_quality": [
             # Quality profile: larger/deeper model for capacity, with increased compute cost.
             ("FWS_UI", "ENABLE_UI", False),
             ("FWS_USE_VMAP", "USE_VMAP", True),
-            ("FWS_TRON_DMODEL", "TRON_D_MODEL", 192),
-            ("FWS_TRON_HEADS", "TRON_HEADS", 6),
-            ("FWS_TRON_RAY_LAYERS", "TRON_RAY_LAYERS", 4),
-            ("FWS_TRON_SEM_LAYERS", "TRON_SEM_LAYERS", 4),
-            ("FWS_TRON_FUSION_LAYERS", "TRON_FUSION_LAYERS", 2),
-            ("FWS_TRON_MLP_HID", "TRON_MLP_HIDDEN", 384),
+            ("FWS_BRAIN_MLP_DMODEL", "BRAIN_MLP_D_MODEL", 40),
         ],
     }
 
@@ -1458,34 +1473,11 @@ def _apply_profile_overrides() -> None:
         if not _env_is_set(env_key):
             g[var_name] = value
 
-    # Safety check: transformer head dimension must divide evenly.
-    # This catches invalid profile combinations early.
-    if int(g.get("TRON_D_MODEL", 0)) % max(int(g.get("TRON_HEADS", 1)), 1) != 0:
+    if int(g.get("BRAIN_MLP_D_MODEL", 0)) <= 0:
         raise ValueError(
-            f"TRON_D_MODEL must be divisible by TRON_HEADS "
-            f"(got {g.get('TRON_D_MODEL')} / {g.get('TRON_HEADS')})"
+            f"BRAIN_MLP_D_MODEL must be > 0 (got {g.get('BRAIN_MLP_D_MODEL')})"
         )
-
-# Post-profile mirror resync:
-# Mirror defaults were initially derived from Tron values at definition time.
-# If a profile later mutates Tron values, resync Mirror defaults *only when*
-# the corresponding Mirror env var was NOT explicitly set.
-def _sync_mirror_defaults_from_tron_post_profile() -> None:
-    g = globals()
-    mirror_to_tron = (
-        ("FWS_MIRROR_DMODEL",       "MIRROR_D_MODEL",       "TRON_D_MODEL"),
-        ("FWS_MIRROR_HEADS",        "MIRROR_HEADS",         "TRON_HEADS"),
-        ("FWS_MIRROR_DROPOUT",      "MIRROR_DROPOUT",       "TRON_DROPOUT"),
-        ("FWS_MIRROR_RAY_LAYERS",   "MIRROR_RAY_LAYERS",    "TRON_RAY_LAYERS"),
-        ("FWS_MIRROR_SEM_LAYERS",   "MIRROR_SEM_LAYERS",    "TRON_SEM_LAYERS"),
-        ("FWS_MIRROR_FUSION_LAYERS","MIRROR_FUSION_LAYERS", "TRON_FUSION_LAYERS"),
-        ("FWS_MIRROR_MLP_HID",      "MIRROR_MLP_HIDDEN",    "TRON_MLP_HIDDEN"),
-        ("FWS_MIRROR_ROPE",         "MIRROR_USE_ROPE",      "TRON_USE_ROPE"),
-        ("FWS_MIRROR_PRENORM",      "MIRROR_USE_PRENORM",   "TRON_USE_PRENORM"),
-    )
-    for env_key, mirror_name, tron_name in mirror_to_tron:
-        if not _env_is_set(env_key):
-            g[mirror_name] = g[tron_name]
+    g["BRAIN_MLP_FINAL_INPUT_WIDTH"] = 2 * int(g["BRAIN_MLP_D_MODEL"])
 
 
 def _validate_config_invariants() -> None:
@@ -1543,7 +1535,11 @@ def _validate_config_invariants() -> None:
     _prob("RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_CLIP_FRAC", RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_CLIP_FRAC)
     _prob("RESPAWN_PARENT_SELECTION_TOPK_FRAC", RESPAWN_PARENT_SELECTION_TOPK_FRAC)
     _prob("MUTATION_FRACTION_ALIVE", MUTATION_FRACTION_ALIVE)
-    _prob("TEAM_BRAIN_MIX_P_TRON", TEAM_BRAIN_MIX_P_TRON)
+    _prob("TEAM_BRAIN_MIX_P_WHISPERING_ABYSS", TEAM_BRAIN_MIX_P_WHISPERING_ABYSS)
+    _prob("TEAM_BRAIN_MIX_P_VEIL_OF_ECHOES", TEAM_BRAIN_MIX_P_VEIL_OF_ECHOES)
+    _prob("TEAM_BRAIN_MIX_P_CATHEDRAL_OF_ASH", TEAM_BRAIN_MIX_P_CATHEDRAL_OF_ASH)
+    _prob("TEAM_BRAIN_MIX_P_DREAMER_IN_BLACK_FOG", TEAM_BRAIN_MIX_P_DREAMER_IN_BLACK_FOG)
+    _prob("TEAM_BRAIN_MIX_P_OBSIDIAN_PULSE", TEAM_BRAIN_MIX_P_OBSIDIAN_PULSE)
     _prob("MAP_WALL_STRAIGHT_PROB", MAP_WALL_STRAIGHT_PROB)
     _prob("MAP_WALL_GAP_PROB", MAP_WALL_GAP_PROB)
     _prob("TELEMETRY_MOVE_EVENTS_SAMPLE_RATE", TELEMETRY_MOVE_EVENTS_SAMPLE_RATE)
@@ -1555,20 +1551,65 @@ def _validate_config_invariants() -> None:
     if float(RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_STD) < 0.0:
         _config_issue(f"RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_STD must be >= 0 (got {RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_STD})")
 
-    # Mirror divisibility is dangerous only when Mirror is used; warn/strict here.
-    try:
-        md = int(MIRROR_D_MODEL)
-        mh = int(MIRROR_HEADS)
-        if mh <= 0:
-            _config_issue(f"MIRROR_HEADS must be > 0 (got {mh})")
-        elif md <= 0:
-            _config_issue(f"MIRROR_D_MODEL must be > 0 (got {md})")
-        elif (md % mh) != 0:
+    _positive_int("BRAIN_MLP_D_MODEL", BRAIN_MLP_D_MODEL)
+    _positive_int("BRAIN_MLP_FINAL_INPUT_WIDTH", BRAIN_MLP_FINAL_INPUT_WIDTH)
+    if int(BRAIN_MLP_FINAL_INPUT_WIDTH) != (2 * int(BRAIN_MLP_D_MODEL)):
+        _config_issue(
+            f"BRAIN_MLP_FINAL_INPUT_WIDTH must equal 2 * BRAIN_MLP_D_MODEL "
+            f"(got {BRAIN_MLP_FINAL_INPUT_WIDTH} vs {2 * int(BRAIN_MLP_D_MODEL)})"
+        )
+
+    if BRAIN_MLP_ACTIVATION not in {"gelu", "relu", "silu"}:
+        _config_issue(
+            f"BRAIN_MLP_ACTIVATION must be one of {{'gelu','relu','silu'}} "
+            f"(got {BRAIN_MLP_ACTIVATION!r})"
+        )
+
+    if BRAIN_MLP_NORM not in {"layernorm", "none"}:
+        _config_issue(
+            f"BRAIN_MLP_NORM must be one of {{'layernorm','none'}} "
+            f"(got {BRAIN_MLP_NORM!r})"
+        )
+
+    if BRAIN_MLP_RAY_SUMMARY not in {"mean"}:
+        _config_issue(
+            f"BRAIN_MLP_RAY_SUMMARY currently supports only 'mean' "
+            f"(got {BRAIN_MLP_RAY_SUMMARY!r})"
+        )
+
+    allowed_brains = set(BRAIN_MLP_KIND_ORDER)
+    if BRAIN_KIND not in allowed_brains:
+        _config_issue(f"BRAIN_KIND must be one of {sorted(allowed_brains)} (got {BRAIN_KIND!r})")
+    if TEAM_BRAIN_EXCLUSIVE_RED not in allowed_brains:
+        _config_issue(
+            f"TEAM_BRAIN_EXCLUSIVE_RED must be one of {sorted(allowed_brains)} "
+            f"(got {TEAM_BRAIN_EXCLUSIVE_RED!r})"
+        )
+    if TEAM_BRAIN_EXCLUSIVE_BLUE not in allowed_brains:
+        _config_issue(
+            f"TEAM_BRAIN_EXCLUSIVE_BLUE must be one of {sorted(allowed_brains)} "
+            f"(got {TEAM_BRAIN_EXCLUSIVE_BLUE!r})"
+        )
+
+    seq = tuple(str(x).strip().lower() for x in TEAM_BRAIN_MIX_SEQUENCE)
+    if len(seq) == 0:
+        _config_issue("TEAM_BRAIN_MIX_SEQUENCE must not be empty")
+    else:
+        bad = [x for x in seq if x not in allowed_brains]
+        if bad:
             _config_issue(
-                f"MIRROR_D_MODEL must be divisible by MIRROR_HEADS (got {md} / {mh})"
+                f"TEAM_BRAIN_MIX_SEQUENCE contains unknown kinds: {bad!r}"
             )
-    except Exception as e:
-        _config_issue(f"Mirror transformer config validation failed: {e}")
+
+    total_mix_prob = (
+        float(TEAM_BRAIN_MIX_P_WHISPERING_ABYSS)
+        + float(TEAM_BRAIN_MIX_P_VEIL_OF_ECHOES)
+        + float(TEAM_BRAIN_MIX_P_CATHEDRAL_OF_ASH)
+        + float(TEAM_BRAIN_MIX_P_DREAMER_IN_BLACK_FOG)
+        + float(TEAM_BRAIN_MIX_P_OBSIDIAN_PULSE)
+    )
+    if total_mix_prob <= 0.0:
+        _config_issue("At least one TEAM_BRAIN_MIX_P_* probability must be > 0")
 
     # Profile name sanity (warn/strict, but do not mutate the value)
     if PROFILE not in {"default", "debug", "train_fast", "train_quality"}:
@@ -1580,7 +1621,6 @@ def _validate_config_invariants() -> None:
 
 # Apply profiles after all defaults/env values are initialized.
 _apply_profile_overrides()
-_sync_mirror_defaults_from_tron_post_profile()
 _validate_config_invariants()
 
 def summary_str() -> str:

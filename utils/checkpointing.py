@@ -243,24 +243,11 @@ def _infer_brain_kind(brain: torch.nn.Module) -> str:
     Returns:
         String identifier for the brain type
     """
-    # Import brain classes locally to avoid import cycles at module import time
-    from agent.tron_brain import TronBrain
-    from agent.mirror_brain import MirrorBrain
-    from agent.transformer_brain import TransformerBrain
+    from agent.mlp_brain import brain_kind_from_module
 
-    # Check brain type and return appropriate identifier
-    if isinstance(brain, TronBrain):
-        return "tron"
-    if isinstance(brain, MirrorBrain):
-        return "mirror"
-    if isinstance(brain, TransformerBrain):
-        return "transformer"
-    # TorchScript-compiled transformer path (non-PPO inference) should round-trip
-    # through the same eager architecture on load.
-    if isinstance(brain, (torch.jit.ScriptModule, torch.jit.RecursiveScriptModule)):
-        return "transformer"
-
-    # Fallback: store class name; load will error loudly if unknown
+    kind = brain_kind_from_module(brain)
+    if kind:
+        return kind
     return brain.__class__.__name__
 
 
@@ -280,24 +267,22 @@ def _make_brain(kind: str, device: torch.device) -> torch.nn.Module:
     Raises:
         CheckpointError: If brain kind is unknown
     """
-    # Import brain classes locally to avoid import cycles
-    from agent.tron_brain import TronBrain
-    from agent.mirror_brain import MirrorBrain
-    from agent.transformer_brain import TransformerBrain
+    from agent.mlp_brain import create_mlp_brain
 
     # Get observation and action dimensions from config
     obs_dim = int(getattr(config, "OBS_DIM"))
     act_dim = int(getattr(config, "NUM_ACTIONS"))
 
-    # Create appropriate brain based on kind
-    if kind == "tron":
-        return TronBrain(obs_dim, act_dim).to(device)
-    if kind == "mirror":
-        return MirrorBrain(obs_dim, act_dim).to(device)
-    if kind in ("transformer", "ScriptModule", "RecursiveScriptModule"):
-         return TransformerBrain(obs_dim, act_dim).to(device)   
+    if kind in {
+        "whispering_abyss",
+        "veil_of_echoes",
+        "cathedral_of_ash",
+        "dreamer_in_black_fog",
+        "obsidian_pulse",
+    }:
 
-    # Raise error for unknown brain type
+        return create_mlp_brain(kind, obs_dim, act_dim).to(device)  
+
     raise CheckpointError(f"Unknown brain kind in checkpoint: {kind}")
 
 

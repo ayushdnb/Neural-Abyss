@@ -66,9 +66,10 @@ from .agent_registry import (
 #   - each field is a column (indexed by COL_* constants)
 # This is GPU-friendly and vectorizable.
 
-from agent.transformer_brain import TransformerBrain, scripted_transformer_brain
-from agent.tron_brain import TronBrain
-from agent.mirror_brain import MirrorBrain
+from agent.mlp_brain import (
+    create_mlp_brain,
+    brain_kind_from_module,
+)
 # "Brains" are policy/value networks or decision modules controlling agents.
 # The code supports multiple architectures:
 #   - TransformerBrain (learnable, not necessarily TorchScript)
@@ -368,58 +369,54 @@ def _resolve_team_brain_kind_from_team(team_id: float) -> str:
     #
     # If team_id is neither red nor blue, fall back to config.BRAIN_KIND.
     mode = str(getattr(config, "TEAM_BRAIN_ASSIGNMENT_MODE", "exclusive")).strip().lower()
+    default_kind = str(getattr(config, "BRAIN_KIND", "whispering_abyss")).strip().lower()
 
     if mode in ("exclusive", "split", "team"):
-        # "Exclusive" means each team has a fixed architecture assignment.
         if team_id == TEAM_RED_ID:
-            return "tron"
+            return str(getattr(config, "TEAM_BRAIN_EXCLUSIVE_RED", default_kind)).strip().lower()
         if team_id == TEAM_BLUE_ID:
-            return "mirror"
-        return str(getattr(config, "BRAIN_KIND", "tron")).strip().lower()
+            return str(getattr(config, "TEAM_BRAIN_EXCLUSIVE_BLUE", default_kind)).strip().lower()
+        return default_kind
 
     if mode in ("mix", "hybrid", "both"):
-        # "Mix" means within a given team we may alternate or randomly choose.
         strategy = str(getattr(config, "TEAM_BRAIN_MIX_STRATEGY", "alternate")).strip().lower()
+        seq = tuple(
+            str(x).strip().lower()
+            for x in getattr(config, "TEAM_BRAIN_MIX_SEQUENCE", (default_kind,))
+            if str(x).strip()
+        ) or (default_kind,)
 
         if strategy in ("alternate", "roundrobin", "rr"):
             i = _TEAM_BRAIN_MIX_COUNTER.get(team_id, 0)
             _TEAM_BRAIN_MIX_COUNTER[team_id] = i + 1
-            # Even indices -> tron, odd indices -> mirror
-            return "tron" if (i % 2 == 0) else "mirror"
+            return seq[i % len(seq)]
 
         if strategy in ("random", "prob", "probabilistic"):
-            p_tron = float(getattr(config, "TEAM_BRAIN_MIX_P_TRON", 0.5))
-            # Clamp probability into [0, 1] for safety.
-            p_tron = max(0.0, min(1.0, p_tron))
             rng = _TEAM_BRAIN_MIX_RNG.get(team_id, random.SystemRandom())
-            return "tron" if (rng.random() < p_tron) else "mirror"
+            weighted = (
+                ("whispering_abyss", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_WHISPERING_ABYSS", 0.0)))),
+                ("veil_of_echoes", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_VEIL_OF_ECHOES", 0.0)))),
+                ("cathedral_of_ash", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_CATHEDRAL_OF_ASH", 0.0)))),
+                ("dreamer_in_black_fog", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_DREAMER_IN_BLACK_FOG", 0.0)))),
+                ("obsidian_pulse", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_OBSIDIAN_PULSE", 0.0)))),
+            )
+            total = sum(w for _, w in weighted)
+            if total <= 0.0:
+                return default_kind
+            r = rng.random() * total
+            acc = 0.0
+            for kind, w in weighted:
+                acc += w
+                if r <= acc:
+                    return kind
+            return weighted[-1][0]
 
-        # If config sets an unknown strategy string, crash loudly.
-        # This is appropriate because misconfiguration should not silently degrade.
         raise ValueError(f"Unknown TEAM_BRAIN_MIX_STRATEGY={strategy!r}")
 
-    # Unknown mode is also a configuration error.
     raise ValueError(f"Unknown TEAM_BRAIN_ASSIGNMENT_MODE={mode!r}")
 
 def _infer_kind_from_parent(parent: torch.nn.Module) -> Optional[str]:
-    # Attempt to infer the architecture "kind" from a parent module instance.
-    #
-    # Why do this?
-    # - If in "mix" mode, cloning should often preserve architecture.
-    # - This prevents loading weights into an incompatible model type.
-    #
-    # Note: torch.jit.ScriptModule is treated as "transformer" here.
-    # This is a pragmatic classification: ScriptModule is a compiled model,
-    # and the only scripted model mentioned in this file is transformer-based.
-    if isinstance(parent, torch.jit.ScriptModule):
-        return "transformer"
-    if isinstance(parent, TronBrain):
-        return "tron"
-    if isinstance(parent, MirrorBrain):
-        return "mirror"
-    if isinstance(parent, TransformerBrain):
-        return "transformer"
-    return None
+    return brain_kind_from_module(parent)
 
 
 # ----------------------------------------------------------------------
@@ -461,24 +458,13 @@ def _new_brain(device: torch.device, *, team_id: Optional[float] = None) -> torc
     obs_dim = int(getattr(config, "OBS_DIM", 0))
     act_dim = int(getattr(config, "NUM_ACTIONS", 41))
 
-    is_ppo = bool(getattr(config, "PPO_ENABLED", False))
-    if not is_ppo:
-        # Non-PPO path: scripted transformer brain (existing behavior).
-        return scripted_transformer_brain(obs_dim, act_dim).to(device)
-
     team_assign = bool(getattr(config, "TEAM_BRAIN_ASSIGNMENT", True))
     if team_assign and team_id is not None:
         brain_kind = _resolve_team_brain_kind_from_team(float(team_id))
     else:
-        brain_kind = str(getattr(config, "BRAIN_KIND", "tron")).strip().lower()
+        brain_kind = str(getattr(config, "BRAIN_KIND", "whispering_abyss")).strip().lower()
 
-    # Instantiate the chosen architecture and move to device.
-    if brain_kind == "transformer":
-        return TransformerBrain(obs_dim, act_dim).to(device)
-    if brain_kind == "mirror":
-        return MirrorBrain(obs_dim, act_dim).to(device)
-    # Default case falls back to TronBrain.
-    return TronBrain(obs_dim, act_dim).to(device)
+    return create_mlp_brain(brain_kind, obs_dim, act_dim).to(device)
 
 
 
@@ -542,35 +528,15 @@ def _clone_brain(
     parent_kind = _infer_kind_from_parent(parent)
 
     if team_assign and team_id is not None:
-        # exclusive: old behavior (force by team)
         if mode in ("exclusive", "split", "team"):
             brain_kind = _resolve_team_brain_kind_from_team(float(team_id))
         else:
-            # mix: keep parent architecture if we can; otherwise use team resolver.
             brain_kind = parent_kind or _resolve_team_brain_kind_from_team(float(team_id))
     else:
-        brain_kind = str(getattr(config, "BRAIN_KIND", "tron")).strip().lower()
+        brain_kind = str(getattr(config, "BRAIN_KIND", "whispering_abyss")).strip().lower()
 
-    # Instantiate + load weights only if compatible.
-    #
-    # This ensures:
-    #   - The returned module is fresh (no shared references).
-    #   - Parameters match expected shapes for the chosen class.
-    if brain_kind == "transformer":
-        child = TransformerBrain(obs_dim, act_dim).to(device)
-        if isinstance(parent, (torch.jit.ScriptModule, TransformerBrain)):
-            child.load_state_dict(parent.state_dict())
-        return child
-
-    if brain_kind == "mirror":
-        child = MirrorBrain(obs_dim, act_dim).to(device)
-        if isinstance(parent, MirrorBrain):
-            child.load_state_dict(parent.state_dict())
-        return child
-
-    # Default: tron
-    child = TronBrain(obs_dim, act_dim).to(device)
-    if isinstance(parent, TronBrain):
+    child = create_mlp_brain(brain_kind, obs_dim, act_dim).to(device)
+    if parent_kind == brain_kind:
         child.load_state_dict(parent.state_dict())
     return child
 

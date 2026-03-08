@@ -1,11 +1,26 @@
 # war_simulation/agent/__init__.py
-from .transformer_brain import TransformerBrain, scripted_transformer_brain
-from .tron_brain import TronBrain
-from .mirror_brain import MirrorBrain
+from .mlp_brain import (
+    WhisperingAbyssBrain,
+    VeilOfEchoesBrain,
+    CathedralOfAshBrain,
+    DreamerInBlackFogBrain,
+    ObsidianPulseBrain,
+    create_mlp_brain,
+    brain_kind_from_module,
+    brain_kind_display_name,
+    brain_kind_short_label,
+    describe_brain_module,
+)
 
 __all__ = [
-    "TransformerBrain",
-    "scripted_transformer_brain",
-    "TronBrain",
-    "MirrorBrain",
+    "WhisperingAbyssBrain",
+    "VeilOfEchoesBrain",
+    "CathedralOfAshBrain",
+    "DreamerInBlackFogBrain",
+    "ObsidianPulseBrain",
+    "create_mlp_brain",
+    "brain_kind_from_module",
+    "brain_kind_display_name",
+    "brain_kind_short_label",
+    "describe_brain_module",
 ]
