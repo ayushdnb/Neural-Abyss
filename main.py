@@ -209,6 +209,13 @@ def _config_snapshot() -> dict:
             "CELL_SIZE": config.CELL_SIZE,
             "TARGET_FPS": config.TARGET_FPS,
         },
+        "CATASTROPHE": {
+            "FRAMEWORK_VERSION": str(getattr(config, "CATASTROPHE_FRAMEWORK_VERSION", "runtime_override_v1")),
+            "RUNTIME_RESOLUTION": str(getattr(config, "CATASTROPHE_RUNTIME_RESOLUTION", "base_plus_override_apply_mask_v1")),
+            "DEFAULT_DURATION_TICKS": int(getattr(config, "CATASTROPHE_DEFAULT_DURATION_TICKS", 0)),
+            "NEGATIVE_ZONE_DAMAGE_RATE": float(getattr(config, "CATASTROPHE_NEGATIVE_ZONE_DAMAGE_RATE", 0.0)),
+            "OVERRIDE_LOCKS_EDIT_MASK": bool(getattr(config, "CATASTROPHE_OVERRIDE_LOCKS_EDIT_MASK", True)),
+        },
         "SPAWN": {
             "SPAWN_MODE": str(getattr(config, "SPAWN_MODE", "uniform")),
             "SPAWN_ARCHER_RATIO": float(getattr(config, "SPAWN_ARCHER_RATIO", 0.4)),
@@ -220,6 +227,19 @@ def _config_snapshot() -> dict:
 
 
 def _telemetry_schema_manifest(grid: torch.Tensor, zones) -> dict:
+    base_map = getattr(zones, "base_zone_value_map", None) if zones is not None else None
+    positive_base_present = False
+    negative_base_present = False
+    if base_map is not None:
+        try:
+            positive_base_present = bool((base_map > 0).any().item())
+            negative_base_present = bool((base_map < 0).any().item())
+        except Exception:
+            positive_base_present = False
+            negative_base_present = False
+    elif zones is not None and getattr(zones, "heal_mask", None) is not None:
+        positive_base_present = True
+
     return {
         "schema_version": str(getattr(config, "TELEMETRY_SCHEMA_VERSION", "v2")),
         "lineage_fields": [
@@ -256,7 +276,14 @@ def _telemetry_schema_manifest(grid: torch.Tensor, zones) -> dict:
         "mechanics": {
             "archer_los_blocks_walls": bool(getattr(config, "ARCHER_LOS_BLOCKS_WALLS", False)),
             "metabolism_enabled": bool(getattr(config, "METABOLISM_ENABLED", True)),
-            "heal_zones_enabled": bool(zones is not None and getattr(zones, "heal_mask", None) is not None),
+            "heal_zones_enabled": bool(positive_base_present),
+            "signed_base_zones_present": bool(positive_base_present or negative_base_present),
+            "negative_base_zones_present": bool(negative_base_present),
+            "zone_runtime_resolution": str(getattr(config, "CATASTROPHE_RUNTIME_RESOLUTION", "base_plus_override_apply_mask_v1")),
+            "catastrophe_framework_version": str(getattr(config, "CATASTROPHE_FRAMEWORK_VERSION", "runtime_override_v1")),
+            "catastrophe_default_duration_ticks": int(getattr(config, "CATASTROPHE_DEFAULT_DURATION_TICKS", 0)),
+            "catastrophe_negative_zone_damage_rate": float(getattr(config, "CATASTROPHE_NEGATIVE_ZONE_DAMAGE_RATE", 0.0)),
+            "catastrophe_override_locks_edit_mask_default": bool(getattr(config, "CATASTROPHE_OVERRIDE_LOCKS_EDIT_MASK", True)),
             "cp_zone_count": int(len(getattr(zones, "cp_masks", []) or [])) if zones is not None else 0,
             "respawn_child_unit_mode": str(getattr(config, "RESPAWN_CHILD_UNIT_MODE", "inherit_parent_on_clone")),
             "respawn_parent_selection_mode": str(getattr(config, "RESPAWN_PARENT_SELECTION_MODE", "random")),

@@ -55,7 +55,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import collections
 import os
-from typing import Dict, Optional, List, Tuple, TYPE_CHECKING
+from typing import Any, Dict, Optional, List, Tuple, TYPE_CHECKING
 
 # -------------------------------------------------------------------------
 # PyTorch is used for tensor math and GPU acceleration.
@@ -75,6 +75,7 @@ from engine.ray_engine.raycast_32 import raycast32_firsthit
 from engine.game.move_mask import build_mask, DIRS8
 from engine.respawn import RespawnController, RespawnCfg
 from engine.mapgen import Zones
+from engine.catastrophe import CatastropheController, CatastropheSpec
 
 from agent.ensemble import ensemble_forward
 
@@ -227,11 +228,16 @@ class TickEngine:
         self.agent_scores: Dict[int, float] = collections.defaultdict(float)
 
         # Zones and corresponding cached tensors on the simulation device.
-        # Patch 1 canonicalizes base zones as signed floats while preserving a
-        # cached positive-mask view for existing heal semantics / observations.
+        # Patch 4 extends the Patch-1 signed base layer with a catastrophe
+        # runtime override controller. The canonical base layer remains
+        # separate from the runtime-effective zone field.
         self.zones: Optional[Zones] = zones
+        self.catastrophe = CatastropheController(device=torch.device(self.device))
         self._z_base_values: Optional[torch.Tensor] = None
-        self._z_base_positive_mask: Optional[torch.Tensor] = None
+        self._z_effective_values: Optional[torch.Tensor] = None
+        self._z_catastrophe_override_values: Optional[torch.Tensor] = None
+        self._z_catastrophe_apply_mask: Optional[torch.Tensor] = None
+        self._z_catastrophe_edit_lock_mask: Optional[torch.Tensor] = None
         self._z_cp_masks: List[torch.Tensor] = []
         self._ensure_zone_tensors()
 
@@ -419,8 +425,14 @@ class TickEngine:
         - Prefer `zones.base_zone_value_map` when present
         - Fall back to legacy `zones.heal_mask` and reinterpret True as +1.0
         """
-        self._z_base_values, self._z_base_positive_mask, self._z_cp_masks = None, None, []
+        self._z_base_values = None
+        self._z_effective_values = None
+        self._z_catastrophe_override_values = None
+        self._z_catastrophe_apply_mask = None
+        self._z_catastrophe_edit_lock_mask = None
+        self._z_cp_masks = []
         if self.zones is None:
+            self._apply_runtime_base_zone_edit_lock(None)
             return
 
         try:
@@ -437,16 +449,21 @@ class TickEngine:
                     .to(torch.float32)
                     .clamp(-1.0, 1.0)
                 )
-                self._z_base_positive_mask = self._z_base_values > 0.0
-
             self._z_cp_masks = [
                 m.to(self.device, non_blocking=True).bool()
                 for m in getattr(self.zones, "cp_masks", [])
             ]
+            self._refresh_zone_runtime_resolution()
         except Exception as e:
             # Safety: if zones fail, disable them rather than crash the simulation.
             print(f"[tick] WARN: zone tensor setup failed ({e}); zones disabled.")
-            self._z_base_values, self._z_base_positive_mask, self._z_cp_masks = None, None, []
+            self._z_base_values = None
+            self._z_effective_values = None
+            self._z_catastrophe_override_values = None
+            self._z_catastrophe_apply_mask = None
+            self._z_catastrophe_edit_lock_mask = None
+            self._z_cp_masks = []
+            self._apply_runtime_base_zone_edit_lock(None)
 
     # -------------------------------------------------------------------------
     # Indexing helper
@@ -535,6 +552,114 @@ class TickEngine:
         except Exception:
             # Telemetry should never destabilize sim.
             pass
+
+
+    # -------------------------------------------------------------------------
+    # Catastrophe runtime helpers
+    # -------------------------------------------------------------------------
+    def catastrophe_active(self) -> bool:
+        return bool(getattr(self, "catastrophe", None) is not None and self.catastrophe.is_active())
+
+    def catastrophe_status(self) -> Dict[str, Any]:
+        if getattr(self, "catastrophe", None) is None:
+            return {"active": False, "type_name": None, "start_tick": None, "duration_ticks": 0, "remaining_ticks": 0, "elapsed_ticks": 0, "shape": [int(self.H), int(self.W)], "active_cell_count": 0, "locked_cell_count": 0, "metadata": {}}
+        out = dict(self.catastrophe.summary_payload())
+        if out.get("shape", None) is None:
+            out["shape"] = [int(self.H), int(self.W)]
+        return out
+
+    def _apply_runtime_base_zone_edit_lock(self, mask: Optional[torch.Tensor]) -> None:
+        if self.zones is None:
+            return
+        zone_device = getattr(getattr(self.zones, "base_zone_value_map", None), "device", self.device)
+        if mask is None:
+            if hasattr(self.zones, "clear_runtime_base_zone_edit_locked_mask"):
+                self.zones.clear_runtime_base_zone_edit_locked_mask()
+            elif hasattr(self.zones, "_base_zone_edit_locked_mask"):
+                delattr(self.zones, "_base_zone_edit_locked_mask")
+            return
+        lock_mask = mask.to(device=zone_device, dtype=torch.bool)
+        if hasattr(self.zones, "set_runtime_base_zone_edit_locked_mask"):
+            self.zones.set_runtime_base_zone_edit_locked_mask(lock_mask)
+        else:
+            self.zones._base_zone_edit_locked_mask = lock_mask
+
+    def _refresh_zone_runtime_resolution(self) -> None:
+        self._z_effective_values = None
+        self._z_catastrophe_override_values = None
+        self._z_catastrophe_apply_mask = None
+        self._z_catastrophe_edit_lock_mask = None
+        if self._z_base_values is None:
+            self._apply_runtime_base_zone_edit_lock(None)
+            return
+        resolved = self.catastrophe.resolve_effective_layers(self._z_base_values)
+        self._z_effective_values = resolved["effective"]
+        self._z_catastrophe_override_values = resolved["override"]
+        self._z_catastrophe_apply_mask = resolved["apply_mask"]
+        self._z_catastrophe_edit_lock_mask = resolved["edit_lock_mask"]
+        self._apply_runtime_base_zone_edit_lock(self._z_catastrophe_edit_lock_mask)
+
+    def _emit_catastrophe_transition(self, payload: Optional[Dict[str, Any]]) -> None:
+        if not payload:
+            return
+        telemetry = getattr(self, "telemetry", None)
+        if telemetry is None or not getattr(telemetry, "enabled", False):
+            return
+        try:
+            if hasattr(telemetry, "record_catastrophe_transition"):
+                telemetry.record_catastrophe_transition(**payload)
+        except Exception:
+            pass
+
+    def _emit_catastrophe_counters(self, tick: int) -> None:
+        telemetry = getattr(self, "telemetry", None)
+        if telemetry is None or not getattr(telemetry, "enabled", False):
+            return
+        status = self.catastrophe_status()
+        counters = {
+            "catastrophe_active": 1.0 if bool(status.get("active", False)) else 0.0,
+            "catastrophe_remaining_ticks": float(status.get("remaining_ticks", 0) or 0),
+            "catastrophe_duration_ticks": float(status.get("duration_ticks", 0) or 0),
+            "catastrophe_active_cells": float(status.get("active_cell_count", 0) or 0),
+            "catastrophe_locked_cells": float(status.get("locked_cell_count", 0) or 0),
+        }
+        try:
+            if hasattr(telemetry, "emit_counters"):
+                telemetry.emit_counters(int(tick), counters)
+        except Exception:
+            pass
+
+    def activate_catastrophe(self, spec: CatastropheSpec, *, tick: Optional[int] = None, replace_existing: bool = True) -> Dict[str, Any]:
+        tick_i = int(self.stats.tick if tick is None else tick)
+        payload = self.catastrophe.activate(spec, tick=tick_i, world_shape=(int(self.H), int(self.W)), replace_existing=bool(replace_existing))
+        self._refresh_zone_runtime_resolution()
+        self._emit_catastrophe_transition(payload)
+        return payload
+
+    def activate_catastrophe_from_tensors(self, *, type_name: str, override_value_map: torch.Tensor, apply_mask: torch.Tensor, duration_ticks: Optional[int] = None, edit_lock_mask: Optional[torch.Tensor] = None, metadata: Optional[Dict[str, Any]] = None, tick: Optional[int] = None, replace_existing: bool = True) -> Dict[str, Any]:
+        if duration_ticks is None:
+            duration_ticks = int(getattr(config, "CATASTROPHE_DEFAULT_DURATION_TICKS", 0))
+        if int(duration_ticks) <= 0:
+            raise RuntimeError("activate_catastrophe_from_tensors requires duration_ticks > 0; set it explicitly or configure CATASTROPHE_DEFAULT_DURATION_TICKS")
+        if edit_lock_mask is None and bool(getattr(config, "CATASTROPHE_OVERRIDE_LOCKS_EDIT_MASK", True)):
+            edit_lock_mask = apply_mask
+        spec = CatastropheSpec(type_name=str(type_name), duration_ticks=int(duration_ticks), override_value_map=override_value_map, apply_mask=apply_mask, edit_lock_mask=edit_lock_mask, metadata=dict(metadata or {}))
+        return self.activate_catastrophe(spec, tick=tick, replace_existing=replace_existing)
+
+    def clear_active_catastrophe(self, *, tick: Optional[int] = None, reason: str = "manual_clear") -> Optional[Dict[str, Any]]:
+        tick_i = int(self.stats.tick if tick is None else tick)
+        payload = self.catastrophe.clear(tick=tick_i, reason=str(reason))
+        if payload is None:
+            return None
+        self._refresh_zone_runtime_resolution()
+        self._emit_catastrophe_transition(payload)
+        return payload
+
+    def _on_catastrophe_tick_completed(self, tick: int) -> None:
+        ended = self.catastrophe.on_tick_end(tick=int(tick))
+        if ended is not None:
+            self._refresh_zone_runtime_resolution()
+            self._emit_catastrophe_transition(ended)
 
     # -------------------------------------------------------------------------
     # Alive filtering
@@ -995,8 +1120,8 @@ class TickEngine:
         N = alive_idx.numel()
 
         # --- Local zone features for rich observation tail ---
-        if self._z_base_values is not None:
-            zone_effect_local = self._z_base_values[pos_xy[:, 1], pos_xy[:, 0]].to(self._data_dt)
+        if self._z_effective_values is not None:
+            zone_effect_local = self._z_effective_values[pos_xy[:, 1], pos_xy[:, 0]].to(self._data_dt)
             zone_effect_local = zone_effect_local.clamp_(-1.0, 1.0)
         else:
             zone_effect_local = self._obs_zone_effect_local[:N]
@@ -1172,6 +1297,7 @@ class TickEngine:
 
         # Initialize per-tick telemetry ordering context (additive only; safe no-op if unsupported).
         self._telemetry_set_phase(telemetry, tick=tick_now, phase="tick_start")
+        self._emit_catastrophe_counters(tick_now)
 
         metrics = TickMetrics()
         alive_idx = self._recompute_alive_idx()
@@ -1183,6 +1309,7 @@ class TickEngine:
             if self._ppo is not None:
                 self._ppo.finalize_pending_window_from_cache()
 
+            self._on_catastrophe_tick_completed(tick_now)
             self.stats.on_tick_advanced(1)
             metrics.tick = int(self.stats.tick)
 
@@ -1956,16 +2083,16 @@ class TickEngine:
         if (alive_idx := self._recompute_alive_idx()).numel() > 0:
             pos_xy = self.registry.positions_xy(alive_idx)
 
-            # Positive base zones preserve current heal semantics.
+            # Runtime-effective zone application.
             #
-            # Patch 1 intentionally does NOT activate negative signed-zone damage
-            # yet; it only carries signed values through the data model and runtime
-            # cache. Positive magnitudes already scale the legacy heal rate, so:
-            #   +1.0 -> full old HEAL_RATE
-            #   +0.5 -> half heal rate
-            #    0.0 -> dormant
-            if self._z_base_values is not None:
-                zone_values_now = self._z_base_values[pos_xy[:, 1], pos_xy[:, 0]]
+            # Patch 4 upgrades the old heal-only path into signed effective zone
+            # semantics resolved from canonical base zones + catastrophe runtime
+            # overrides:
+            #   positive values -> healing scaled by value magnitude
+            #   negative values -> environmental damage scaled by abs(value)
+            #   zero            -> dormant
+            if self._z_effective_values is not None:
+                zone_values_now = self._z_effective_values[pos_xy[:, 1], pos_xy[:, 0]]
                 if (on_heal := zone_values_now > 0.0).any():
                     heal_idx = alive_idx[on_heal]
                     heal_strength = zone_values_now[on_heal].to(self._data_dt)
@@ -1982,8 +2109,32 @@ class TickEngine:
                         individual_rewards.index_add_(0, heal_idx, heal_reward.to(self._data_dt))
                         reward_healing_recovered.index_add_(0, heal_idx, heal_reward)
 
+                negative_zone_rate = float(getattr(config, "CATASTROPHE_NEGATIVE_ZONE_DAMAGE_RATE", 0.0))
+                if negative_zone_rate > 0.0 and (on_harm := zone_values_now < 0.0).any():
+                    harm_idx = alive_idx[on_harm]
+                    harm_strength = (-zone_values_now[on_harm]).to(self._data_dt)
+                    data[harm_idx, COL_HP] = data[harm_idx, COL_HP] - (negative_zone_rate * harm_strength)
+                    self.grid[1, pos_xy[on_harm, 1], pos_xy[on_harm, 0]] = data[harm_idx, COL_HP].to(self._grid_dt)
+
+                    harm_dead_mask = data[harm_idx, COL_HP] <= 0.0
+                    if bool(harm_dead_mask.any().item()):
+                        env_dead_idx = harm_idx[harm_dead_mask]
+                        env_rD, env_bD = self._apply_deaths(
+                            env_dead_idx,
+                            metrics,
+                            credit_kills=False,
+                            death_cause="environmental",
+                        )
+                        meta_rd += env_rD
+                        meta_bd += env_bD
+                        alive_idx = self._recompute_alive_idx()
+                        if alive_idx.numel() > 0:
+                            pos_xy = self.registry.positions_xy(alive_idx)
+                        else:
+                            pos_xy = torch.empty((0, 2), device=self.device, dtype=torch.long)
+
             # Metabolism / attrition
-            if meta_drain := getattr(config, "METABOLISM_ENABLED", True):
+            if alive_idx.numel() > 0 and (meta_drain := getattr(config, "METABOLISM_ENABLED", True)):
                 drain = torch.where(
                     data[alive_idx, COL_UNIT] == 1.0,
                     config.META_SOLDIER_HP_PER_TICK,
@@ -2149,7 +2300,7 @@ class TickEngine:
                 )
 
         # ---------------------------------------------------------------------
-        # 9) Advance tick, flush PPO dead, respawn
+        # 9) Advance catastrophe duration, then advance tick / flush PPO dead / respawn
         # ---------------------------------------------------------------------
         self.stats.on_tick_advanced(1)
         metrics.tick = int(self.stats.tick)

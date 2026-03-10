@@ -291,6 +291,26 @@ class Zones:
             respect_edit_lock=respect_edit_lock,
         )
 
+    def set_runtime_base_zone_edit_locked_mask(self, mask: torch.Tensor | None) -> None:
+        """
+        Install or clear a runtime-only base-zone edit-lock mask.
+        """
+        if mask is None:
+            if hasattr(self, "_base_zone_edit_locked_mask"):
+                delattr(self, "_base_zone_edit_locked_mask")
+            return
+        if not torch.is_tensor(mask):
+            raise TypeError("runtime base-zone edit lock mask must be a torch.Tensor or None")
+        if tuple(mask.shape) != tuple(self.base_zone_value_map.shape):
+            raise ValueError(
+                f"runtime base-zone edit lock mask shape {tuple(mask.shape)} does not match base zone shape {tuple(self.base_zone_value_map.shape)}"
+            )
+        self._base_zone_edit_locked_mask = mask.to(device=self.base_zone_value_map.device, dtype=torch.bool)
+
+    def clear_runtime_base_zone_edit_locked_mask(self) -> None:
+        """Remove any runtime-injected base-zone edit lock mask."""
+        self.set_runtime_base_zone_edit_locked_mask(None)
+
     def checkpoint_base_zones_payload(self) -> Dict[str, Any]:
         """
         Return the canonical base-zone payload fragment used for checkpoints.

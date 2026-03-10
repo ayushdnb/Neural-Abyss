@@ -2292,6 +2292,44 @@ class TelemetrySession:
             "checkpoint_path": str(checkpoint_path),
         })
 
+    def record_catastrophe_transition(
+        self,
+        *,
+        phase: str,
+        active: bool,
+        type_name: Optional[str],
+        start_tick: Optional[int],
+        duration_ticks: int,
+        remaining_ticks: int,
+        elapsed_ticks: int,
+        shape: Optional[Any],
+        active_cell_count: int,
+        locked_cell_count: int,
+        metadata: Optional[Dict[str, Any]] = None,
+        end_tick: Optional[int] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        if not self.enabled:
+            return
+        tick_value = int(end_tick if end_tick is not None else (start_tick if start_tick is not None else 0))
+        self._emit_event({
+            "tick": tick_value,
+            "type": "catastrophe_transition",
+            "phase": str(phase),
+            "active": bool(active),
+            "catastrophe_type": (None if type_name is None else str(type_name)),
+            "start_tick": (None if start_tick is None else int(start_tick)),
+            "end_tick": (None if end_tick is None else int(end_tick)),
+            "duration_ticks": int(duration_ticks),
+            "remaining_ticks": int(remaining_ticks),
+            "elapsed_ticks": int(elapsed_ticks),
+            "active_cell_count": int(active_cell_count),
+            "locked_cell_count": int(locked_cell_count),
+            "shape": (None if shape is None else list(shape)),
+            "reason": (None if reason is None else str(reason)),
+            "metadata": dict(metadata or {}),
+        })
+
     def bootstrap_from_registry(self, registry: Any, tick: int, note: str = "bootstrap") -> None:
         """
         Seed births for agents that already exist at startup.

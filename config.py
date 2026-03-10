@@ -647,6 +647,15 @@ HEAL_ZONE_SIZE_RATIO = _env_float("FWS_HEAL_SIZE_RATIO", 5/64)
 #   net ≈ HEAL_RATE - META_*_HP_PER_TICK
 HEAL_RATE            = _env_float("FWS_HEAL_RATE", 0.003)
 
+# -----------------------------------------------------------------------------
+# Catastrophe runtime framework (Patch 4 core)
+# -----------------------------------------------------------------------------
+CATASTROPHE_FRAMEWORK_VERSION: str = "runtime_override_v1"
+CATASTROPHE_RUNTIME_RESOLUTION: str = "base_plus_override_apply_mask_v1"
+CATASTROPHE_DEFAULT_DURATION_TICKS = _env_int("FWS_CATASTROPHE_DEFAULT_DURATION_TICKS", 5000)
+CATASTROPHE_NEGATIVE_ZONE_DAMAGE_RATE = _env_float("FWS_CATASTROPHE_NEGATIVE_ZONE_DAMAGE_RATE", HEAL_RATE)
+CATASTROPHE_OVERRIDE_LOCKS_EDIT_MASK = _env_bool("FWS_CATASTROPHE_OVERRIDE_LOCKS_EDIT_MASK", True)
+
 # Capture Points ("King of the Hill")
 # -----------------------------------
 # Dense objective pressure is often the most reliable anti-camping incentive.

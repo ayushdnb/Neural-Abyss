@@ -33,6 +33,7 @@ import numpy as np
 import torch
 
 import config
+from engine.catastrophe import CatastropheController
 
 
 # -----------------------------------------------------------------------------
@@ -538,7 +539,7 @@ class CheckpointManager:
     """
 
     # Version identifier for checkpoint format compatibility
-    checkpoint_version: int = 1
+    checkpoint_version: int = 2
 
     def __init__(self, run_dir: Path) -> None:
         """
@@ -681,6 +682,7 @@ class CheckpointManager:
             "engine": {
                 "agent_scores": dict(getattr(engine, "agent_scores", {})),
                 "respawn_controller": self._extract_respawn_state(getattr(engine, "respawner", None)),
+                "catastrophe": self._extract_catastrophe_state(engine),
             },
             "ppo": self._extract_ppo_state(engine),
             "stats": _extract_stats(stats),
@@ -703,6 +705,7 @@ class CheckpointManager:
             "notes": notes,
             "git_commit": ckpt["meta"]["git_commit"],
             "observation_schema": ckpt["meta"]["observation_schema"],
+            "catastrophe": self._catastrophe_manifest_summary(ckpt["engine"].get("catastrophe")),
             "file_list": ["manifest.json", "checkpoint.pt", "DONE"],
             "pinned": bool(pinned),
             "pin_tag": str(pin_tag) if pinned else "",
@@ -1108,6 +1111,14 @@ class CheckpointManager:
             eng.get("respawn_controller")
         )
 
+        # Restore catastrophe runtime state before statistics/PPO resume so the
+        # engine's effective zone caches match the resumed world state.
+        CheckpointManager._apply_catastrophe_state(
+            engine,
+            eng.get("catastrophe"),
+            device=device,
+        )
+
         # Restore statistics
         _apply_stats(stats, ckpt.get("stats", {}))
 
@@ -1164,6 +1175,37 @@ class CheckpointManager:
             )
 
         return None
+
+    @staticmethod
+    def _extract_catastrophe_state(engine: Any) -> Dict[str, Any]:
+        controller = getattr(engine, "catastrophe", None)
+        if controller is None:
+            return {"active": False}
+        if hasattr(controller, "checkpoint_payload"):
+            return controller.checkpoint_payload()
+        return {"active": False}
+
+    @staticmethod
+    def _catastrophe_manifest_summary(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not payload or not bool(payload.get("active", False)):
+            return {"active": False, "type_name": None, "start_tick": None, "duration_ticks": 0, "remaining_ticks": 0}
+        state = payload.get("active_state", {}) or {}
+        return {"active": True, "type_name": state.get("type_name"), "start_tick": int(state.get("start_tick", 0)), "duration_ticks": int(state.get("duration_ticks", 0)), "remaining_ticks": int(state.get("remaining_ticks", 0))}
+
+    @staticmethod
+    def _apply_catastrophe_state(engine: Any, payload: Optional[Dict[str, Any]], *, device: torch.device) -> None:
+        controller = getattr(engine, "catastrophe", None)
+        if controller is None:
+            controller = CatastropheController(device=torch.device(device))
+            setattr(engine, "catastrophe", controller)
+        if hasattr(controller, "load_checkpoint_payload"):
+            controller.load_checkpoint_payload(payload, device=torch.device(device))
+        elif not payload:
+            setattr(engine, "catastrophe", CatastropheController(device=torch.device(device)))
+        if hasattr(engine, "_refresh_zone_runtime_resolution"):
+            engine._refresh_zone_runtime_resolution()
+        elif hasattr(engine, "_ensure_zone_tensors"):
+            engine._ensure_zone_tensors()
 
     @staticmethod
     def _extract_respawn_state(respawner: Any) -> Dict[str, Any]:
