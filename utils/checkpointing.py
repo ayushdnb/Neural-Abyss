@@ -539,7 +539,7 @@ class CheckpointManager:
     """
 
     # Version identifier for checkpoint format compatibility
-    checkpoint_version: int = 2
+    checkpoint_version: int = 3
 
     def __init__(self, run_dir: Path) -> None:
         """
@@ -681,6 +681,7 @@ class CheckpointManager:
             },
             "engine": {
                 "agent_scores": dict(getattr(engine, "agent_scores", {})),
+                "agent_reward_totals": dict(getattr(engine, "agent_reward_totals", {})),
                 "respawn_controller": self._extract_respawn_state(getattr(engine, "respawner", None)),
                 "catastrophe": self._extract_catastrophe_state(engine),
             },
@@ -1104,6 +1105,9 @@ class CheckpointManager:
         if hasattr(engine, "agent_scores"):
             engine.agent_scores.clear()
             engine.agent_scores.update(eng.get("agent_scores", {}))
+        if hasattr(engine, "agent_reward_totals"):
+            engine.agent_reward_totals.clear()
+            engine.agent_reward_totals.update(eng.get("agent_reward_totals", {}))
 
         # Restore respawn controller state
         CheckpointManager._apply_respawn_state(
@@ -1187,10 +1191,35 @@ class CheckpointManager:
 
     @staticmethod
     def _catastrophe_manifest_summary(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        scheduler = dict((payload or {}).get("scheduler", {}) or {})
         if not payload or not bool(payload.get("active", False)):
-            return {"active": False, "type_name": None, "start_tick": None, "duration_ticks": 0, "remaining_ticks": 0}
+            return {
+                "active": False,
+                "type_name": None,
+                "start_tick": None,
+                "duration_ticks": 0,
+                "remaining_ticks": 0,
+                "scheduler": {
+                    "enabled": bool(scheduler.get("enabled", False)),
+                    "pressure": float(scheduler.get("pressure", 0.0) or 0.0),
+                    "cooldown_remaining": int(scheduler.get("cooldown_remaining", 0) or 0),
+                    "state_label": str(scheduler.get("last_state_label", scheduler.get("state_label", "idle"))),
+                },
+            }
         state = payload.get("active_state", {}) or {}
-        return {"active": True, "type_name": state.get("type_name"), "start_tick": int(state.get("start_tick", 0)), "duration_ticks": int(state.get("duration_ticks", 0)), "remaining_ticks": int(state.get("remaining_ticks", 0))}
+        return {
+            "active": True,
+            "type_name": state.get("type_name"),
+            "start_tick": int(state.get("start_tick", 0)),
+            "duration_ticks": int(state.get("duration_ticks", 0)),
+            "remaining_ticks": int(state.get("remaining_ticks", 0)),
+            "scheduler": {
+                "enabled": bool(scheduler.get("enabled", False)),
+                "pressure": float(scheduler.get("pressure", 0.0) or 0.0),
+                "cooldown_remaining": int(scheduler.get("cooldown_remaining", 0) or 0),
+                "state_label": str(scheduler.get("last_state_label", scheduler.get("state_label", "active"))),
+            },
+        }
 
     @staticmethod
     def _apply_catastrophe_state(engine: Any, payload: Optional[Dict[str, Any]], *, device: torch.device) -> None:
@@ -1285,4 +1314,5 @@ class CheckpointManager:
 
         return {"enabled": True, "state": state}
     # =============================================================================
+
 

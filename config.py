@@ -376,7 +376,7 @@ TELEMETRY_LOG_PPO: bool = _env_bool("FWS_TELEM_PPO", True)
 # Dedicated rich PPO training diagnostics CSV (separate from headless summary).
 # File: telemetry/ppo_training_telemetry.csv
 # Env: FWS_TELEM_PPO_RICH_CSV
-TELEMETRY_PPO_RICH_CSV: bool = _env_bool("FWS_TELEM_PPO_RICH_CSV", False)
+TELEMETRY_PPO_RICH_CSV: bool = _env_bool("FWS_TELEM_PPO_RICH_CSV", True)
 
 # Rich PPO telemetry write granularity: "update", "epoch", or "minibatch".
 # Higher detail gives better diagnostics but increases I/O/CSV size.
@@ -543,7 +543,7 @@ VMAP_MIN_BUCKET = _env_int("FWS_VMAP_MIN_BUCKET", 8)
 
 # Debug prints for vmap fallback/diagnostics.
 # Env: FWS_VMAP_DEBUG
-VMAP_DEBUG = _env_bool("FWS_VMAP_DEBUG", False)
+VMAP_DEBUG = _env_bool("FWS_VMAP_DEBUG", True)
 
 # =============================================================================
 # 🌍 WORLD SCALE & MEMORY ALLOCATION
@@ -634,7 +634,7 @@ MAP_WALL_GAP_PROB      = _env_float("FWS_MAP_WALL_GAP_PROB", 0.20)
 # Env: FWS_HEAL_COUNT
 # More small zones often increase probability of uncontested camping.
 # Fewer zones (especially 1) tends to force shared contention.
-HEAL_ZONE_COUNT      = _env_int("FWS_HEAL_COUNT", 15)
+HEAL_ZONE_COUNT      = _env_int("FWS_HEAL_COUNT", 11)
 
 # Heal zone size as ratio (engine interprets exact geometry).
 # Env: FWS_HEAL_SIZE_RATIO
@@ -648,13 +648,90 @@ HEAL_ZONE_SIZE_RATIO = _env_float("FWS_HEAL_SIZE_RATIO", 5/64)
 HEAL_RATE            = _env_float("FWS_HEAL_RATE", 0.003)
 
 # -----------------------------------------------------------------------------
-# Catastrophe runtime framework (Patch 4 core)
+# Catastrophe runtime framework (final reconciliation patch)
 # -----------------------------------------------------------------------------
-CATASTROPHE_FRAMEWORK_VERSION: str = "runtime_override_v1"
+CATASTROPHE_FRAMEWORK_VERSION: str = "runtime_override_v2"
 CATASTROPHE_RUNTIME_RESOLUTION: str = "base_plus_override_apply_mask_v1"
-CATASTROPHE_DEFAULT_DURATION_TICKS = _env_int("FWS_CATASTROPHE_DEFAULT_DURATION_TICKS", 5000)
-CATASTROPHE_NEGATIVE_ZONE_DAMAGE_RATE = _env_float("FWS_CATASTROPHE_NEGATIVE_ZONE_DAMAGE_RATE", HEAL_RATE)
+CATASTROPHE_SCHEDULER_VERSION: str = "pressure_hazard_v1"
+
+# Master catastrophe toggles.
+CATASTROPHE_ENABLED = _env_bool("FWS_CATASTROPHE_ENABLED", True)
+CATASTROPHE_DYNAMIC_SCHEDULER_ENABLED = _env_bool("FWS_CATASTROPHE_DYNAMIC_SCHEDULER_ENABLED", True)
+CATASTROPHE_ALLOW_OVERLAP = _env_bool("FWS_CATASTROPHE_ALLOW_OVERLAP", False)
 CATASTROPHE_OVERRIDE_LOCKS_EDIT_MASK = _env_bool("FWS_CATASTROPHE_OVERRIDE_LOCKS_EDIT_MASK", True)
+CATASTROPHE_MANUAL_REPLACE_EXISTING = _env_bool("FWS_CATASTROPHE_MANUAL_REPLACE_EXISTING", True)
+CATASTROPHE_CLEAR_ENABLED = _env_bool("FWS_CATASTROPHE_CLEAR_ENABLED", True)
+
+# Shared catastrophe timing / damage knobs.
+CATASTROPHE_DEFAULT_DURATION_TICKS = _env_int("FWS_CATASTROPHE_DEFAULT_DURATION_TICKS", 9000)
+CATASTROPHE_NEGATIVE_ZONE_DAMAGE_RATE = _env_float("FWS_CATASTROPHE_NEGATIVE_ZONE_DAMAGE_RATE", HEAL_RATE)
+CATASTROPHE_SCHEDULER_SEED_OFFSET = _env_int("FWS_CATASTROPHE_SCHEDULER_SEED_OFFSET", 7919)
+CATASTROPHE_DYNAMIC_COOLDOWN_TICKS = _env_int("FWS_CATASTROPHE_DYNAMIC_COOLDOWN_TICKS", 2600)
+CATASTROPHE_DYNAMIC_MIN_INTERVAL_TICKS = _env_int("FWS_CATASTROPHE_DYNAMIC_MIN_INTERVAL_TICKS", 1800)
+CATASTROPHE_DYNAMIC_MAX_INTERVAL_TICKS = _env_int("FWS_CATASTROPHE_DYNAMIC_MAX_INTERVAL_TICKS", 9000)
+
+# Hazard-law pressure accumulation.
+CATASTROPHE_DYNAMIC_PRESSURE_BASE_PER_TICK = _env_float("FWS_CATASTROPHE_DYNAMIC_PRESSURE_BASE_PER_TICK", 0.00016)
+CATASTROPHE_DYNAMIC_PRESSURE_NONZERO_GAIN = _env_float("FWS_CATASTROPHE_DYNAMIC_PRESSURE_NONZERO_GAIN", 0.00045)
+CATASTROPHE_DYNAMIC_PRESSURE_POSITIVE_GAIN = _env_float("FWS_CATASTROPHE_DYNAMIC_PRESSURE_POSITIVE_GAIN", 0.00020)
+CATASTROPHE_DYNAMIC_PRESSURE_NEGATIVE_GAIN = _env_float("FWS_CATASTROPHE_DYNAMIC_PRESSURE_NEGATIVE_GAIN", 0.00010)
+CATASTROPHE_DYNAMIC_PRESSURE_MEAN_ABS_GAIN = _env_float("FWS_CATASTROPHE_DYNAMIC_PRESSURE_MEAN_ABS_GAIN", 0.00035)
+CATASTROPHE_DYNAMIC_PRESSURE_CAP = _env_float("FWS_CATASTROPHE_DYNAMIC_PRESSURE_CAP", 6.0)
+CATASTROPHE_DYNAMIC_PRESSURE_TO_PROB_GAIN = _env_float("FWS_CATASTROPHE_DYNAMIC_PRESSURE_TO_PROB_GAIN", 0.08)
+CATASTROPHE_DYNAMIC_BASE_HAZARD_PROB = _env_float("FWS_CATASTROPHE_DYNAMIC_BASE_HAZARD_PROB", 0.001)
+CATASTROPHE_DYNAMIC_MAX_HAZARD_PROB = _env_float("FWS_CATASTROPHE_DYNAMIC_MAX_HAZARD_PROB", 0.18)
+CATASTROPHE_DYNAMIC_PRESSURE_COOLDOWN_DECAY = _env_float("FWS_CATASTROPHE_DYNAMIC_PRESSURE_COOLDOWN_DECAY", 0.15)
+
+# Safe default catastrophe strengths.
+CATASTROPHE_GLOBAL_ATTENUATION_FACTOR = _env_float("FWS_CATASTROPHE_GLOBAL_ATTENUATION_FACTOR", 0.35)
+CATASTROPHE_REGIONAL_ATTENUATION_FACTOR = _env_float("FWS_CATASTROPHE_REGIONAL_ATTENUATION_FACTOR", 0.25)
+CATASTROPHE_POLARITY_SPLIT_MAGNITUDE_SCALE = _env_float("FWS_CATASTROPHE_POLARITY_SPLIT_MAGNITUDE_SCALE", 0.75)
+CATASTROPHE_POSITIVE_BAND_DORMANCY_FRACTION = _env_float("FWS_CATASTROPHE_POSITIVE_BAND_DORMANCY_FRACTION", 0.22)
+CATASTROPHE_DYNAMIC_BAND_AXIS_MODE: str = _env_str("FWS_CATASTROPHE_DYNAMIC_BAND_AXIS_MODE", "random").strip().lower()
+CATASTROPHE_MANUAL_POSITIVE_BAND_AXIS: str = _env_str("FWS_CATASTROPHE_MANUAL_POSITIVE_BAND_AXIS", "vertical").strip().lower()
+
+# Per-preset durations.
+CATASTROPHE_DURATION_GLOBAL_ATTENUATION = _env_int("FWS_CATASTROPHE_DURATION_GLOBAL_ATTENUATION", 2600)
+CATASTROPHE_DURATION_POSITIVE_BAND_DORMANCY = _env_int("FWS_CATASTROPHE_DURATION_POSITIVE_BAND_DORMANCY", 2000)
+CATASTROPHE_DURATION_POLARITY_SPLIT = _env_int("FWS_CATASTROPHE_DURATION_POLARITY_SPLIT", 2400)
+CATASTROPHE_DURATION_REGIONAL_ATTENUATION = _env_int("FWS_CATASTROPHE_DURATION_REGIONAL_ATTENUATION", 2200)
+CATASTROPHE_DURATION_INVERSION = _env_int("FWS_CATASTROPHE_DURATION_INVERSION", 1500)
+CATASTROPHE_DURATION_FULL_DORMANCY = _env_int("FWS_CATASTROPHE_DURATION_FULL_DORMANCY", 1200)
+
+CATASTROPHE_PRESET_DURATION_TICKS = {
+    "global_attenuation": int(CATASTROPHE_DURATION_GLOBAL_ATTENUATION),
+    "positive_band_dormancy": int(CATASTROPHE_DURATION_POSITIVE_BAND_DORMANCY),
+    "polarity_split_left_negative": int(CATASTROPHE_DURATION_POLARITY_SPLIT),
+    "polarity_split_right_negative": int(CATASTROPHE_DURATION_POLARITY_SPLIT),
+    "regional_attenuation_left": int(CATASTROPHE_DURATION_REGIONAL_ATTENUATION),
+    "regional_attenuation_right": int(CATASTROPHE_DURATION_REGIONAL_ATTENUATION),
+    "inversion": int(CATASTROPHE_DURATION_INVERSION),
+    "full_dormancy": int(CATASTROPHE_DURATION_FULL_DORMANCY),
+}
+
+# Weighted scheduler distribution.
+CATASTROPHE_WEIGHT_GLOBAL_ATTENUATION = _env_float("FWS_CATASTROPHE_WEIGHT_GLOBAL_ATTENUATION", 1.00)
+CATASTROPHE_WEIGHT_POSITIVE_BAND_DORMANCY = _env_float("FWS_CATASTROPHE_WEIGHT_POSITIVE_BAND_DORMANCY", 0.90)
+CATASTROPHE_WEIGHT_POLARITY_SPLIT_LEFT_NEGATIVE = _env_float("FWS_CATASTROPHE_WEIGHT_POLARITY_SPLIT_LEFT_NEGATIVE", 0.70)
+CATASTROPHE_WEIGHT_POLARITY_SPLIT_RIGHT_NEGATIVE = _env_float("FWS_CATASTROPHE_WEIGHT_POLARITY_SPLIT_RIGHT_NEGATIVE", 0.70)
+CATASTROPHE_WEIGHT_REGIONAL_ATTENUATION_LEFT = _env_float("FWS_CATASTROPHE_WEIGHT_REGIONAL_ATTENUATION_LEFT", 0.55)
+CATASTROPHE_WEIGHT_REGIONAL_ATTENUATION_RIGHT = _env_float("FWS_CATASTROPHE_WEIGHT_REGIONAL_ATTENUATION_RIGHT", 0.55)
+
+# Experimental modes remain available for manual triggering but are disabled from the
+# dynamic scheduler by default because they can create brittle extinction pressure.
+CATASTROPHE_WEIGHT_INVERSION = _env_float("FWS_CATASTROPHE_WEIGHT_INVERSION", 0.0)
+CATASTROPHE_WEIGHT_FULL_DORMANCY = _env_float("FWS_CATASTROPHE_WEIGHT_FULL_DORMANCY", 0.0)
+
+CATASTROPHE_DYNAMIC_WEIGHTS = {
+    "global_attenuation": float(CATASTROPHE_WEIGHT_GLOBAL_ATTENUATION),
+    "positive_band_dormancy": float(CATASTROPHE_WEIGHT_POSITIVE_BAND_DORMANCY),
+    "polarity_split_left_negative": float(CATASTROPHE_WEIGHT_POLARITY_SPLIT_LEFT_NEGATIVE),
+    "polarity_split_right_negative": float(CATASTROPHE_WEIGHT_POLARITY_SPLIT_RIGHT_NEGATIVE),
+    "regional_attenuation_left": float(CATASTROPHE_WEIGHT_REGIONAL_ATTENUATION_LEFT),
+    "regional_attenuation_right": float(CATASTROPHE_WEIGHT_REGIONAL_ATTENUATION_RIGHT),
+    "inversion": float(CATASTROPHE_WEIGHT_INVERSION),
+    "full_dormancy": float(CATASTROPHE_WEIGHT_FULL_DORMANCY),
+}
 
 # Capture Points ("King of the Hill")
 # -----------------------------------
@@ -663,12 +740,12 @@ CATASTROPHE_OVERRIDE_LOCKS_EDIT_MASK = _env_bool("FWS_CATASTROPHE_OVERRIDE_LOCKS
 # Number of capture points.
 # Env: FWS_CP_COUNT
 # 1 large CP often creates strongest convergence to a shared objective.
-CP_COUNT           = _env_int("FWS_CP_COUNT", 7)
+CP_COUNT           = _env_int("FWS_CP_COUNT", 9)
 
 # Capture point size ratio.
 # Env: FWS_CP_SIZE_RATIO
 # Larger values increase contact probability but may reduce tactical variety.
-CP_SIZE_RATIO      = _env_float("FWS_CP_SIZE_RATIO", 0.08)
+CP_SIZE_RATIO      = _env_float("FWS_CP_SIZE_RATIO", 0.06)
 
 # Team reward per tick for owning/outnumbering on CP (fed into team reward path).
 # Env: FWS_CP_REWARD
@@ -698,7 +775,7 @@ SOLDIER_HP = _env_float("FWS_SOLDIER_HP", 1.0)
 # Archer base HP.
 # Env: FWS_ARCHER_HP
 # Lower HP makes positioning and line-of-sight more critical.
-ARCHER_HP  = _env_float("FWS_ARCHER_HP", 0.45)
+ARCHER_HP  = _env_float("FWS_ARCHER_HP", 0.60)
 
 # Base attack reference (generic/shared fallback).
 # Env: FWS_BASE_ATK
@@ -904,7 +981,7 @@ RESPAWN_ENABLED = _env_bool("FWS_RESPAWN", True)
 
 # Minimum population floor per team (hysteresis/fill system may try to maintain this).
 # Env: FWS_RESP_FLOOR_PER_TEAM
-RESP_FLOOR_PER_TEAM      = _env_int("FWS_RESP_FLOOR_PER_TEAM", 120)
+RESP_FLOOR_PER_TEAM      = _env_int("FWS_RESP_FLOOR_PER_TEAM", 110)
 
 # Hard cap of respawns applied per tick.
 # Env: FWS_RESP_MAX_PER_TICK
@@ -1032,7 +1109,7 @@ if RESPAWN_PARENT_SELECTION_MODE not in ("random", "topk_weighted"):
 
 # Fraction of parent candidates kept in the top-k pool for weighted sampling.
 # Env: FWS_RESP_PARENT_TOPK_FRAC
-RESPAWN_PARENT_SELECTION_TOPK_FRAC: float = _env_float("FWS_RESP_PARENT_TOPK_FRAC", 0.1)
+RESPAWN_PARENT_SELECTION_TOPK_FRAC: float = _env_float("FWS_RESP_PARENT_TOPK_FRAC", 0.3)
 
 # Exponent applied to parent score weights (higher => stronger bias inside top-k).
 # Env: FWS_RESP_PARENT_SCORE_POWER
@@ -1094,12 +1171,12 @@ PPO_HP_REWARD_MODE         = _env_str("FWS_PPO_HP_REWARD_MODE", "threshold_ramp"
 # HP percentage threshold used by threshold-ramp HP reward mode.
 # Env: FWS_PPO_HP_REWARD_THRESHOLD
 # Example: 0.60 => no HP PPO reward at <=60% HP, smooth ramp above it.
-PPO_HP_REWARD_THRESHOLD    = _env_float("FWS_PPO_HP_REWARD_THRESHOLD", 0.60)
+PPO_HP_REWARD_THRESHOLD    = _env_float("FWS_PPO_HP_REWARD_THRESHOLD", 0.5)
 
 # Individual PPO reward for damage dealt (dense combat shaping, per-agent only).
 # Env: FWS_PPO_REW_DMG_DEALT_AGENT
 # 0 disables this shaping channel.
-PPO_REWARD_DMG_DEALT_INDIVIDUAL = _env_float("FWS_PPO_REW_DMG_DEALT_AGENT", 0.2)
+PPO_REWARD_DMG_DEALT_INDIVIDUAL = _env_float("FWS_PPO_REW_DMG_DEALT_AGENT", 0.4)
 
 # Individual PPO penalty magnitude for damage taken (dense combat shaping, per-agent only).
 # Env: FWS_PPO_PEN_DMG_TAKEN_AGENT
@@ -1109,7 +1186,7 @@ PPO_PENALTY_DMG_TAKEN_INDIVIDUAL = _env_float("FWS_PPO_PEN_DMG_TAKEN_AGENT", 0.0
 # Individual kill reward for PPO agent signal.
 # Env: FWS_PPO_REW_KILL_AGENT
 # Larger => direct combat success becomes strongly reinforced.
-PPO_REWARD_KILL_INDIVIDUAL = _env_float("FWS_PPO_REW_KILL_AGENT", 25.0)
+PPO_REWARD_KILL_INDIVIDUAL = _env_float("FWS_PPO_REW_KILL_AGENT", 40.0)
 
 # Death penalty for PPO agent signal.
 # Env: FWS_PPO_REW_DEATH
@@ -1424,9 +1501,21 @@ VIEWER_CENTER_WINDOW: bool = _env_bool("FWS_VIEWER_CENTER_WINDOW", True)
 # Larger => more visible detail, larger window, more rendering cost.
 CELL_SIZE  = _env_int("FWS_CELL_SIZE", 5)
 
-# HUD panel width in pixels.
+# HUD / layout sizing.
 # Env: FWS_HUD_W
-HUD_WIDTH  = _env_int("FWS_HUD_W", 340)
+HUD_WIDTH  = _env_int("FWS_HUD_W", 380)
+VIEWER_SIDE_PANEL_WIDTH = _env_int("FWS_VIEWER_SIDE_PANEL_WIDTH", 460)
+VIEWER_BOTTOM_PANEL_HEIGHT = _env_int("FWS_VIEWER_BOTTOM_PANEL_HEIGHT", 148)
+VIEWER_PANEL_GAP = _env_int("FWS_VIEWER_PANEL_GAP", 8)
+VIEWER_MIN_WIDTH = _env_int("FWS_VIEWER_MIN_WIDTH", 1320)
+VIEWER_MIN_HEIGHT = _env_int("FWS_VIEWER_MIN_HEIGHT", 820)
+VIEWER_AUTO_FIT_WORLD = _env_bool("FWS_VIEWER_AUTO_FIT_WORLD", True)
+VIEWER_HELP_FONT_SIZE = _env_int("FWS_VIEWER_HELP_FONT_SIZE", 12)
+VIEWER_SHOW_SELECTED_AGENT_SCORES = _env_bool("FWS_VIEWER_SHOW_SELECTED_AGENT_SCORES", True)
+VIEWER_ZONE_OVERLAY_DEFAULT = _env_bool("FWS_VIEWER_ZONE_OVERLAY_DEFAULT", True)
+VIEWER_HUD_VERBOSE = _env_bool("FWS_VIEWER_HUD_VERBOSE", True)
+VIEWER_HUD_SHOW_SCHEDULER = _env_bool("FWS_VIEWER_HUD_SHOW_SCHEDULER", True)
+VIEWER_BASE_ZONE_EDIT_STEP = _env_float("FWS_VIEWER_BASE_ZONE_EDIT_STEP", 0.25)
 
 # Target render FPS (UI mode throttling/render loop).
 # Env: FWS_TARGET_FPS
@@ -1677,6 +1766,36 @@ def _validate_config_invariants() -> None:
     if total_mix_prob <= 0.0:
         _config_issue("At least one TEAM_BRAIN_MIX_P_* probability must be > 0")
 
+    _prob("CATASTROPHE_GLOBAL_ATTENUATION_FACTOR", CATASTROPHE_GLOBAL_ATTENUATION_FACTOR)
+    _prob("CATASTROPHE_REGIONAL_ATTENUATION_FACTOR", CATASTROPHE_REGIONAL_ATTENUATION_FACTOR)
+    _prob("CATASTROPHE_POLARITY_SPLIT_MAGNITUDE_SCALE", CATASTROPHE_POLARITY_SPLIT_MAGNITUDE_SCALE)
+    _prob("CATASTROPHE_POSITIVE_BAND_DORMANCY_FRACTION", CATASTROPHE_POSITIVE_BAND_DORMANCY_FRACTION)
+    _prob("CATASTROPHE_DYNAMIC_BASE_HAZARD_PROB", CATASTROPHE_DYNAMIC_BASE_HAZARD_PROB)
+    _prob("CATASTROPHE_DYNAMIC_MAX_HAZARD_PROB", CATASTROPHE_DYNAMIC_MAX_HAZARD_PROB)
+    _positive_int("CATASTROPHE_DEFAULT_DURATION_TICKS", max(1, int(CATASTROPHE_DEFAULT_DURATION_TICKS)))
+    _non_negative_int("CATASTROPHE_DYNAMIC_COOLDOWN_TICKS", CATASTROPHE_DYNAMIC_COOLDOWN_TICKS)
+    _non_negative_int("CATASTROPHE_DYNAMIC_MIN_INTERVAL_TICKS", CATASTROPHE_DYNAMIC_MIN_INTERVAL_TICKS)
+    _non_negative_int("CATASTROPHE_DYNAMIC_MAX_INTERVAL_TICKS", CATASTROPHE_DYNAMIC_MAX_INTERVAL_TICKS)
+    _positive_int("VIEWER_SIDE_PANEL_WIDTH", VIEWER_SIDE_PANEL_WIDTH)
+    _positive_int("VIEWER_BOTTOM_PANEL_HEIGHT", VIEWER_BOTTOM_PANEL_HEIGHT)
+    _positive_int("VIEWER_MIN_WIDTH", VIEWER_MIN_WIDTH)
+    _positive_int("VIEWER_MIN_HEIGHT", VIEWER_MIN_HEIGHT)
+    if int(CATASTROPHE_DYNAMIC_MAX_INTERVAL_TICKS) > 0 and int(CATASTROPHE_DYNAMIC_MAX_INTERVAL_TICKS) < int(CATASTROPHE_DYNAMIC_MIN_INTERVAL_TICKS):
+        _config_issue(
+            f"CATASTROPHE_DYNAMIC_MAX_INTERVAL_TICKS must be >= CATASTROPHE_DYNAMIC_MIN_INTERVAL_TICKS "
+            f"(got {CATASTROPHE_DYNAMIC_MAX_INTERVAL_TICKS} < {CATASTROPHE_DYNAMIC_MIN_INTERVAL_TICKS})"
+        )
+    if CATASTROPHE_DYNAMIC_BAND_AXIS_MODE not in {"random", "vertical", "horizontal"}:
+        _config_issue(
+            f"CATASTROPHE_DYNAMIC_BAND_AXIS_MODE must be one of {{'random','vertical','horizontal'}} "
+            f"(got {CATASTROPHE_DYNAMIC_BAND_AXIS_MODE!r})"
+        )
+    if CATASTROPHE_MANUAL_POSITIVE_BAND_AXIS not in {"vertical", "horizontal"}:
+        _config_issue(
+            f"CATASTROPHE_MANUAL_POSITIVE_BAND_AXIS must be one of {{'vertical','horizontal'}} "
+            f"(got {CATASTROPHE_MANUAL_POSITIVE_BAND_AXIS!r})"
+        )
+
     # Profile name sanity (warn/strict, but do not mutate the value)
     if PROFILE not in {"default", "debug", "train_fast", "train_quality"}:
         _config_issue(
@@ -1711,3 +1830,4 @@ def summary_str() -> str:
         f"obs={OBS_DIM} acts={NUM_ACTIONS} "
         f"AMP={'on' if AMP_ENABLED else 'off'}"
     )
+

@@ -210,11 +210,18 @@ def _config_snapshot() -> dict:
             "TARGET_FPS": config.TARGET_FPS,
         },
         "CATASTROPHE": {
-            "FRAMEWORK_VERSION": str(getattr(config, "CATASTROPHE_FRAMEWORK_VERSION", "runtime_override_v1")),
+            "FRAMEWORK_VERSION": str(getattr(config, "CATASTROPHE_FRAMEWORK_VERSION", "runtime_override_v2")),
             "RUNTIME_RESOLUTION": str(getattr(config, "CATASTROPHE_RUNTIME_RESOLUTION", "base_plus_override_apply_mask_v1")),
+            "SCHEDULER_VERSION": str(getattr(config, "CATASTROPHE_SCHEDULER_VERSION", "pressure_hazard_v1")),
+            "ENABLED": bool(getattr(config, "CATASTROPHE_ENABLED", True)),
+            "DYNAMIC_ENABLED": bool(getattr(config, "CATASTROPHE_DYNAMIC_SCHEDULER_ENABLED", True)),
             "DEFAULT_DURATION_TICKS": int(getattr(config, "CATASTROPHE_DEFAULT_DURATION_TICKS", 0)),
             "NEGATIVE_ZONE_DAMAGE_RATE": float(getattr(config, "CATASTROPHE_NEGATIVE_ZONE_DAMAGE_RATE", 0.0)),
             "OVERRIDE_LOCKS_EDIT_MASK": bool(getattr(config, "CATASTROPHE_OVERRIDE_LOCKS_EDIT_MASK", True)),
+            "DYNAMIC_COOLDOWN_TICKS": int(getattr(config, "CATASTROPHE_DYNAMIC_COOLDOWN_TICKS", 0)),
+            "DYNAMIC_MIN_INTERVAL_TICKS": int(getattr(config, "CATASTROPHE_DYNAMIC_MIN_INTERVAL_TICKS", 0)),
+            "DYNAMIC_MAX_INTERVAL_TICKS": int(getattr(config, "CATASTROPHE_DYNAMIC_MAX_INTERVAL_TICKS", 0)),
+            "DYNAMIC_WEIGHTS": dict(getattr(config, "CATASTROPHE_DYNAMIC_WEIGHTS", {}) or {}),
         },
         "SPAWN": {
             "SPAWN_MODE": str(getattr(config, "SPAWN_MODE", "uniform")),
@@ -280,10 +287,17 @@ def _telemetry_schema_manifest(grid: torch.Tensor, zones) -> dict:
             "signed_base_zones_present": bool(positive_base_present or negative_base_present),
             "negative_base_zones_present": bool(negative_base_present),
             "zone_runtime_resolution": str(getattr(config, "CATASTROPHE_RUNTIME_RESOLUTION", "base_plus_override_apply_mask_v1")),
-            "catastrophe_framework_version": str(getattr(config, "CATASTROPHE_FRAMEWORK_VERSION", "runtime_override_v1")),
+            "catastrophe_framework_version": str(getattr(config, "CATASTROPHE_FRAMEWORK_VERSION", "runtime_override_v2")),
+            "catastrophe_scheduler_version": str(getattr(config, "CATASTROPHE_SCHEDULER_VERSION", "pressure_hazard_v1")),
+            "catastrophe_enabled": bool(getattr(config, "CATASTROPHE_ENABLED", True)),
+            "catastrophe_dynamic_scheduler_enabled": bool(getattr(config, "CATASTROPHE_DYNAMIC_SCHEDULER_ENABLED", True)),
             "catastrophe_default_duration_ticks": int(getattr(config, "CATASTROPHE_DEFAULT_DURATION_TICKS", 0)),
             "catastrophe_negative_zone_damage_rate": float(getattr(config, "CATASTROPHE_NEGATIVE_ZONE_DAMAGE_RATE", 0.0)),
             "catastrophe_override_locks_edit_mask_default": bool(getattr(config, "CATASTROPHE_OVERRIDE_LOCKS_EDIT_MASK", True)),
+            "catastrophe_dynamic_cooldown_ticks": int(getattr(config, "CATASTROPHE_DYNAMIC_COOLDOWN_TICKS", 0)),
+            "catastrophe_dynamic_min_interval_ticks": int(getattr(config, "CATASTROPHE_DYNAMIC_MIN_INTERVAL_TICKS", 0)),
+            "catastrophe_dynamic_max_interval_ticks": int(getattr(config, "CATASTROPHE_DYNAMIC_MAX_INTERVAL_TICKS", 0)),
+            "catastrophe_dynamic_weights": dict(getattr(config, "CATASTROPHE_DYNAMIC_WEIGHTS", {}) or {}),
             "cp_zone_count": int(len(getattr(zones, "cp_masks", []) or [])) if zones is not None else 0,
             "respawn_child_unit_mode": str(getattr(config, "RESPAWN_CHILD_UNIT_MODE", "inherit_parent_on_clone")),
             "respawn_parent_selection_mode": str(getattr(config, "RESPAWN_PARENT_SELECTION_MODE", "random")),
@@ -1178,3 +1192,4 @@ def main() -> None:
 #
 if __name__ == "__main__":
     main()
+

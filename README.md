@@ -1,368 +1,261 @@
-# Neural Siege
+# Neural-Abyss
 
-Large-scale multi-agent combat simulation with neural policy optimization.
+> **Overview**  
+> `Neural-Abyss` is a grid-based multi-agent combat simulation implemented in Python with PyTorch. The repository combines a tensor-backed world state, a slot-based agent registry, neural policy/value networks, a per-slot PPO runtime, signed zone mechanics with runtime catastrophe overrides, a Pygame viewer, crash-safe checkpointing, and structured telemetry. The public repository name is **Neural-Abyss**; some internal strings and historical paths still use older labels such as `Neural Siege` and `Infinite_War_Simulation`.
 
----
+## What the repository implements
 
-## Overview
+At its core, the repository runs a discrete tick loop:
 
-Neural Siege is a high-performance, grid-based multi-agent simulation framework designed for research in emergent behaviors, multi-agent reinforcement learning, and large-scale combat dynamics. The system simulates team-based warfare between autonomous agents controlled by neural network policies, trained via Proximal Policy Optimization (PPO).
+1. Build observations for alive agents.
+2. Build legal-action masks.
+3. Run policy inference for each live slot.
+4. Resolve combat.
+5. Apply deaths.
+6. Resolve movement.
+7. Apply zone effects, control-point scoring, and respawn logic.
+8. Record telemetry and PPO data.
+9. Advance to the next tick.
 
-### Design Philosophy
+The world state is stored in PyTorch tensors. A slot-based registry holds per-agent state and brain modules. The runtime can run with a viewer or without one, can save and resume checkpoints, and can append outputs into an existing run directory when resuming.
 
-- **Vectorized Execution**: All core simulation logic operates on PyTorch tensors, enabling GPU acceleration and batch processing of thousands of agents.
-- **Deterministic Reproducibility**: Full checkpointing support with RNG state preservation ensures experiments can be resumed and replicated.
-- **Modular Architecture**: Swappable brain architectures, configurable map generation, and pluggable telemetry systems.
-- **Observability**: Comprehensive telemetry, interactive visualization, and real-time inspection capabilities.
+## Principal components
 
----
+- **Tensor-backed simulation state**  
+  Grid state is stored as a `(C, H, W)` tensor. Agent state is stored in a dense slot-based registry tensor. The code selects CUDA when available and enabled in config.
+- **Multi-agent combat loop**  
+  Combat resolves before movement. The action space is discrete and mask-driven. The current configuration exposes `41` actions by default.
+- **Two unit types**  
+  Soldier and archer unit IDs are defined in config. Archers have configurable range and optional wall-blocked line of sight.
+- **Neural policy/value modules**  
+  `agent/mlp_brain.py` defines five MLP-based actor-critic variants. `agent/ensemble.py` groups compatible models for batched inference and can use `torch.func` / `vmap` when enabled.
+- **Per-slot PPO runtime**  
+  `rl/ppo_runtime.py` keeps one model state and one optimizer per slot. Parameters are not shared across slots. Rollouts, GAE, clipped PPO updates, gradient clipping, KL guards, and LR scheduling are implemented in code.
+- **Procedural map and zone mechanics**  
+  Random walls are generated at startup. Base zones are stored as a signed float field rather than a heal-only mask. Capture-point masks are maintained separately.
+- **Runtime catastrophe layer**  
+  `engine/catastrophe.py` applies transient overrides on top of the canonical base-zone field. Manual catastrophe presets and a deterministic dynamic scheduler are both implemented. Catastrophe state is checkpointed.
+- **Viewer and operator controls**  
+  `ui/viewer.py` provides a real-time Pygame UI with inspection, overlays, manual checkpointing, and catastrophe controls. A no-output inspector mode is also present.
+- **Checkpointing and observability**  
+  Checkpoints include world state, brains, PPO state, catastrophe state, viewer state, and RNG state. Results and telemetry are written into a run directory with append-safe resume handling.
 
-## Key Features
+## Repository layout
 
-| Feature | Description |
-|---------|-------------|
-| **Tensor-Based Simulation** | Grid and agent state stored as PyTorch tensors; operations vectorized across all agents |
-| **Multi-Agent PPO** | Clipped surrogate objective with entropy regularization, generalized advantage estimation (GAE) |
-| **Modular Brain Architectures** | TronBrain (MLP), MirrorBrain (symmetric), TransformerBrain (self-attention)         |
-| **Procedural Map Generation** | Random walk-based terrain with heal zones and control points                          |
-| **Interactive Visualization** | Pygame-based viewer with camera controls, agent inspection, and overlay modes         |
-| **Comprehensive Telemetry** | Event logging (JSONL), life-cycle tracking, lineage graphs, movement analytics          |
-| **Atomic Checkpointing** | Crash-safe save/resume with CPU-portable tensor serialization                              |
-| **Background Persistence** | Multiprocess-based results writer to avoid simulation stalls                             |
-
----
-
-## System Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              SIMULATION LOOP                                  │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐   │
-│  │  Map Gen    │───▶│  Registry   │───▶│   Engine    │───▶│   Viewer    │   │
-│  │  (CPU)      │    │  (GPU)      │    │  (GPU)      │    │  (CPU/GPU)  │   │
-│  └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘   │
-│                              │                                                │
-│                              ▼                                                │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                       │
-│  │   PPO       │◄───│  Brains     │◄───│  Actions    │                       │
-│  │  Trainer    │    │  (NN Modules)│    │  (Discrete) │                       │
-│  └─────────────┘    └─────────────┘    └─────────────┘                       │
-│                              │                                                │
-│                              ▼                                                │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                       │
-│  │ Telemetry   │◄───│ Checkpoints │◄───│  Results    │                       │
-│  │  (JSONL)    │    │  (Atomic)   │    │  (CSV)      │                       │
-│  └─────────────┘    └─────────────┘    └─────────────┘                       │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Data Flow
-
-1. **Initialization**: `MapGenerator` creates terrain; `AgentRegistry` allocates agent slots with unique IDs
-2. **Observation**: `ObservationBuilder` constructs per-agent views (self + nearby allies/enemies)
-3. **Inference**: Brain networks (batched via `torch.vmap`) output action logits and state values
-4. **Action Resolution**: `ActionResolver` processes moves, attacks, and collisions; updates grid state
-5. **Reward Calculation**: Team-based rewards with individual penalties (damage taken, idle time)
-6. **PPO Update**: Trajectory buffer flushed; policy and value networks updated periodically
-7. **Telemetry**: Events batched and written to disk via background process
-
----
-
-## Core Components
-
-### Engine (`engine/`)
-
-| Module | Responsibility |
-|--------|----------------|
-| `tick_engine.py` | Core simulation loop: observation → inference → action → reward |
-| `action_resolver.py` | Discrete action processing: 8-direction movement, attack, noop |
-| `observations.py` | Per-agent observation construction with spatial and entity features |
-| `agent_registry.py` | Slot-based agent management with tensor storage (alive, HP, position, team) |
-| `mapgen.py` | Procedural terrain generation: walls, heal zones, control points |
-| `respawn.py` | Periodic agent respawning with team cooldowns and spawn-point selection |
-
-### Agent Brains (`agent/`)
-
-| Brain | Architecture | Parameters | Use Case |
-|-------|--------------|------------|----------|
-| `TronBrain` | 3-layer MLP | ~50K | Baseline policy, fast inference |
-| `MirrorBrain` | Symmetric twin networks | ~100K | Red/Blue policy sharing |
-| `TransformerBrain` | Multi-head self-attention | ~500K | Relational reasoning, attention visualization |
-
-All brains implement:
-- `forward(obs) -> (action_logits, state_value)`
-- `get_action_and_value(obs, action=None) -> (action, log_prob, entropy, value)`
-
-### Training (`training/`)
-
-| Module | Function |
-|--------|----------|
-| `ppo_trainer.py` | Multi-agent PPO with GAE, entropy bonus, gradient clipping |
-| `reward.py` | Reward shaping: team rewards, individual penalties, death penalties |
-
-PPO Hyperparameters (configurable):
-- Learning rate: 3e-4
-- Gamma (discount): 0.99
-- GAE lambda: 0.95
-- Clip epsilon: 0.2
-- Value loss coefficient: 0.5
-- Entropy coefficient: 0.01
-
-### Configuration (`config.py`)
-
-Environment-based configuration system supporting:
-- Device selection (`TORCH_DEVICE`)
-- Grid dimensions (`GRID_WIDTH`, `GRID_HEIGHT`)
-- Agent counts (`NUM_AGENTS`, `MAX_AGENTS`)
-- PPO hyperparameters
-- Telemetry toggles
-- Checkpoint intervals
-
-Profile selection via `FWS_PROFILE` environment variable:
-```bash
-FWS_PROFILE=train_fast python main.py
-FWS_PROFILE=visualize python main.py
+```text
+.
+├─ main.py
+├─ config.py
+├─ agent/
+│  ├─ ensemble.py
+│  ├─ mlp_brain.py
+│  └─ obs_spec.py
+├─ engine/
+│  ├─ agent_registry.py
+│  ├─ catastrophe.py
+│  ├─ grid.py
+│  ├─ mapgen.py
+│  ├─ respawn.py
+│  ├─ spawn.py
+│  ├─ tick.py
+│  ├─ game/move_mask.py
+│  └─ ray_engine/
+├─ rl/ppo_runtime.py
+├─ simulation/stats.py
+├─ ui/
+│  ├─ camera.py
+│  └─ viewer.py
+├─ utils/
+│  ├─ checkpointing.py
+│  ├─ persistence.py
+│  ├─ profiler.py
+│  └─ telemetry.py
+└─ recorder/
+   ├─ recorder.py
+   ├─ schemas.py
+   └─ video_writer.py
 ```
 
-### Telemetry (`utils/telemetry.py`)
+## Runtime flow
 
-Event-driven telemetry with configurable verbosity:
-- **Agent Life**: Birth/death timestamps, lifespan, kills, damage totals
-- **Lineage Edges**: Parent-child relationships for evolutionary analysis
-- **Events (JSONL)**: Birth, death, damage, kill, move events with schema versioning
-- **Movement Summary**: Per-tick aggregates (attempted, success, blocked, conflicts)
-- **Tick Summary**: Low-frequency population and health metrics
-
-### Checkpointing (`utils/checkpointing.py`)
-
-Atomic checkpoint format:
+```mermaid
+flowchart TD
+    A[main.py] --> B[config.py]
+    A --> C[map generation and spawn]
+    C --> D[TickEngine]
+    D --> E[AgentsRegistry]
+    D --> F[MLP brains]
+    D --> G[PPO runtime]
+    D --> H[Zones and catastrophe controller]
+    D --> I[TelemetrySession]
+    A --> J[ResultsWriter]
+    A --> K[CheckpointManager]
+    A --> L[Viewer]
+    L --> D
 ```
-checkpoints/
-├── latest.txt              # Pointer to most recent checkpoint
-└── ckpt_t{tick}_{timestamp}/
-    ├── checkpoint.pt       # Full state (grid, registry, brains, PPO, RNG)
-    ├── manifest.json       # Metadata (tick, git commit, notes)
-    └── DONE                # Atomic completion marker
-```
-
-Checkpoint includes:
-- World grid and zone masks
-- Agent data tensor and brain state dicts
-- PPO trainer state (optimizer, trajectory buffer)
-- RNG states (Python, NumPy, PyTorch CPU/CUDA)
-- Respawn controller state
-
-### Viewer (`ui/viewer.py`)
-
-Interactive Pygame visualization:
-- **Camera**: Pan (WASD), zoom (scroll), adaptive cell sizing
-- **Overlays**: HP bars, brain type labels, threat vision, line-of-sight rays
-- **Inspection**: Click agent for detailed stats (HP, attack, vision, brain params)
-- **HUD**: Team scores, kill/death counts, control point status, score history graph
-- **Minimap**: World overview with viewport rectangle
-- **Controls**: Pause, speed adjustment (0.25x–16x), manual checkpoint (F9)
-
----
-
-## Technical Highlights
-
-### Vectorized Observation Construction
-
-Observations built via tensor operations (no Python loops):
-```python
-# Relative positions computed via broadcasting
-rel_x = other_x - self_x  # shape: (num_alive, num_alive)
-rel_y = other_y - self_y
-```
-
-### Batched Neural Inference
-
-Brain inference parallelized via `torch.vmap`:
-```python
-logits, values = torch.vmap(self.brain_forward)(obs_tensor)
-```
-
-### GPU-Optimized Action Resolution
-
-Collision detection and position updates on GPU:
-- Wall collision: boolean mask from grid occupancy
-- Agent collision: hash-based position deduplication
-- Conflict resolution: deterministic priority by agent ID
-
-### Memory-Efficient Trajectory Storage
-
-PPO buffer stores minimal state:
-- Observations (float32)
-- Actions (int64)
-- Log probabilities (float32)
-- Rewards (float32)
-- Values (float32)
-- Dones (bool)
-
-### Deterministic Resume
-
-RNG state captured/restored for reproducibility:
-- Python `random` module state
-- NumPy random state
-- PyTorch CPU and CUDA RNG states
-
----
-
-## Installation & Setup
-
-### Requirements
-
-- Python 3.10+
-- PyTorch 2.0+ (with CUDA optional)
-- pygame 2.5+
-- numpy 1.24+
-
-### Install
-
-```bash
-git clone <repository>
-cd Infinite_War_Simulation
-pip install -r requirements.txt
-```
-
-### Verify Environment
-
-```bash
-python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-```
-
----
-
-## Usage
-
-### Training Mode
-
-```bash
-# Fast training on GPU
-FWS_PROFILE=train_fast python main.py
-
-# With custom config
-TORCH_DEVICE=cuda:0 NUM_AGENTS=256 python main.py
-```
-
-### Visualization Mode
-
-```bash
-# Interactive viewer with trained policy
-FWS_PROFILE=visualize python main.py
-
-# Load from checkpoint
-python main.py --resume results/sim_2025-01-15_10-30-00/checkpoints/latest.txt
-```
-
-### Headless Mode
-
-```bash
-# No viewer, telemetry only
-FWS_PROFILE=train_fast VIEWER_ENABLED=false python main.py
-```
-
-### Expected Outputs
-
-```
-results/
-└── sim_YYYY-MM-DD_HH-MM-SS/
-    ├── config.json              # Runtime configuration
-    ├── stats.csv                # Per-tick metrics
-    ├── dead_agents_log.csv      # Death events
-    ├── checkpoints/             # Periodic snapshots
-    │   ├── latest.txt
-    │   └── ckpt_t{tick}_{timestamp}/
-    └── telemetry/               # Detailed event logs
-        ├── agent_life.csv
-        ├── lineage_edges.csv
-        ├── move_summary.csv
-        └── events/
-            └── events_000001.jsonl
-```
-
----
 
 ## Configuration
 
-Key environment variables:
+Runtime configuration is environment-variable driven through `config.py`.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TORCH_DEVICE` | `cuda` | Compute device (`cuda`, `cpu`, `mps`) |
-| `GRID_WIDTH` | `64` | World width in cells |
-| `GRID_HEIGHT` | `64` | World height in cells |
-| `NUM_AGENTS` | `128` | Initial agents per team |
-| `MAX_AGENTS` | `512` | Maximum concurrent agents |
-| `PPO_UPDATE_EVERY` | `2048` | Steps between policy updates |
-| `TELEMETRY_ENABLED` | `true` | Enable event logging |
-| `CHECKPOINT_EVERY_TICKS` | `10000` | Auto-save interval |
+Verified categories include device selection, UI or headless mode, grid size and initial population, PPO hyperparameters, respawn settings, catastrophe controls, telemetry cadence, checkpoint cadence and retention, viewer layout, and video settings.
 
-See `config.py` for complete parameter list.
+The startup banner is generated from `config.summary_str()` and reports the resolved device, grid size, initial per-team count, observation width, action count, and AMP status.
 
----
+## Requirements
 
-## Design Principles
+The repository does **not** currently publish a pinned dependency manifest in the audited files. Installation therefore needs to be done in the active Python environment.
 
-### Reproducibility
-- All randomness controlled via seedable RNGs
-- Checkpoint system preserves full runtime state
-- Git commit hash recorded in checkpoints
+Observed imports in the code indicate these dependencies:
 
-### Modularity
-- Brains implement standard interface; new architectures plug in seamlessly
-- Observation builder composable from feature modules
-- Telemetry events schema-versioned for backward compatibility
+- **Required:** `torch`, `numpy`
+- **Required for the viewer:** `pygame`
+- **Optional:** `cv2` / OpenCV for `simulation_raw.avi`, `imageio` for the standalone recorder utility, and `pyarrow` for schema-related recorder utilities when available
 
-### Performance
-- GPU-resident simulation state minimizes CPU-GPU transfers
-- Background I/O via multiprocessing Queue
-- Viewer caches static terrain; dynamic elements updated per-frame
+CUDA is optional. The config selects CUDA when available and enabled.
 
-### Stability
-- Runtime sanity checks detect NaN/Inf in grid and agent data
-- Gradient clipping in PPO prevents policy collapse
-- Checkpoint atomic writes prevent corruption on crash
+## Installation
 
----
+Clone the repository and prepare a Python environment with the required packages installed.
 
-## Limitations
+```bash
+git clone https://github.com/ayushdnb/Neural-Abyss.git
+cd Neural-Abyss
+```
 
-- **Discrete Actions Only**: Action space limited to 9 discrete actions (8 directions + noop + attack)
-- **Grid-Based Movement**: Agents occupy single cells; no continuous position or fractional movement
-- **2D Top-Down**: No elevation, line-of-sight blocked only by walls
-- **Simplified Combat**: Attack is instantaneous with fixed range; no projectile physics
-- **Homogeneous Teams**: All agents on a team share the same brain architecture (though individual parameters differ)
-- **Single-Device Training**: PPO updates assume all agents on same GPU; no distributed training support
+Because configuration is env-driven and there is no audited CLI wrapper, the usual entrypoint is:
 
----
+```bash
+python main.py
+```
+
+## Running
+
+### Default viewer run
+
+```bash
+python main.py
+```
+
+### Headless run
+
+PowerShell:
+
+```powershell
+$env:FWS_UI="0"
+python main.py
+```
+
+POSIX:
+
+```bash
+FWS_UI=0 python main.py
+```
+
+### Resume from a checkpoint
+
+`main.py` reads `FWS_CHECKPOINT_PATH` and restores world state first, then runtime state.
+
+```powershell
+$env:FWS_CHECKPOINT_PATH="results\sim_YYYY-MM-DD_HH-MM-SS\checkpoints\ckpt_tXXXXX_YYYY-MM-DD_HH-MM-SS"
+python main.py
+```
+
+Output continuity is enabled by default. On resume, the runtime appends into the original run directory unless `FWS_RESUME_FORCE_NEW_RUN=1` is set.
+
+### Inspector UI without creating outputs
+
+```powershell
+$env:FWS_CHECKPOINT_PATH="results\sim_YYYY-MM-DD_HH-MM-SS\checkpoints\ckpt_tXXXXX_YYYY-MM-DD_HH-MM-SS"
+$env:FWS_INSPECTOR_MODE="ui_no_output"
+python main.py
+```
+
+In this mode the viewer starts without creating results, telemetry, or checkpoint files.
+
+## Checkpoint and resume behavior
+
+Checkpointing is implemented in `utils/checkpointing.py` and is integrated into both UI and headless execution paths.
+
+Verified behavior in code:
+
+- periodic checkpointing by tick count
+- on-exit checkpointing
+- manual checkpointing from the viewer with `F9`
+- trigger-file checkpointing via `checkpoint.now` in the run directory
+- pinned checkpoints for manual saves
+- retention pruning for non-pinned checkpoints
+- `latest.txt` pointer in the `checkpoints/` directory
+- checkpoint path resolution from a checkpoint directory, a checkpoint file, or a checkpoints root containing `latest.txt`
+
+Saved checkpoint payloads include world state, zone state, registry data, brains, PPO state, catastrophe state, viewer state when saved from the UI, RNG state, and checkpoint metadata.
+
+## Viewer controls
+
+The following keys are verified in `ui/viewer.py`.
+
+| Input | Action |
+|---|---|
+| Left mouse button | Inspect world cell and select occupant |
+| Mouse wheel | Zoom |
+| `W A S D` / arrows | Pan camera |
+| `Space` / `.` | Pause-resume / single-step while paused |
+| `+` / `-` | Change speed multiplier |
+| `Z` | Toggle signed-zone overlay |
+| `R` / `T` | Toggle ray display / threat overlay |
+| `B` / `N` | Toggle battle view / brain labels |
+| `M` | Mark selected agent |
+| `S` | Save selected brain state dict |
+| `F9` / `F11` | Manual checkpoint / fullscreen |
+| `[` / `]` | Decrease / increase selected cell base-zone value |
+| `0`, `Backspace`, `Delete` | Reset selected cell base-zone value |
+| `1`–`6` | Trigger manual catastrophe presets |
+| `Shift+I`, `Shift+O` | Trigger experimental inversion / full dormancy |
+| `G`, `Shift+G`, `C` | Toggle catastrophe system / scheduler / clear active catastrophe |
+
+## Outputs
+
+A normal run creates a timestamped run directory under `results/` unless output continuity is reusing an existing directory.
+
+```text
+results/
+└─ sim_YYYY-MM-DD_HH-MM-SS/
+   ├─ config.json
+   ├─ stats.csv
+   ├─ dead_agents_log.csv
+   ├─ summary.json
+   ├─ crash_trace.txt                  # only on crash
+   ├─ simulation_raw.avi               # only when recording is enabled
+   ├─ checkpoints/
+   │  ├─ ckpt_t.../
+   │  └─ latest.txt
+   └─ telemetry/
+      ├─ schema_manifest.json
+      ├─ run_meta.json
+      ├─ agent_static.csv
+      ├─ tick_summary.csv
+      ├─ telemetry_summary.csv
+      ├─ ppo_training_telemetry.csv
+      ├─ mutation_events.csv
+      └─ events/events_000000.jsonl
+```
+
+Additional telemetry sidecars are written by `utils/telemetry.py` when enabled.
+
+## Current status and limitations
+
+This README stays conservative about maturity and results.
+
+Visible limitations in the audited files:
+
+- **Naming is not fully unified.** The public repository is `Neural-Abyss`, while internal strings and historical paths still use `Neural Siege` and `Infinite_War_Simulation`.
+- **Configuration is env-heavy.** The audited files do not provide a dedicated CLI wrapper or a pinned dependency file.
+- **PPO is implemented, but outcome is not asserted here.** The repository contains a full PPO runtime and training telemetry, but code inspection alone does not establish convergence quality.
+- **Viewer brain saves go to the working directory.** `ui/viewer.py` does not route those `.pth` files into the run directory.
+- **Compatibility code is present.** Checkpoint and zone migration bridges indicate that older runtime formats are still supported.
 
 ## License
 
-MIT License
+This repository is released under the **MIT License**.
 
-Copyright (c) 2025 Neural Siege Contributors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
----
-
-## Acknowledgments
-
-This project was developed as a research platform for multi-agent reinforcement learning. The architecture draws inspiration from vectorized simulation frameworks and modern PPO implementations. The codebase prioritizes clarity, extensibility, and reproducibility for academic and industrial research applications.
+See [`LICENSE`](LICENSE) for the license text.

@@ -415,61 +415,57 @@ class TextCache:
 # ==============================================================================
 class LayoutManager:
     """
-    Computes rectangles (pygame.Rect) for:
-      - world view (main grid)
-      - side panel (right)
-      - bottom HUD (stats + minimap + graph)
-
-    Why:
-    - Centralizes layout logic.
-    - Adapts to window resizing.
-    - Avoids hard-coded coordinates scattered across the code.
+    Computes rectangles for the world view, right-side operator panels, and
+    bottom HUD. The goal is to keep the entire operator surface visible on one
+    screen without controls spilling off-panel.
     """
 
     def __init__(self, viewer):
         self.viewer = viewer
 
     def side_width(self):
-        """
-        Adaptive width for the side panel.
+        requested = int(getattr(config, "VIEWER_SIDE_PANEL_WIDTH", 460))
+        return max(360, min(max(360, self.viewer.Wpix - 240), requested))
 
-        Rule:
-        - At least 320 px
-        - At most 420 px
-        - Roughly 27% of total width
-        """
-        return max(320, min(420, int(self.viewer.Wpix * 0.27)))
+    def bottom_height(self):
+        return max(120, int(getattr(config, "VIEWER_BOTTOM_PANEL_HEIGHT", 148)))
+
+    def gap(self):
+        return max(4, int(getattr(config, "VIEWER_PANEL_GAP", 8)))
 
     def world_rect(self):
-        """
-        Rectangle where the game world is drawn.
-
-        We subtract:
-        - margin(s)
-        - side panel width
-        - HUD height (fixed 126 px)
-        """
         m = self.viewer.margin
         return pygame.Rect(
             m,
             m,
-            max(64, self.viewer.Wpix - self.side_width() - 3 * m),
-            max(64, self.viewer.Hpix - 126 - 2 * m),
+            max(64, self.viewer.Wpix - self.side_width() - (3 * m)),
+            max(64, self.viewer.Hpix - self.bottom_height() - (2 * m)),
         )
 
     def side_rect(self):
-        """Rectangle for the side panel (agent inspector + legend)."""
         m, side_w = self.viewer.margin, self.side_width()
         return pygame.Rect(
             self.viewer.Wpix - side_w - m,
             m,
             side_w,
-            max(64, self.viewer.Hpix - 126 - 2 * m),
+            max(64, self.viewer.Hpix - self.bottom_height() - (2 * m)),
         )
 
     def hud_rect(self):
-        """Rectangle for the bottom HUD bar."""
-        return pygame.Rect(0, self.viewer.Hpix - 126, self.viewer.Wpix, 126)
+        bottom_h = self.bottom_height()
+        return pygame.Rect(0, self.viewer.Hpix - bottom_h, self.viewer.Wpix, bottom_h)
+
+    def side_sections(self):
+        s = self.side_rect()
+        gap = self.gap()
+        inner_w = max(100, s.width - 16)
+        top_h = max(170, min(260, int(s.height * 0.30)))
+        mid_h = max(170, min(250, int(s.height * 0.28)))
+        remaining_h = max(140, s.height - top_h - mid_h - (2 * gap) - 12)
+        agent = pygame.Rect(s.x + 8, s.y + 8, inner_w, top_h)
+        zone = pygame.Rect(s.x + 8, agent.bottom + gap, inner_w, mid_h)
+        help_rect = pygame.Rect(s.x + 8, zone.bottom + gap, inner_w, remaining_h)
+        return {"agent": agent, "zone": zone, "help": help_rect}
 
 
 # ==============================================================================
@@ -991,19 +987,40 @@ class HudPanel:
         surf.blit(self.viewer.text_cache.render(blue_str, 16, COLORS["blue"]), (x, y + 48))
 
     def _draw_catastrophe_status(self, surf, y, x):
-        """Draw a concise active-catastrophe HUD strip for operator awareness."""
+        """Draw catastrophe + scheduler state in a compact professional HUD strip."""
         status = self.viewer.get_catastrophe_status()
-        if not bool(status.get("active", False)):
-            line = "Catastrophe: none | Base-zone editing: unlocked"
-            color = COLORS["text_dim"]
+        scheduler = dict(status.get("scheduler", {}) or {})
+        active = bool(status.get("active", False))
+        system_enabled = bool(status.get("system_enabled", False))
+        restored = bool(dict(status.get("metadata", {}) or {}).get("restored_from_checkpoint", False))
+        if not active:
+            line1 = (
+                f"Catastrophe System: {'on' if system_enabled else 'off'} | "
+                "Catastrophe: none | Base-zone editing: unlocked"
+            )
+            color1 = COLORS["text_dim"] if system_enabled else COLORS["warn"]
         else:
-            line = (
+            restore_tag = " | Source: restored checkpoint" if restored else ""
+            line1 = (
+                f"Catastrophe System: {'on' if system_enabled else 'off'} | "
                 f"Catastrophe: {status['display_name']} | Remaining: {int(status.get('remaining_ticks', 0))}/"
                 f"{int(status.get('duration_ticks', 0))} | Cells: {int(status.get('active_cell_count', 0))} | "
-                f"Base-zone editing: locked"
+                f"Base-zone editing: locked{restore_tag}"
             )
-            color = COLORS["pause_text"]
-        surf.blit(self.viewer.text_cache.render(line, 13, color), (x, y + 72))
+            color1 = COLORS["pause_text"] if system_enabled else COLORS["warn"]
+        auto_state = 'on' if scheduler.get('enabled', False) else 'off'
+        if not system_enabled:
+            auto_state = f"blocked (pref {auto_state})"
+        line2 = (
+            f"Auto-Scheduler: {auto_state} | "
+            f"State: {scheduler.get('state_label', 'idle')} | "
+            f"Pressure: {float(scheduler.get('pressure', 0.0) or 0.0):.3f} | "
+            f"Hazard: {float(scheduler.get('hazard_probability', 0.0) or 0.0):.3f} | "
+            f"Cooldown: {int(scheduler.get('cooldown_remaining', 0) or 0)}"
+        )
+        surf.blit(self.viewer.text_cache.render(line1, 13, color1), (x, y + 72))
+        if bool(getattr(config, "VIEWER_HUD_SHOW_SCHEDULER", True)):
+            surf.blit(self.viewer.text_cache.render(line2, 13, COLORS["text_dim"]), (x, y + 92))
 
     def _draw_score_graph(self, surf, hud):
         """
@@ -1090,218 +1107,202 @@ class HudPanel:
 # ==============================================================================
 class SidePanel:
     """
-    Right panel:
+    Right-side operator surface.
 
-    - selected agent details
-    - selected cell / signed-zone inspector
-    - legend and keyboard controls
+    The reconciled viewer uses three stacked cards so agent inspection, cell/zone
+    inspection, and controls all remain visible without overflowing below the
+    screen edge.
     """
 
     def __init__(self, viewer, registry):
         self.viewer = viewer
         self.registry = registry
 
-    def _draw_legend(self, surf, x, y):
-        """Draw the legend and controls list."""
-        y += 20
-        surf.blit(self.viewer.text_cache.render("Legend & Controls", 18, COLORS["text"]), (x, y))
-        y += 30
+    def _draw_card(self, surf, rect, title):
+        pygame.draw.rect(surf, COLORS["hud_bg"], rect)
+        pygame.draw.rect(surf, COLORS["border"], rect, 2)
+        title_surf = self.viewer.text_cache.render(str(title), 16, COLORS["text"])
+        surf.blit(title_surf, (rect.x + 12, rect.y + 10))
+        return rect.x + 12, rect.y + 42
 
-        legend_items = {
-            "Red Soldier": COLORS["red_soldier"],
-            "Red Archer": COLORS["red_archer"],
-            "Blue Soldier": COLORS["blue_soldier"],
-            "Blue Archer": COLORS["blue_archer"],
-            "Beneficial Zone": COLORS["zone_positive"],
-            "Harmful Zone": COLORS["zone_negative"],
-            "Dormant Zone": COLORS["zone_dormant"],
-        }
-
-        for label, color in legend_items.items():
-            pygame.draw.rect(surf, color, (x, y, 15, 15))
-            surf.blit(self.viewer.text_cache.render(label, 13, COLORS["text_dim"]), (x + 25, y))
-            y += 22
-
-        y += 20
-        controls = [
-            "WASD / Arrows: Pan Camera",
-            "Mouse Wheel: Zoom",
-            "Click World: Inspect Cell / Agent",
-            "[ / ]: Decrease / Increase Base Zone",
-            "0 / Backspace: Reset Base Zone",
-            "1: Trigger Inversion",
-            "2: Trigger Dormancy",
-            "3: Trigger Left Attenuation",
-            "4: Trigger Right Attenuation",
-            "C: Clear Active Catastrophe",
-            "Z: Toggle Signed-Zone Overlay",
-            "SPACE: Pause Simulation",
-            ". : Single Step When Paused",
-            "+/-: Change Speed",
-            "R: Toggle Agent Rays",
-            "T: Toggle Threat Vision",
-            "B: Toggle HP Bars",
-            "N: Toggle Brain Labels",
-            "M: Mark Selected Agent",
-            "S: Save Selected Brain",
-            "F9: Manual Checkpoint Save",
-            "F11: Toggle Fullscreen",
-        ]
-        for line in controls:
-            surf.blit(self.viewer.text_cache.render(line, 13, COLORS["text_dim"]), (x, y))
-            y += 18
+    def _draw_key_value_lines(self, surf, rect, lines, *, base_y, font_size=13, line_step=18):
+        y = int(base_y)
+        clip_prev = surf.get_clip()
+        surf.set_clip(rect.inflate(-8, -8))
+        for text_value, color in lines:
+            surf.blit(self.viewer.text_cache.render(str(text_value), font_size, color), (rect.x + 12, y))
+            y += line_step
+            if y > rect.bottom - 16:
+                break
+        surf.set_clip(clip_prev)
         return y
 
-    def _draw_agent_section(self, surf, x, y, srect, state_data):
-        surf.blit(self.viewer.text_cache.render("Agent Inspector", 18, COLORS["text"]), (x, y))
-        y += 30
+    def _draw_help_card(self, surf, rect):
+        x, y = self._draw_card(surf, rect, "Legend & Controls")
+        font_size = max(11, int(getattr(config, "VIEWER_HELP_FONT_SIZE", 12)))
+        row_step = max(14, font_size + 4)
+
+        legend_items = [
+            ("Red Soldier", COLORS["red_soldier"]),
+            ("Red Archer", COLORS["red_archer"]),
+            ("Blue Soldier", COLORS["blue_soldier"]),
+            ("Blue Archer", COLORS["blue_archer"]),
+            ("Beneficial Zone", COLORS["zone_positive"]),
+            ("Harmful Zone", COLORS["zone_negative"]),
+            ("Dormant Zone", COLORS["zone_dormant"]),
+        ]
+        col_gap = 10
+        col_w = max(120, (rect.width - 36 - col_gap) // 2)
+        for idx, (label, color) in enumerate(legend_items):
+            col = idx % 2
+            row = idx // 2
+            lx = x + col * (col_w + col_gap)
+            ly = y + row * row_step
+            pygame.draw.rect(surf, color, (lx, ly + 2, 12, 12))
+            surf.blit(self.viewer.text_cache.render(label, font_size, COLORS["text_dim"]), (lx + 18, ly))
+        y = y + ((len(legend_items) + 1) // 2) * row_step + 12
+
+        controls = [
+            "LMB inspect/select", "[ / ] zone -/+", "0 reset zone", "Z zone overlay",
+            "1 attenuation", "2 band dormancy", "3 left harmful", "4 right harmful",
+            "5 left attenuate", "6 right attenuate", "Shift+I inversion exp.", "Shift+O dormancy exp.",
+            "C clear catastrophe", "G catastrophe master", "Shift+G auto-scheduler", "Space pause", ". single-step",
+            "+/- speed", "Wheel zoom", "WASD/arrows pan", "R rays / T threat",
+            "B HP bars", "N brain labels", "M mark agent", "S save brain",
+            "F9 checkpoint", "F11 fullscreen",
+        ]
+        cols = 2
+        col_w = max(140, (rect.width - 36 - col_gap) // cols)
+        rows = (len(controls) + cols - 1) // cols
+        for idx, label in enumerate(controls):
+            col = idx // rows
+            row = idx % rows
+            lx = x + col * (col_w + col_gap)
+            ly = y + row * row_step
+            if ly > rect.bottom - 18:
+                continue
+            surf.blit(self.viewer.text_cache.render(label, font_size, COLORS["text_dim"]), (lx, ly))
+
+    def _draw_agent_section(self, surf, rect, state_data):
+        x, y = self._draw_card(surf, rect, "Agent Inspector")
         slot_id = self.viewer.selected_slot_id
 
         if slot_id is None:
-            surf.blit(self.viewer.text_cache.render("No live agent selected.", 13, COLORS["text_dim"]), (x, y))
-            y += 30
-        elif slot_id not in state_data["agent_map"]:
-            uid_str = (
+            lines = [("No live agent selected.", COLORS["text_dim"])]
+            self._draw_key_value_lines(surf, rect, lines, base_y=y)
+            return
+
+        if slot_id not in state_data["agent_map"]:
+            dead_label = (
                 f"ID: {self.viewer.last_selected_uid} (Dead)"
                 if self.viewer.last_selected_uid is not None
                 else f"Slot: {slot_id} (Dead)"
             )
-            surf.blit(self.viewer.text_cache.render(uid_str, 13, COLORS["warn"]), (x, y))
-            y += 30
-        else:
-            _ax, _ay, _u, _t, unique_id, _btype = state_data["agent_map"][slot_id]
-            surf.blit(self.viewer.text_cache.render(f"ID: {int(unique_id)}", 16, COLORS["green"]), (x, y))
-            y += 24
+            self._draw_key_value_lines(surf, rect, [(dead_label, COLORS["warn"])], base_y=y)
+            return
 
-            agent_data = self.registry.agent_data[slot_id]
-            pos = (int(agent_data[COL_X].item()), int(agent_data[COL_Y].item()))
-            hp = float(agent_data[COL_HP].item())
-            hp_max = float(agent_data[COL_HP_MAX].item())
-            atk = float(agent_data[COL_ATK].item())
-            vision = float(agent_data[COL_VISION].item())
-            hp_ratio = (hp / hp_max) if hp_max > 0 else 0.0
-            unit_val = float(agent_data[COL_UNIT].item())
-            unit_name = "Archer" if unit_val == 2.0 else "Soldier"
-            brain = self.registry.brains[slot_id]
-            brain_name = describe_brain_module(brain)
-            agent_score = self.viewer.agent_scores.get(int(unique_id), 0.0)
+        _ax, _ay, _u, _t, unique_id, _btype = state_data["agent_map"][slot_id]
+        uid = int(unique_id)
+        agent_data = self.registry.agent_data[slot_id]
+        pos = (int(agent_data[COL_X].item()), int(agent_data[COL_Y].item()))
+        hp = float(agent_data[COL_HP].item())
+        hp_max = float(agent_data[COL_HP_MAX].item())
+        atk = float(agent_data[COL_ATK].item())
+        vision = float(agent_data[COL_VISION].item())
+        hp_ratio = (hp / hp_max) if hp_max > 0 else 0.0
+        unit_val = float(agent_data[COL_UNIT].item())
+        unit_name = "Archer" if unit_val == 2.0 else "Soldier"
+        brain = self.registry.brains[slot_id]
+        brain_name = describe_brain_module(brain)
 
-            for line in (
-                f"Score: {agent_score:.2f}",
-                f"Pos: ({pos[0]}, {pos[1]})",
-                f"Unit: {unit_name}",
-                f"Brain: {brain_name}",
-            ):
-                surf.blit(self.viewer.text_cache.render(line, 13, COLORS["text_dim"]), (x, y))
-                y += 18
+        reward_total = None
+        kill_credit = None
+        if getattr(config, "VIEWER_SHOW_SELECTED_AGENT_SCORES", True):
+            metrics = self.viewer.get_selected_agent_metrics(uid)
+            reward_total = metrics.get("reward_total")
+            kill_credit = metrics.get("kill_credit")
 
-            bar_w = srect.width - 24
-            pygame.draw.rect(surf, COLORS["bar_bg"], (x, y, bar_w, 10))
-            pygame.draw.rect(surf, COLORS["bar_fg"], (x, y, bar_w * hp_ratio, 10))
-            y += 14
+        lines = [(f"ID: {uid}", COLORS["green"])]
+        if reward_total is not None:
+            lines.append((f"Reward Σ: {reward_total:.2f}", COLORS["text_dim"]))
+        if kill_credit is not None:
+            lines.append((f"Kill Credit Σ: {kill_credit:.2f}", COLORS["text_dim"]))
+        lines.extend([
+            (f"Pos: ({pos[0]}, {pos[1]})", COLORS["text_dim"]),
+            (f"Unit: {unit_name}", COLORS["text_dim"]),
+            (f"Brain: {brain_name}", COLORS["text_dim"]),
+        ])
+        y = self._draw_key_value_lines(surf, rect, lines, base_y=y)
 
-            for line in (
-                f"HP: {hp:.2f} / {hp_max:.2f}",
-                f"Attack: {atk:.2f}",
-                f"Vision: {vision} cells",
-            ):
-                surf.blit(self.viewer.text_cache.render(line, 13, COLORS["text_dim"]), (x, y))
-                y += 18
-
-            if brain:
-                surf.blit(self.viewer.text_cache.render(f"Model: {_get_model_summary(brain)}", 13, COLORS["text_dim"]), (x, y))
-                y += 18
-                surf.blit(self.viewer.text_cache.render(f"Params: {_param_count(brain):,}", 13, COLORS["text_dim"]), (x, y))
-                y += 18
-
-        return y
-
-    def _draw_zone_section(self, surf, x, y):
-        y += 18
-        pygame.draw.line(
-            surf,
-            COLORS["border"],
-            (self.viewer.layout.side_rect().x, y),
-            (self.viewer.layout.side_rect().right, y),
-            2,
-        )
+        bar_w = max(40, rect.width - 24)
+        pygame.draw.rect(surf, COLORS["bar_bg"], (rect.x + 12, y, bar_w, 10))
+        pygame.draw.rect(surf, COLORS["bar_fg"], (rect.x + 12, y, int(bar_w * hp_ratio), 10))
         y += 16
-        surf.blit(self.viewer.text_cache.render("Cell / Zone Inspector", 18, COLORS["text"]), (x, y))
-        y += 30
 
+        lines = [
+            (f"HP: {hp:.2f} / {hp_max:.2f}", COLORS["text_dim"]),
+            (f"Attack: {atk:.2f}", COLORS["text_dim"]),
+            (f"Vision: {vision:.0f} cells", COLORS["text_dim"]),
+        ]
+        if brain:
+            lines.append((f"Model: {_get_model_summary(brain)}", COLORS["text_dim"]))
+            lines.append((f"Params: {_param_count(brain):,}", COLORS["text_dim"]))
+        self._draw_key_value_lines(surf, rect, lines, base_y=y)
+
+    def _draw_zone_section(self, surf, rect):
+        x, y = self._draw_card(surf, rect, "Cell / Zone Inspector")
         info = self.viewer.get_selected_cell_zone_info()
         if info is None:
-            surf.blit(self.viewer.text_cache.render("Click the world to inspect a cell.", 13, COLORS["text_dim"]), (x, y))
-            return y + 26
+            lines = [("Click the world to inspect a cell.", COLORS["text_dim"])]
+            self._draw_key_value_lines(surf, rect, lines, base_y=y)
+            return
 
         cp_indices = info["cp_indices"]
         cp_str = ", ".join(f"CP{idx}" for idx in cp_indices) if cp_indices else "None"
-        occupant_line = info.get("occupant_label") or "Occupant: None"
         catastrophe_line = (
             f"Catastrophe: {info['catastrophe_display_name']}"
             if info["catastrophe_active"]
             else "Catastrophe: None"
         )
         lines = [
-            f"Cell: ({info['cell'][0]}, {info['cell'][1]})",
-            f"Terrain: {info['terrain_label']}",
-            occupant_line,
-            f"Base Value: {info['base_value']:+.2f}",
-            f"Base State: {info['state_label']}",
-            f"Runtime Value: {info['effective_value']:+.2f}",
-            f"Runtime State: {info['effective_state_label']}",
-            catastrophe_line,
-            (
-                f"Catastrophe Here: {'Yes' if info['catastrophe_applies_here'] else 'No'}"
-                if info['catastrophe_active']
-                else "Catastrophe Here: No"
-            ),
-            f"CP Masks: {cp_str}",
-            f"Edit Lock: {'Locked' if info['edit_locked'] else 'Unlocked'}",
-            f"Edit Step: ±{self.viewer.base_zone_edit_step:.2f}",
+            (f"Cell: ({info['cell'][0]}, {info['cell'][1]})", COLORS["text_dim"]),
+            (f"Terrain: {info['terrain_label']}", COLORS["text_dim"]),
+            ((info.get("occupant_label") or "Occupant: None"), COLORS["text_dim"]),
+            (f"Base Value: {info['base_value']:+.2f} ({info['state_label']})", COLORS["zone_positive"] if info['state_label'] == 'Beneficial' else COLORS['zone_negative'] if info['state_label'] == 'Harmful' else COLORS['selected']),
+            (f"Runtime Value: {info['effective_value']:+.2f} ({info['effective_state_label']})", COLORS["zone_positive"] if info['effective_state_label'] == 'Beneficial' else COLORS['zone_negative'] if info['effective_state_label'] == 'Harmful' else COLORS['selected']),
+            (f"System: {'On' if info['system_enabled'] else 'Off'}", COLORS["green"] if info['system_enabled'] else COLORS['warn']),
+            (catastrophe_line, COLORS["pause_text"] if info["catastrophe_active"] else COLORS["text_dim"]),
+            (f"Catastrophe Here: {'Yes' if info['catastrophe_applies_here'] else 'No'}", COLORS["text_dim"]),
+            (f"CP Masks: {cp_str}", COLORS["text_dim"]),
+            (f"Edit Lock: {'Locked' if info['edit_locked'] else 'Unlocked'}", COLORS["zone_locked"] if info['edit_locked'] else COLORS['text_dim']),
+            (f"Edit Step: ±{self.viewer.base_zone_edit_step:.2f}", COLORS["text_dim"]),
         ]
-        for line in lines:
-            color = COLORS["text_dim"]
-            if line.startswith("Base Value"):
-                if info["state_label"] == "Beneficial":
-                    color = COLORS["zone_positive"]
-                elif info["state_label"] == "Harmful":
-                    color = COLORS["zone_negative"]
-                else:
-                    color = COLORS["selected"]
-            elif line.startswith("Runtime Value"):
-                if info["effective_state_label"] == "Beneficial":
-                    color = COLORS["zone_positive"]
-                elif info["effective_state_label"] == "Harmful":
-                    color = COLORS["zone_negative"]
-                else:
-                    color = COLORS["selected"]
-            elif line.startswith("Catastrophe:") and info["catastrophe_active"]:
-                color = COLORS["pause_text"]
-            if line.startswith("Edit Lock") and info["edit_locked"]:
-                color = COLORS["zone_locked"]
-            surf.blit(self.viewer.text_cache.render(line, 13, color), (x, y))
-            y += 18
+        scheduler = dict(info.get("scheduler", {}) or {})
+        auto_scheduler_line = (
+            f"Auto-Scheduler: {'Blocked (system off)' if not info['system_enabled'] else ('On' if scheduler.get('enabled', False) else 'Off')}"
+        )
+        lines.extend([
+            (auto_scheduler_line, COLORS["text_dim"]),
+            (f"Scheduler State: {scheduler.get('state_label', 'idle')}", COLORS["text_dim"]),
+            (f"Pressure: {float(scheduler.get('pressure', 0.0) or 0.0):.3f}", COLORS["text_dim"]),
+            (f"Hazard: {float(scheduler.get('hazard_probability', 0.0) or 0.0):.3f}", COLORS["text_dim"]),
+            (f"Cooldown: {int(scheduler.get('cooldown_remaining', 0) or 0)}", COLORS["text_dim"]),
+        ])
+        y = self._draw_key_value_lines(surf, rect, lines, base_y=y)
 
         status = getattr(self.viewer, "zone_status_message", "")
         if status:
             status_color = COLORS.get(getattr(self.viewer, "zone_status_color_key", "text_dim"), COLORS["text_dim"])
-            surf.blit(self.viewer.text_cache.render(status, 13, status_color), (x, y))
-            y += 20
-
-        return y
+            self._draw_key_value_lines(surf, rect, [(status, status_color)], base_y=y + 4, font_size=12, line_step=16)
 
     def draw(self, surf, state_data):
         srect = self.viewer.layout.side_rect()
         surf.fill(COLORS["side_bg"], srect)
         pygame.draw.rect(surf, COLORS["border"], srect, 2)
-
-        pad = 12
-        x = srect.x + pad
-        y = srect.y + 12
-        y = self._draw_agent_section(surf, x, y, srect, state_data)
-        y = self._draw_zone_section(surf, x, y)
-        self._draw_legend(surf, x, y)
+        sections = self.viewer.layout.side_sections()
+        self._draw_agent_section(surf, sections["agent"], state_data)
+        self._draw_zone_section(surf, sections["zone"])
+        self._draw_help_card(surf, sections["help"])
 # ==============================================================================
 # Minimap
 # ==============================================================================
@@ -1404,9 +1405,13 @@ class InputHandler:
 
             elif ev.type == pygame.VIDEORESIZE:
                 if not self.viewer.fullscreen:
-                    self.viewer.Wpix, self.viewer.Hpix = max(800, ev.w), max(520, ev.h)
+                    min_w = int(getattr(config, "VIEWER_MIN_WIDTH", 960))
+                    min_h = int(getattr(config, "VIEWER_MIN_HEIGHT", 640))
+                    self.viewer.Wpix = max(min_w, int(ev.w))
+                    self.viewer.Hpix = max(min_h, int(ev.h))
+                    self.viewer.windowed_size = (self.viewer.Wpix, self.viewer.Hpix)
                     self.viewer.screen = pygame.display.set_mode((self.viewer.Wpix, self.viewer.Hpix), pygame.RESIZABLE)
-                    self.viewer.world_renderer.static_surf = None
+                    self.viewer._rebuild_layout_after_window_change(auto_fit=True)
 
             elif ev.type == pygame.KEYDOWN:
                 if ev.key == pygame.K_ESCAPE:
@@ -1436,13 +1441,32 @@ class InputHandler:
                         "text_dim",
                     )
                 elif ev.key in (pygame.K_1, pygame.K_KP1):
-                    self.viewer.trigger_manual_catastrophe("inversion")
+                    self.viewer.trigger_manual_catastrophe("global_attenuation")
                 elif ev.key in (pygame.K_2, pygame.K_KP2):
-                    self.viewer.trigger_manual_catastrophe("dormancy")
+                    self.viewer.trigger_manual_catastrophe("positive_band_dormancy")
                 elif ev.key in (pygame.K_3, pygame.K_KP3):
-                    self.viewer.trigger_manual_catastrophe("regional_attenuation_left")
+                    self.viewer.trigger_manual_catastrophe("polarity_split_left_negative")
                 elif ev.key in (pygame.K_4, pygame.K_KP4):
+                    self.viewer.trigger_manual_catastrophe("polarity_split_right_negative")
+                elif ev.key in (pygame.K_5, pygame.K_KP5):
+                    self.viewer.trigger_manual_catastrophe("regional_attenuation_left")
+                elif ev.key in (pygame.K_6, pygame.K_KP6):
                     self.viewer.trigger_manual_catastrophe("regional_attenuation_right")
+                elif ev.key == pygame.K_i:
+                    if ev.mod & pygame.KMOD_SHIFT:
+                        self.viewer.trigger_manual_catastrophe("inversion", allow_experimental=True)
+                    else:
+                        self.viewer.set_zone_status("Experimental inversion is gated behind Shift+I.", "warn")
+                elif ev.key == pygame.K_o:
+                    if ev.mod & pygame.KMOD_SHIFT:
+                        self.viewer.trigger_manual_catastrophe("full_dormancy", allow_experimental=True)
+                    else:
+                        self.viewer.set_zone_status("Experimental full dormancy is gated behind Shift+O.", "warn")
+                elif ev.key == pygame.K_g:
+                    if ev.mod & pygame.KMOD_SHIFT:
+                        self.viewer.toggle_dynamic_catastrophe_scheduler()
+                    else:
+                        self.viewer.toggle_catastrophe_system()
                 elif ev.key == pygame.K_c:
                     self.viewer.clear_manual_catastrophe()
                 elif ev.key == pygame.K_LEFTBRACKET:
@@ -1458,10 +1482,12 @@ class InputHandler:
                 elif ev.key == pygame.K_F11:
                     self.viewer.fullscreen = not self.viewer.fullscreen
                     if self.viewer.fullscreen:
+                        self.viewer.windowed_size = (int(self.viewer.Wpix), int(self.viewer.Hpix))
                         self.viewer.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
                     else:
+                        self.viewer.Wpix, self.viewer.Hpix = self.viewer.windowed_size
                         self.viewer.screen = pygame.display.set_mode((self.viewer.Wpix, self.viewer.Hpix), pygame.RESIZABLE)
-                    self.viewer.world_renderer.static_surf = None
+                    self.viewer._rebuild_layout_after_window_change(auto_fit=True)
                 elif ev.key in (pygame.K_EQUALS, pygame.K_PLUS):
                     self.viewer.speed_multiplier = min(16, self.viewer.speed_multiplier * 2)
                 elif ev.key == pygame.K_MINUS:
@@ -1555,17 +1581,20 @@ class Viewer:
         self.cam = Camera(int(cell_size or config.CELL_SIZE), grid.shape[2], grid.shape[1])
 
         H, W = grid.shape[1], grid.shape[2]
-        side_min_w, hud_h = 280, 126
+        side_min_w = int(getattr(config, "VIEWER_SIDE_PANEL_WIDTH", 460))
+        hud_h = int(getattr(config, "VIEWER_BOTTOM_PANEL_HEIGHT", 148))
+        min_w = int(getattr(config, "VIEWER_MIN_WIDTH", 1320))
+        min_h = int(getattr(config, "VIEWER_MIN_HEIGHT", 820))
         try:
             display_info = pygame.display.Info()
             max_w = display_info.current_w - 80
             max_h = display_info.current_h - 120
         except pygame.error:
-            max_w, max_h = 1280, 720
+            max_w, max_h = 1440, 900
 
         world_px_w, world_px_h = W * self.cam.cell_px, H * self.cam.cell_px
-        init_w = min(max_w, max(1280, world_px_w + side_min_w + 3 * self.margin))
-        init_h = min(max_h, max(720, world_px_h + hud_h + 2 * self.margin))
+        init_w = min(max_w, max(min_w, world_px_w + side_min_w + 3 * self.margin))
+        init_h = min(max_h, max(min_h, world_px_h + hud_h + 2 * self.margin))
         self.Wpix, self.Hpix = int(init_w), int(init_h)
         self.screen = pygame.display.set_mode((self.Wpix, self.Hpix), pygame.RESIZABLE)
 
@@ -1585,11 +1614,13 @@ class Viewer:
         self.threat_vision_mode = False
         self.battle_view_enabled = False
         self.show_brain_types = False
-        self.show_zone_overlay = True
+        self.show_zone_overlay = bool(getattr(config, "VIEWER_ZONE_OVERLAY_DEFAULT", True))
         self.fullscreen = False
         self.speed_multiplier = 1.0
+        self.windowed_size = (self.Wpix, self.Hpix)
 
         self.agent_scores: Dict[int, float] = collections.defaultdict(float)
+        self.agent_kill_scores: Dict[int, float] = collections.defaultdict(float)
         self.zone_status_message: str = ""
         self.zone_status_color_key: str = "text_dim"
 
@@ -1620,6 +1651,14 @@ class Viewer:
 
     def get_catastrophe_status(self) -> Dict[str, Any]:
         """Return a viewer-friendly catastrophe status payload."""
+        default_scheduler = {
+            "enabled": False,
+            "pressure": 0.0,
+            "cooldown_remaining": 0,
+            "hazard_probability": 0.0,
+            "state_label": "idle",
+            "hard_trigger_due": False,
+        }
         if self.engine is None or not hasattr(self.engine, "catastrophe_status"):
             return {
                 "active": False,
@@ -1632,9 +1671,15 @@ class Viewer:
                 "active_cell_count": 0,
                 "locked_cell_count": 0,
                 "metadata": {},
+                "system_enabled": False,
+                "scheduler": dict(default_scheduler),
             }
         status = dict(self.engine.catastrophe_status())
         status["display_name"] = _catastrophe_display_name(status)
+        scheduler = dict(status.get("scheduler", {}) or {})
+        for key, value in default_scheduler.items():
+            scheduler.setdefault(key, value)
+        status["scheduler"] = scheduler
         return status
 
     def _runtime_zone_visual_signature(self):
@@ -1647,6 +1692,39 @@ class Viewer:
         if signature != self._last_zone_visual_signature:
             self._refresh_zone_render_cache()
             self._last_zone_visual_signature = signature
+
+    def _rebuild_layout_after_window_change(self, *, auto_fit: bool = False) -> None:
+        """Refresh layout-dependent surfaces after resize/fullscreen changes."""
+        if self.screen is not None:
+            self.Wpix, self.Hpix = self.screen.get_size()
+        self.layout = LayoutManager(self)
+        if getattr(self, "world_renderer", None) is not None:
+            self.world_renderer.static_surf = None
+        if auto_fit or bool(getattr(config, "VIEWER_AUTO_FIT_WORLD", True)):
+            self._fit_camera_to_world_rect()
+
+    def _fit_camera_to_world_rect(self) -> None:
+        """Fit the world cleanly into the main viewport for a professional default view."""
+        if not bool(getattr(config, "VIEWER_AUTO_FIT_WORLD", True)):
+            return
+        if getattr(self, "layout", None) is None:
+            return
+        world_rect = self.layout.world_rect()
+        grid_h, grid_w = int(self.grid.shape[1]), int(self.grid.shape[2])
+        if world_rect.width <= 0 or world_rect.height <= 0 or grid_w <= 0 or grid_h <= 0:
+            return
+
+        px_per_cell = min(world_rect.width / max(1, grid_w), world_rect.height / max(1, grid_h))
+        px_per_cell = max(1.0, px_per_cell)
+        target_zoom = px_per_cell / max(1.0, float(self.cam.base_cell))
+        self.cam.zoom = max(0.25, min(8.0, float(target_zoom)))
+
+        visible_w = world_rect.width / max(1, self.cam.cell_px)
+        visible_h = world_rect.height / max(1, self.cam.cell_px)
+        max_off_x = max(0.0, float(grid_w) - float(visible_w))
+        max_off_y = max(0.0, float(grid_h) - float(visible_h))
+        self.cam.offset_x = max(0.0, min(max_off_x, (float(grid_w) - float(visible_w)) * 0.5))
+        self.cam.offset_y = max(0.0, min(max_off_y, (float(grid_h) - float(visible_h)) * 0.5))
 
     def _current_canonical_base_zone_map(self) -> Optional[torch.Tensor]:
         """Return the canonical signed base-zone map used to derive manual catastrophes."""
@@ -1662,10 +1740,15 @@ class Viewer:
                 return heal_mask.to(dtype=torch.float32)
         return getattr(self.engine, "_z_base_values", None)
 
-    def trigger_manual_catastrophe(self, preset_key: str) -> bool:
+    def trigger_manual_catastrophe(self, preset_key: str, *, allow_experimental: bool = False) -> bool:
         """Build and activate one concrete Patch-5 catastrophe preset from the viewer."""
         if self.engine is None or not hasattr(self.engine, "activate_catastrophe"):
             self.set_zone_status("No running engine is attached to the viewer.", "warn")
+            return False
+
+        current_status = self.get_catastrophe_status()
+        if not bool(current_status.get("system_enabled", False)):
+            self.set_zone_status("Catastrophe system is off. Press G to re-enable it before triggering catastrophes.", "warn")
             return False
 
         base_map = self._current_canonical_base_zone_map()
@@ -1673,13 +1756,21 @@ class Viewer:
             self.set_zone_status("No canonical base-zone map is available for catastrophe triggering.", "warn")
             return False
 
-        previous_status = self.get_catastrophe_status()
+        previous_status = current_status
         try:
             spec = build_manual_catastrophe_spec(
                 preset_key,
                 base_zone_value_map=base_map,
             )
-            self.engine.activate_catastrophe(spec, replace_existing=True)
+            metadata = dict(spec.metadata or {})
+            if metadata.get("safety_tier") == "experimental" and not bool(allow_experimental):
+                self.set_zone_status(
+                    f"{metadata.get('display_name', spec.type_name)} is experimental and is gated behind a stronger hotkey.",
+                    "warn",
+                )
+                return False
+            replace_existing = bool(getattr(config, "CATASTROPHE_MANUAL_REPLACE_EXISTING", True))
+            self.engine.activate_catastrophe(spec, replace_existing=replace_existing)
             self._refresh_zone_render_cache()
             self._last_zone_visual_signature = self._runtime_zone_visual_signature()
             current_status = self.get_catastrophe_status()
@@ -1704,6 +1795,9 @@ class Viewer:
         if self.engine is None or not hasattr(self.engine, "clear_active_catastrophe"):
             self.set_zone_status("No running engine is attached to the viewer.", "warn")
             return False
+        if not bool(getattr(config, "CATASTROPHE_CLEAR_ENABLED", True)):
+            self.set_zone_status("Manual catastrophe clearing is disabled by config.", "warn")
+            return False
         try:
             payload = self.engine.clear_active_catastrophe(reason="manual_viewer_clear")
             if payload is None:
@@ -1716,6 +1810,79 @@ class Viewer:
         except Exception as ex:
             self.set_zone_status(f"Catastrophe clear failed: {type(ex).__name__}: {ex}", "warn")
             return False
+
+
+    def toggle_catastrophe_system(self) -> bool:
+        """Toggle the master catastrophe system kill-switch."""
+        if self.engine is None or not hasattr(self.engine, "set_catastrophe_system_enabled"):
+            self.set_zone_status("Catastrophe system control is unavailable.", "warn")
+            return False
+        current_status = self.get_catastrophe_status()
+        enabled_now = bool(current_status.get("system_enabled", False))
+        try:
+            result = self.engine.set_catastrophe_system_enabled(not enabled_now, clear_active=True)
+            if not bool(result.get("ok", False)):
+                self.set_zone_status("Catastrophe system toggle failed.", "warn")
+                return False
+            status = dict(result.get("status", {}) or {})
+            cleared = result.get("cleared", None)
+            self._refresh_zone_render_cache()
+            self._last_zone_visual_signature = self._runtime_zone_visual_signature()
+            if bool(status.get("system_enabled", False)):
+                self.set_zone_status("Catastrophe system enabled. Manual triggers and the auto-scheduler may run again.", "green")
+            else:
+                suffix = " Active catastrophe cleared." if cleared is not None else ""
+                self.set_zone_status(f"Catastrophe system disabled. Manual triggers and the auto-scheduler are blocked.{suffix}", "warn")
+            return True
+        except Exception as ex:
+            self.set_zone_status(f"Catastrophe system toggle failed: {type(ex).__name__}: {ex}", "warn")
+            return False
+
+    def toggle_dynamic_catastrophe_scheduler(self) -> bool:
+        """Toggle the deterministic dynamic catastrophe scheduler."""
+        if self.engine is None or not hasattr(self.engine, "set_dynamic_catastrophe_enabled"):
+            self.set_zone_status("Dynamic catastrophe scheduler is unavailable.", "warn")
+            return False
+        current = self.get_catastrophe_status().get("scheduler", {})
+        enabled_now = bool(current.get("enabled", False))
+        try:
+            new_value = not enabled_now
+            ok = bool(self.engine.set_dynamic_catastrophe_enabled(new_value))
+            if not ok:
+                self.set_zone_status("Dynamic catastrophe scheduler toggle failed.", "warn")
+                return False
+            status = self.get_catastrophe_status().get("scheduler", {})
+            system_enabled = bool(self.get_catastrophe_status().get("system_enabled", False))
+            suffix = "" if system_enabled else " Catastrophe system is currently off, so auto-triggers remain blocked."
+            self.set_zone_status(
+                f"Auto-scheduler {'enabled' if status.get('enabled', False) else 'disabled'}.{suffix}",
+                "green" if status.get("enabled", False) and system_enabled else "text_dim",
+            )
+            return True
+        except Exception as ex:
+            self.set_zone_status(f"Scheduler toggle failed: {type(ex).__name__}: {ex}", "warn")
+            return False
+
+    def get_selected_agent_metrics(self, uid: int) -> Dict[str, Optional[float]]:
+        """Return honest per-agent cumulative metrics backed by engine-owned state."""
+        out: Dict[str, Optional[float]] = {"reward_total": None, "kill_credit": None}
+        try:
+            reward_totals = getattr(self.engine, "agent_reward_totals", None) if self.engine is not None else None
+            if reward_totals is not None and uid in reward_totals:
+                out["reward_total"] = float(reward_totals[uid])
+            elif uid in self.agent_scores:
+                out["reward_total"] = float(self.agent_scores[uid])
+        except Exception:
+            pass
+        try:
+            kill_scores = getattr(self.engine, "agent_scores", None) if self.engine is not None else None
+            if kill_scores is not None and uid in kill_scores:
+                out["kill_credit"] = float(kill_scores[uid])
+            elif uid in self.agent_kill_scores:
+                out["kill_credit"] = float(self.agent_kill_scores[uid])
+        except Exception:
+            pass
+        return out
 
     def save_selected_brain(self):
         """Save the PyTorch `state_dict` of the selected agent's brain to disk."""
@@ -1858,6 +2025,8 @@ class Viewer:
             "catastrophe_display_name": catastrophe_status.get("display_name", "None"),
             "catastrophe_applies_here": bool(catastrophe_applies_here),
             "catastrophe_locked_here": bool(catastrophe_locked_here),
+            "system_enabled": bool(catastrophe_status.get("system_enabled", False)),
+            "scheduler": dict(catastrophe_status.get("scheduler", {}) or {}),
         }
 
     def _refresh_zone_render_cache(self) -> None:
@@ -1982,28 +2151,13 @@ class Viewer:
             }
 
     def _install_score_hook(self, engine, registry):
-        """Monkey-patch PPO record_step() to collect per-agent rewards for the viewer."""
-        if not hasattr(engine, "_ppo") or engine._ppo is None:
-            return
-
-        original_record_step = engine._ppo.record_step
-
-        def record_step_with_score_tracking(*args, **kwargs):
-            agent_ids = kwargs.get("agent_ids")
-            rewards = kwargs.get("rewards")
-            if agent_ids is not None and rewards is not None and agent_ids.numel() > 0:
-                with torch.no_grad():
-                    slot_ids = agent_ids.detach()
-                    if hasattr(registry, "agent_uids"):
-                        uids = registry.agent_uids.index_select(0, slot_ids).detach().cpu().numpy()
-                    else:
-                        uids = registry.agent_data.index_select(0, slot_ids)[:, COL_AGENT_ID].detach().cpu().numpy()
-                    r = rewards.detach().cpu().numpy()
-                for uid, rv in zip(uids, r):
-                    self.agent_scores[int(uid)] += float(rv)
-            return original_record_step(*args, **kwargs)
-
-        engine._ppo.record_step = record_step_with_score_tracking
+        """Bind viewer score displays to engine-owned cumulative metrics."""
+        reward_totals = getattr(engine, "agent_reward_totals", None)
+        if reward_totals is not None:
+            self.agent_scores = reward_totals
+        kill_scores = getattr(engine, "agent_scores", None)
+        if kill_scores is not None:
+            self.agent_kill_scores = kill_scores
 
     def run(
         self,
@@ -2025,6 +2179,7 @@ class Viewer:
             ckpt_mgr = CheckpointManager(Path(run_dir))
 
         self.layout = LayoutManager(self)
+        self._fit_camera_to_world_rect()
         self.world_renderer = WorldRenderer(self, self.grid, registry)
         self.hud_panel = HudPanel(self, stats)
         self.side_panel = SidePanel(self, registry)
@@ -2060,7 +2215,8 @@ class Viewer:
                                 "offset_y": float(getattr(self.cam, "offset_y", 0.0)),
                                 "zoom": float(getattr(self.cam, "zoom", 1.0)),
                             },
-                            "agent_scores": dict(self.agent_scores),
+                            "agent_reward_totals": dict(self.agent_scores),
+                            "agent_kill_scores": dict(self.agent_kill_scores),
                         }
                         out_dir = ckpt_mgr.save_atomic(
                             engine=engine,
@@ -2137,5 +2293,7 @@ class Viewer:
                 running = False
 
         pygame.quit()
+
+
 
 

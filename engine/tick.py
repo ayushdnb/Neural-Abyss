@@ -226,13 +226,17 @@ class TickEngine:
         # agent_scores: reward tally keyed by persistent agent identifier (not slot).
         # defaultdict(float) ensures missing keys default to 0.0.
         self.agent_scores: Dict[int, float] = collections.defaultdict(float)
+        self.agent_reward_totals: Dict[int, float] = collections.defaultdict(float)
 
         # Zones and corresponding cached tensors on the simulation device.
         # Patch 4 extends the Patch-1 signed base layer with a catastrophe
         # runtime override controller. The canonical base layer remains
         # separate from the runtime-effective zone field.
         self.zones: Optional[Zones] = zones
-        self.catastrophe = CatastropheController(device=torch.device(self.device))
+        self.catastrophe = CatastropheController(
+            device=torch.device(self.device),
+            seed=int(getattr(config, "RNG_SEED", getattr(config, "SEED", 42))),
+        )
         self._z_base_values: Optional[torch.Tensor] = None
         self._z_effective_values: Optional[torch.Tensor] = None
         self._z_catastrophe_override_values: Optional[torch.Tensor] = None
@@ -562,11 +566,50 @@ class TickEngine:
 
     def catastrophe_status(self) -> Dict[str, Any]:
         if getattr(self, "catastrophe", None) is None:
-            return {"active": False, "type_name": None, "start_tick": None, "duration_ticks": 0, "remaining_ticks": 0, "elapsed_ticks": 0, "shape": [int(self.H), int(self.W)], "active_cell_count": 0, "locked_cell_count": 0, "metadata": {}}
+            return {
+                "active": False,
+                "type_name": None,
+                "start_tick": None,
+                "duration_ticks": 0,
+                "remaining_ticks": 0,
+                "elapsed_ticks": 0,
+                "shape": [int(self.H), int(self.W)],
+                "active_cell_count": 0,
+                "locked_cell_count": 0,
+                "metadata": {},
+                "system_enabled": False,
+                "scheduler": {
+                    "enabled": False,
+                    "pressure": 0.0,
+                    "cooldown_remaining": 0,
+                    "hazard_probability": 0.0,
+                    "state_label": "missing",
+                    "hard_trigger_due": False,
+                },
+            }
         out = dict(self.catastrophe.summary_payload())
         if out.get("shape", None) is None:
             out["shape"] = [int(self.H), int(self.W)]
         return out
+
+    def set_catastrophe_system_enabled(self, enabled: bool, *, tick: Optional[int] = None, clear_active: bool = True) -> Dict[str, Any]:
+        if getattr(self, "catastrophe", None) is None or not hasattr(self.catastrophe, "set_global_enabled"):
+            return {"ok": False, "status": self.catastrophe_status(), "cleared": None}
+        tick_i = int(self.stats.tick if tick is None else tick)
+        cleared = None
+        enabled_b = bool(enabled)
+        if (not enabled_b) and bool(clear_active) and self.catastrophe_active():
+            cleared = self.catastrophe.clear(tick=tick_i, reason="system_disabled")
+        self.catastrophe.set_global_enabled(enabled_b)
+        self._refresh_zone_runtime_resolution()
+        if cleared is not None:
+            self._emit_catastrophe_transition(cleared)
+        return {"ok": True, "status": self.catastrophe_status(), "cleared": cleared}
+
+    def set_dynamic_catastrophe_enabled(self, enabled: bool) -> bool:
+        if getattr(self, "catastrophe", None) is None or not hasattr(self.catastrophe, "set_dynamic_enabled"):
+            return False
+        return bool(self.catastrophe.set_dynamic_enabled(bool(enabled)))
 
     def _apply_runtime_base_zone_edit_lock(self, mask: Optional[torch.Tensor]) -> None:
         if self.zones is None:
@@ -616,12 +659,19 @@ class TickEngine:
         if telemetry is None or not getattr(telemetry, "enabled", False):
             return
         status = self.catastrophe_status()
+        scheduler = dict(status.get("scheduler", {}) or {})
         counters = {
             "catastrophe_active": 1.0 if bool(status.get("active", False)) else 0.0,
             "catastrophe_remaining_ticks": float(status.get("remaining_ticks", 0) or 0),
             "catastrophe_duration_ticks": float(status.get("duration_ticks", 0) or 0),
             "catastrophe_active_cells": float(status.get("active_cell_count", 0) or 0),
             "catastrophe_locked_cells": float(status.get("locked_cell_count", 0) or 0),
+            "catastrophe_system_enabled": 1.0 if bool(status.get("system_enabled", False)) else 0.0,
+            "catastrophe_scheduler_enabled": 1.0 if bool(scheduler.get("enabled", False)) else 0.0,
+            "catastrophe_scheduler_pressure": float(scheduler.get("pressure", 0.0) or 0.0),
+            "catastrophe_scheduler_cooldown_remaining": float(scheduler.get("cooldown_remaining", 0) or 0),
+            "catastrophe_scheduler_hazard_probability": float(scheduler.get("hazard_probability", 0.0) or 0.0),
+            "catastrophe_scheduler_hard_trigger_due": 1.0 if bool(scheduler.get("hard_trigger_due", False)) else 0.0,
         }
         try:
             if hasattr(telemetry, "emit_counters"):
@@ -631,6 +681,11 @@ class TickEngine:
 
     def activate_catastrophe(self, spec: CatastropheSpec, *, tick: Optional[int] = None, replace_existing: bool = True) -> Dict[str, Any]:
         tick_i = int(self.stats.tick if tick is None else tick)
+        if bool(replace_existing) and self.catastrophe_active():
+            ended = self.catastrophe.clear(tick=tick_i, reason="replaced")
+            if ended is not None:
+                self._refresh_zone_runtime_resolution()
+                self._emit_catastrophe_transition(ended)
         payload = self.catastrophe.activate(spec, tick=tick_i, world_shape=(int(self.H), int(self.W)), replace_existing=bool(replace_existing))
         self._refresh_zone_runtime_resolution()
         self._emit_catastrophe_transition(payload)
@@ -660,6 +715,20 @@ class TickEngine:
         if ended is not None:
             self._refresh_zone_runtime_resolution()
             self._emit_catastrophe_transition(ended)
+
+    def _maybe_activate_dynamic_catastrophe(self, tick: int) -> Optional[Dict[str, Any]]:
+        if self._z_base_values is None or getattr(self, "catastrophe", None) is None:
+            return None
+        payload = self.catastrophe.maybe_activate_dynamic(
+            tick=int(tick),
+            base_zone_value_map=self._z_base_values,
+            world_shape=(int(self.H), int(self.W)),
+            replace_existing=bool(getattr(config, "CATASTROPHE_ALLOW_OVERLAP", False)),
+        )
+        if payload is not None:
+            self._refresh_zone_runtime_resolution()
+            self._emit_catastrophe_transition(payload)
+        return payload
 
     # -------------------------------------------------------------------------
     # Alive filtering
@@ -1297,6 +1366,7 @@ class TickEngine:
 
         # Initialize per-tick telemetry ordering context (additive only; safe no-op if unsupported).
         self._telemetry_set_phase(telemetry, tick=tick_now, phase="tick_start")
+        self._maybe_activate_dynamic_catastrophe(tick_now)
         self._emit_catastrophe_counters(tick_now)
 
         metrics = TickMetrics()
@@ -2254,6 +2324,16 @@ class TickEngine:
             # Final reward: individual + team + hp shaping
             final_rewards = (individual_total_reward + team_total_reward + hp_reward_f32).to(self._data_dt)
 
+            if int(ppo_slot_ids.numel()) > 0:
+                with torch.no_grad():
+                    if hasattr(self.registry, "agent_uids"):
+                        reward_uids = self.registry.agent_uids.index_select(0, ppo_slot_ids).detach().cpu().tolist()
+                    else:
+                        reward_uids = self.registry.agent_data.index_select(0, ppo_slot_ids)[:, COL_AGENT_ID].detach().cpu().tolist()
+                    reward_values = final_rewards.detach().to(torch.float32).cpu().tolist()
+                for uid, reward_val in zip(reward_uids, reward_values):
+                    self.agent_reward_totals[int(uid)] += float(reward_val)
+
             if telemetry is not None and getattr(telemetry, "enabled", False):
                 try:
                     self._telemetry_set_phase(telemetry, tick=int(self.stats.tick), phase="ppo_reward_components")
@@ -2345,6 +2425,8 @@ class TickEngine:
 
         # Return metrics as a dict
         return vars(metrics)
+
+
 
 
 
