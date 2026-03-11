@@ -1,4 +1,4 @@
-# Neural Siege
+# Neural Abyss
 
 Large-scale multi-agent combat simulation with neural policy optimization.
 
