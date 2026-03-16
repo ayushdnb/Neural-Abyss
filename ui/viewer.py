@@ -125,6 +125,11 @@ COLORS = {
 
     "green": (46, 204, 113),
     "warn": (243, 156, 18),
+    "heal_active": (46, 204, 113),
+    "heal_dormant": (214, 163, 72),
+    "button_on": (46, 204, 113),
+    "button_off": (192, 57, 43),
+    "button_border": (96, 102, 112),
 
     "bar_bg": (38, 42, 48),
     "bar_fg": (46, 204, 113),
@@ -139,7 +144,8 @@ COLORS = {
 
 # Semi-transparent overlays (all include alpha channel).
 OVERLAYS = {
-    "heal": (46, 204, 113, 60),
+    "heal_active": (46, 204, 113, 78),
+    "heal_dormant": (214, 163, 72, 110),
     "cp": (210, 210, 230, 48),
 
     # Control point outline colors:
@@ -419,37 +425,87 @@ class WorldRenderer:
         # Cached background surface (static terrain)
         self.static_surf = None
 
-        # Precomputed zone info extracted from engine.zones
-        self._zone_cache = {"heal_tiles": [], "cp_rects": []}
+        # Precomputed zone info extracted from engine.zones.
+        # We keep active and dormant heal cells separate so the viewer can make
+        # catastrophe suppression visually obvious at a glance.
+        self._zone_cache = {
+            "heal_active_tiles": [],
+            "heal_dormant_tiles": [],
+            "cp_rects": [],
+        }
+        self._zone_render_signature = None
+
+    def invalidate_static_background(self):
+        """Force the terrain/heal static surface to rebuild on next draw."""
+        self.static_surf = None
+
+    def _compute_zone_render_signature(self, engine):
+        zones = getattr(engine, "zones", None)
+        if zones is None:
+            return ("no_zones",)
+        catastrophe_sig = None
+        if getattr(zones, "catastrophe_state", None) is not None:
+            catastrophe_sig = (
+                str(zones.catastrophe_state.event_id),
+                tuple(str(zid) for zid in zones.catastrophe_state.suppressed_zone_ids),
+            )
+        return (
+            tuple((str(zone.zone_id), tuple(int(v) for v in zone.bounds)) for zone in getattr(zones, "heal_zones", [])),
+            tuple(str(zid) for zid in getattr(zones, "active_heal_zone_ids", tuple())),
+            tuple(sorted((str(k), bool(v)) for k, v in dict(getattr(zones, "manual_zone_enabled", {})).items())),
+            catastrophe_sig,
+            int(len(getattr(zones, "cp_masks", []) or [])),
+        )
+
+    def maybe_refresh_zone_cache(self, engine, *, force: bool = False):
+        """Rebuild cached heal-zone rendering data only when zone state changed."""
+        sig = self._compute_zone_render_signature(engine)
+        if force or sig != self._zone_render_signature:
+            self.build_static_cache(engine)
 
     def build_static_cache(self, engine):
         """
-        Extract heal tiles and control point bounding boxes from engine.zones.
+        Extract active/dormant heal tiles and control-point bounds from engine.zones.
 
-        Why:
-        - The zones are derived from masks (boolean tensors) and don't change often.
-        - We convert them to CPU lists of coordinates / rectangles once.
+        Active vs dormant heal cells are cached separately so catastrophe/manual
+        state changes can invalidate and redraw them explicitly instead of relying
+        on stale merged overlays.
         """
-        self.static_surf = None  # force rebuild of background
-        self._zone_cache = {"heal_tiles": [], "cp_rects": []}
+        self.invalidate_static_background()
+        self._zone_cache = {
+            "heal_active_tiles": [],
+            "heal_dormant_tiles": [],
+            "cp_rects": [],
+        }
 
         zones = getattr(engine, "zones", None)
-        if zones:
-            # Heal zone: boolean mask -> list of (x,y) tiles
-            if getattr(zones, "heal_mask", None) is not None:
-                ys, xs = torch.nonzero(zones.heal_mask, as_tuple=True)
-                self._zone_cache["heal_tiles"] = list(
-                    zip(xs.cpu().tolist(), ys.cpu().tolist())
-                )
+        self._zone_render_signature = self._compute_zone_render_signature(engine)
+        if not zones:
+            return
 
-            # Control points: each cp_mask -> bounding rectangle (x0,y0,x1,y1)
-            for m in getattr(zones, "cp_masks", []):
-                ys, xs = torch.nonzero(m, as_tuple=True)
-                if xs.numel() > 0:
-                    self._zone_cache["cp_rects"].append(
-                        (xs.min().item(), ys.min().item(),
-                         xs.max().item() + 1, ys.max().item() + 1)
-                    )
+        active_zone_ids = set(str(zid) for zid in getattr(zones, "active_heal_zone_ids", tuple()))
+        active_tiles = set()
+        dormant_tiles = set()
+
+        for zone in getattr(zones, "heal_zones", []):
+            ys, xs = torch.nonzero(zone.mask, as_tuple=True)
+            coords = set(zip(xs.cpu().tolist(), ys.cpu().tolist()))
+            if str(zone.zone_id) in active_zone_ids:
+                active_tiles |= coords
+            else:
+                dormant_tiles |= coords
+
+        dormant_tiles.difference_update(active_tiles)
+        self._zone_cache["heal_active_tiles"] = sorted(active_tiles)
+        self._zone_cache["heal_dormant_tiles"] = sorted(dormant_tiles)
+
+        # Control points: each cp_mask -> bounding rectangle (x0,y0,x1,y1)
+        for m in getattr(zones, "cp_masks", []):
+            ys, xs = torch.nonzero(m, as_tuple=True)
+            if xs.numel() > 0:
+                self._zone_cache["cp_rects"].append(
+                    (xs.min().item(), ys.min().item(), xs.max().item() + 1, ys.max().item() + 1)
+                )
 
     def _draw_static_background(self):
         """
@@ -487,15 +543,18 @@ class WorldRenderer:
                         (cx, cy, self.cam.cell_px, self.cam.cell_px),
                     )
 
-        # Heal zones drawn as alpha overlay (separate surface with SRCALPHA)
+        # Heal zones drawn as alpha overlay (separate surface with SRCALPHA).
+        # Dormant tiles are intentionally visible; active tiles are then drawn on
+        # top in the normal heal color so current effective support is obvious.
         overlay = pygame.Surface(wrect.size, pygame.SRCALPHA)
-        for x, y in self._zone_cache["heal_tiles"]:
-            cx, cy = self.cam.world_to_screen(x, y)
-            pygame.draw.rect(
-                overlay,
-                OVERLAYS["heal"],
-                (cx, cy, self.cam.cell_px, self.cam.cell_px),
-            )
+        for key, overlay_name in (("heal_dormant_tiles", "heal_dormant"), ("heal_active_tiles", "heal_active")):
+            for x, y in self._zone_cache[key]:
+                cx, cy = self.cam.world_to_screen(x, y)
+                pygame.draw.rect(
+                    overlay,
+                    OVERLAYS[overlay_name],
+                    (cx, cy, self.cam.cell_px, self.cam.cell_px),
+                )
         self.static_surf.blit(overlay, (0, 0))
 
     def draw(self, surf, state_data):
@@ -916,10 +975,55 @@ class HudPanel:
         )
 
         self._draw_team_stats(surf, y, x, state_data)
+        self._draw_catastrophe_status(surf, hud)
+        self._draw_scheduler_button(surf, hud)
         self._draw_score_graph(surf, hud)
 
         # Minimap is a separate component
         self.viewer.minimap.draw(surf, hud, state_data)
+
+    def scheduler_button_rect(self, hud_rect: Optional[pygame.Rect] = None) -> pygame.Rect:
+        hud = self.viewer.layout.hud_rect() if hud_rect is None else hud_rect
+        return pygame.Rect(hud.right - 680, hud.y + 10, 120, 28)
+
+    def _draw_scheduler_button(self, surf, hud):
+        rect = self.scheduler_button_rect(hud)
+        enabled = bool(self.viewer.get_catastrophe_status()["scheduler_enabled"])
+        fill = COLORS["button_on"] if enabled else COLORS["button_off"]
+        pygame.draw.rect(surf, fill, rect, border_radius=6)
+        pygame.draw.rect(surf, COLORS["button_border"], rect, 2, border_radius=6)
+        label = "Scheduler: ON" if enabled else "Scheduler: OFF"
+        text = self.viewer.text_cache.render(label, 13, COLORS["bg"])
+        surf.blit(text, text.get_rect(center=rect.center))
+
+    def _draw_catastrophe_status(self, surf, hud):
+        status = self.viewer.get_catastrophe_status()
+        x = 12
+        y = hud.y + 72
+
+        scheduler_text = f"Catastrophe: {'ON' if status['scheduler_enabled'] else 'OFF'} ({status['scheduler_mode']})"
+        surf.blit(self.viewer.text_cache.render(scheduler_text, 14, COLORS["text"]), (x, y))
+        y += 18
+
+        if status["active_event"] is None:
+            event_text = f"Event: none | last: {status['last_skip_reason']}"
+        else:
+            pattern = status["event_pattern_name"] or "unknown"
+            remaining = status["event_remaining_ticks"]
+            expiry = status["event_expires_at_tick"]
+            if remaining is None or expiry is None:
+                tail = "persistent"
+            else:
+                tail = f"remain {remaining} (t{expiry})"
+            event_text = f"Event: {pattern} | {tail}"
+        surf.blit(self.viewer.text_cache.render(event_text, 14, COLORS["text_dim"]), (x, y))
+        y += 18
+
+        zone_text = (
+            f"Heal A/D: {status['active_zone_count']}/{status['dormant_zone_count']}"
+            f" | Manual: {status['manual_override_count']}"
+        )
+        surf.blit(self.viewer.text_cache.render(zone_text, 14, COLORS["text_dim"]), (x, y))
 
     def _draw_team_stats(self, surf, y, x, state_data):
         """
@@ -1061,14 +1165,16 @@ class SidePanel:
         surf.blit(self.viewer.text_cache.render("Legend & Controls", 18, COLORS["text"]), (x, y))
         y += 30
 
-        legend_items = {
-            "Red Soldier": COLORS["red_soldier"],
-            "Red Archer": COLORS["red_archer"],
-            "Blue Soldier": COLORS["blue_soldier"],
-            "Blue Archer": COLORS["blue_archer"],
-        }
+        legend_items = [
+            ("Red Soldier", COLORS["red_soldier"]),
+            ("Red Archer", COLORS["red_archer"]),
+            ("Blue Soldier", COLORS["blue_soldier"]),
+            ("Blue Archer", COLORS["blue_archer"]),
+            ("Heal Zone Active", COLORS["heal_active"]),
+            ("Heal Zone Dormant", COLORS["heal_dormant"]),
+        ]
 
-        for label, color in legend_items.items():
+        for label, color in legend_items:
             pygame.draw.rect(surf, color, (x, y, 15, 15))
             surf.blit(self.viewer.text_cache.render(label, 13, COLORS["text_dim"]), (x + 25, y))
             y += 22
@@ -1078,13 +1184,15 @@ class SidePanel:
         controls = [
             "WASD / Arrows: Pan Camera",
             "Mouse Wheel: Zoom",
-            "Click Agent: Inspect",
+            "Left Click Agent: Inspect",
+            "Left Click Heal Zone: Select Zone",
+            "Right Click / Shift+Click Zone: Toggle Zone",
+            "Y: Scheduler ON/OFF",
+            "0: Restore All Zones",
+            "1/2/3/4/5: Small/Med/Left/Right/Cluster",
             "SPACE: Pause Simulation",
             "+/-: Change Speed",
-            "R: Toggle Agent Rays",
-            "T: Toggle Threat Vision",
-            "B: Toggle HP Bars",
-            "N: Toggle Brain Labels",
+            "R/T/B/N: Overlay Toggles",
             "S: Save Selected Brain",
             "F9: Manual Checkpoint Save",
             "F11: Toggle Fullscreen",
@@ -1094,6 +1202,52 @@ class SidePanel:
             surf.blit(self.viewer.text_cache.render(line, 13, COLORS["text_dim"]), (x, y))
             y += 18
 
+        return y
+
+    def _draw_catastrophe_panel(self, surf, x, y):
+        status = self.viewer.get_catastrophe_status()
+        zone_status = self.viewer.get_selected_zone_status()
+
+        y += 22
+        surf.blit(self.viewer.text_cache.render("Catastrophe Control", 18, COLORS["text"]), (x, y))
+        y += 28
+
+        lines = [
+            f"Scheduler: {'ON' if status['scheduler_enabled'] else 'OFF'} ({status['scheduler_mode']})",
+            f"Active Event: {status['event_pattern_name'] or 'none'}",
+        ]
+        if status['active_event'] is not None:
+            if status['event_remaining_ticks'] is None:
+                lines.append("Remaining: persistent")
+            else:
+                lines.append(
+                    f"Remaining: {status['event_remaining_ticks']} ticks (t{status['event_expires_at_tick']})"
+                )
+        else:
+            lines.append(f"Last State: {status['last_skip_reason']}")
+
+        lines.append(
+            f"Heal Zones: active {status['active_zone_count']} | dormant {status['dormant_zone_count']}"
+        )
+        lines.append(f"Manual Overrides: {status['manual_override_count']}")
+
+        if zone_status is None:
+            lines.append("Selected Zone: none")
+        else:
+            lines.append(
+                f"Selected Zone: {zone_status['zone_id']} [{zone_status['effective_state_label']}]"
+            )
+            lines.append(
+                f"Manual Override: {zone_status['manual_override_label']} | overlaps here: {zone_status['overlap_count']}"
+            )
+            lines.append(f"Bounds: {zone_status['bounds_label']}")
+
+        if self.viewer._last_zone_status_message:
+            lines.append(f"Last Action: {self.viewer._last_zone_status_message}")
+
+        for line in lines:
+            surf.blit(self.viewer.text_cache.render(line, 13, COLORS["text_dim"]), (x, y))
+            y += 18
         return y
 
     def draw(self, surf, state_data):
@@ -1170,6 +1324,8 @@ class SidePanel:
             if brain:
                 surf.blit(self.viewer.text_cache.render(f"Model: {_get_model_summary(brain)}", 13, COLORS["text_dim"]), (x, y)); y += 18
                 surf.blit(self.viewer.text_cache.render(f"Params: {_param_count(brain):,}", 13, COLORS["text_dim"]), (x, y)); y += 18
+
+        y = self._draw_catastrophe_panel(surf, x, y)
 
         # Separator line
         pygame.draw.line(surf, COLORS["border"], (srect.x, y + 10), (srect.right, y + 10), 2)
@@ -1293,8 +1449,7 @@ class InputHandler:
                         (self.viewer.Wpix, self.viewer.Hpix),
                         pygame.RESIZABLE
                     )
-                    # Force background rebuild due to changed world_rect size
-                    self.viewer.world_renderer.static_surf = None
+                    self.viewer.world_renderer.invalidate_static_background()
 
             elif ev.type == pygame.KEYDOWN:
                 if ev.key == pygame.K_ESCAPE:
@@ -1325,6 +1480,22 @@ class InputHandler:
                 elif ev.key == pygame.K_n:
                     self.viewer.show_brain_types = not self.viewer.show_brain_types
 
+                # Catastrophe viewer controls
+                elif ev.key == pygame.K_y:
+                    self.viewer.toggle_catastrophe_scheduler()
+                elif ev.key == pygame.K_0:
+                    self.viewer.restore_all_zones_to_normal_effective_state()
+                elif ev.key == pygame.K_1:
+                    self.viewer.manual_trigger_catastrophe("random_small")
+                elif ev.key == pygame.K_2:
+                    self.viewer.manual_trigger_catastrophe("random_medium")
+                elif ev.key == pygame.K_3:
+                    self.viewer.manual_trigger_catastrophe("left_side")
+                elif ev.key == pygame.K_4:
+                    self.viewer.manual_trigger_catastrophe("right_side")
+                elif ev.key == pygame.K_5:
+                    self.viewer.manual_trigger_catastrophe("cluster_survives")
+
                 # Save selected agent brain weights
                 elif ev.key == pygame.K_s:
                     self.viewer.save_selected_brain()
@@ -1343,8 +1514,7 @@ class InputHandler:
                             (self.viewer.Wpix, self.viewer.Hpix),
                             pygame.RESIZABLE
                         )
-                    # Changing window mode affects layout -> rebuild background
-                    self.viewer.world_renderer.static_surf = None
+                    self.viewer.world_renderer.invalidate_static_background()
 
                 # Speed multiplier adjustments
                 elif ev.key in (pygame.K_EQUALS, pygame.K_PLUS):
@@ -1353,36 +1523,41 @@ class InputHandler:
                     self.viewer.speed_multiplier = max(0.25, self.viewer.speed_multiplier / 2)
 
             elif ev.type == pygame.MOUSEBUTTONDOWN:
-                # Left click inside world view => select agent
-                if ev.button == 1 and wrect.collidepoint(ev.pos):
-                    # Convert mouse pixel to world cell
+                if ev.button == 1:
+                    button_rect = self.viewer.hud_panel.scheduler_button_rect()
+                    if button_rect.collidepoint(ev.pos):
+                        self.viewer.toggle_catastrophe_scheduler()
+                        continue
+
+                if ev.button in (1, 3) and wrect.collidepoint(ev.pos):
                     gx, gy = self.viewer.cam.screen_to_world(
                         ev.pos[0] - wrect.x,
-                        ev.pos[1] - wrect.y
+                        ev.pos[1] - wrect.y,
                     )
+                    if not self.viewer.is_valid_world_cell(gx, gy):
+                        continue
 
-                    # Use cached id grid for fast picking
+                    shift_held = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
+                    if ev.button == 3 or (ev.button == 1 and shift_held):
+                        self.viewer.manual_toggle_zone_at_cell(gx, gy)
+                        continue
+
                     slot_id = self.viewer.fast_grid_pick_slot(gx, gy)
-                    self.viewer.selected_slot_id = slot_id if slot_id is not None and slot_id >= 0 else None
-
-                    # Store last selected unique ID (useful if agent dies later)
-                    if self.viewer.selected_slot_id is not None:
-                        if hasattr(self.viewer.registry, "agent_uids"):
-                            self.viewer.last_selected_uid = int(
-                                self.viewer.registry.agent_uids[self.viewer.selected_slot_id].item()
-                            )
-                        else:
-                            self.viewer.last_selected_uid = int(
-                                self.viewer.registry.agent_data[self.viewer.selected_slot_id, COL_AGENT_ID].item()
-                            )
+                    if slot_id is not None and slot_id >= 0:
+                        self.viewer.select_agent_slot(slot_id)
+                    elif self.viewer.select_heal_zone_at_cell(gx, gy):
+                        self.viewer.selected_slot_id = None
+                    else:
+                        self.viewer.selected_slot_id = None
+                        self.viewer.clear_selected_zone()
 
                 # Mouse wheel zoom
                 elif ev.button == 4:
                     self.viewer.cam.zoom_at(1.12)
-                    self.viewer.world_renderer.static_surf = None
+                    self.viewer.world_renderer.invalidate_static_background()
                 elif ev.button == 5:
                     self.viewer.cam.zoom_at(1 / 1.12)
-                    self.viewer.world_renderer.static_surf = None
+                    self.viewer.world_renderer.invalidate_static_background()
 
         return running, advance_tick
 
@@ -1487,6 +1662,14 @@ class Viewer:
         self.selected_slot_id: Optional[int] = None
         self.last_selected_uid: Optional[int] = None
         self.marked: List[int] = []
+        self.selected_heal_zone_id: Optional[str] = None
+        self.selected_heal_zone_overlap_count: int = 0
+        self._last_zone_status_message: str = ""
+
+        # Runtime bindings populated when Viewer.run(...) starts.
+        self.engine = None
+        self.registry = None
+        self.stats = None
 
         # Display toggles
         self.show_rays = False
@@ -1542,6 +1725,183 @@ class Viewer:
                 print(f"[Viewer] Saved {label} brain for agent {uid} to '{filename}'")
             except Exception as e:
                 print(f"[Viewer] Error saving brain: {e}")
+
+    def current_tick(self) -> int:
+        return int(getattr(self.stats, "tick", 0)) if self.stats is not None else 0
+
+    def is_valid_world_cell(self, gx: int, gy: int) -> bool:
+        return 0 <= int(gx) < int(self.grid.shape[2]) and 0 <= int(gy) < int(self.grid.shape[1])
+
+    def get_catastrophe_controller(self):
+        return None if self.engine is None else getattr(self.engine, "catastrophe_controller", None)
+
+    def get_catastrophe_status(self) -> Dict[str, Any]:
+        controller = self.get_catastrophe_controller()
+        if controller is None:
+            return {
+                "scheduler_enabled": False,
+                "scheduler_mode": "periodic",
+                "active_event": None,
+                "event_pattern_name": None,
+                "event_source": None,
+                "event_expires_at_tick": None,
+                "event_remaining_ticks": None,
+                "zone_count": 0,
+                "active_zone_count": 0,
+                "dormant_zone_count": 0,
+                "active_zone_ids": tuple(),
+                "manual_override_count": 0,
+                "catastrophe_slot_active": False,
+                "last_skip_reason": "controller_unavailable",
+            }
+        return controller.ui_status_snapshot(tick_now=self.current_tick())
+
+    def request_zone_render_refresh(self):
+        if self.engine is not None and hasattr(self.engine, "refresh_zone_runtime_cache"):
+            self.engine.refresh_zone_runtime_cache()
+        if hasattr(self, "world_renderer") and self.world_renderer is not None:
+            if self.engine is not None:
+                self.world_renderer.maybe_refresh_zone_cache(self.engine, force=True)
+            else:
+                self.world_renderer.invalidate_static_background()
+
+    def _set_zone_status_message(self, message: str) -> None:
+        self._last_zone_status_message = str(message)
+
+    def select_agent_slot(self, slot_id: Optional[int]) -> None:
+        if slot_id is None or slot_id < 0:
+            self.selected_slot_id = None
+            return
+        self.clear_selected_zone()
+        self.selected_slot_id = int(slot_id)
+        if self.registry is None:
+            return
+        if hasattr(self.registry, "agent_uids"):
+            self.last_selected_uid = int(self.registry.agent_uids[self.selected_slot_id].item())
+        else:
+            self.last_selected_uid = int(self.registry.agent_data[self.selected_slot_id, COL_AGENT_ID].item())
+
+    def clear_selected_zone(self) -> None:
+        self.selected_heal_zone_id = None
+        self.selected_heal_zone_overlap_count = 0
+
+    def _zone_at_cell(self, gx: int, gy: int):
+        if self.engine is None or not self.is_valid_world_cell(gx, gy):
+            return None, 0
+        zones = getattr(self.engine, "zones", None)
+        if zones is None:
+            return None, 0
+        matches = zones.get_heal_zones_containing_cell(int(gx), int(gy), active_only=False)
+        if not matches:
+            return None, 0
+        return matches[0], len(matches)
+
+    def select_heal_zone_at_cell(self, gx: int, gy: int) -> bool:
+        zone, overlap_count = self._zone_at_cell(gx, gy)
+        if zone is None:
+            return False
+        self.selected_heal_zone_id = str(zone.zone_id)
+        self.selected_heal_zone_overlap_count = int(overlap_count)
+        self._set_zone_status_message(f"Selected heal zone {zone.zone_id}")
+        return True
+
+    def get_selected_zone_status(self) -> Optional[Dict[str, Any]]:
+        if self.engine is None or self.selected_heal_zone_id is None:
+            return None
+        zones = getattr(self.engine, "zones", None)
+        if zones is None:
+            return None
+        try:
+            zone = zones.get_heal_zone(self.selected_heal_zone_id)
+        except Exception:
+            return None
+
+        manual_value = dict(getattr(zones, "manual_zone_enabled", {})).get(str(zone.zone_id))
+        if manual_value is None:
+            manual_label = "none"
+        else:
+            manual_label = "forced ON" if bool(manual_value) else "forced OFF"
+
+        active_now = str(zone.zone_id) in set(getattr(zones, "active_heal_zone_ids", tuple()))
+        y0, y1, x0, x1 = zone.bounds
+        return {
+            "zone_id": str(zone.zone_id),
+            "effective_state_label": "ACTIVE" if active_now else "DORMANT",
+            "manual_override_label": manual_label,
+            "overlap_count": int(max(1, self.selected_heal_zone_overlap_count)),
+            "bounds_label": f"x=[{x0},{x1}) y=[{y0},{y1})",
+            "status_message": str(self._last_zone_status_message),
+        }
+
+    def manual_toggle_zone_at_cell(self, gx: int, gy: int) -> bool:
+        if not self.select_heal_zone_at_cell(gx, gy):
+            self.clear_selected_zone()
+            self._set_zone_status_message("No heal zone under cursor")
+            return False
+
+        self.selected_slot_id = None
+        controller = self.get_catastrophe_controller()
+        if controller is None:
+            self._set_zone_status_message("Catastrophe controller unavailable")
+            return False
+
+        zone_id = str(self.selected_heal_zone_id)
+        changed = bool(controller.manual_toggle_zone(zone_id=zone_id, tick_now=self.current_tick()))
+        if changed:
+            self.request_zone_render_refresh()
+            zone_status = self.get_selected_zone_status()
+            if zone_status is not None:
+                self._set_zone_status_message(
+                    f"Zone {zone_id} -> {zone_status['effective_state_label']} (manual override applied)"
+                )
+        return changed
+
+    def toggle_catastrophe_scheduler(self) -> None:
+        controller = self.get_catastrophe_controller()
+        if controller is None:
+            self._set_zone_status_message("Catastrophe controller unavailable")
+            return
+        enabled = not bool(controller.scheduler_enabled)
+        controller.set_scheduler_enabled(enabled)
+        self._set_zone_status_message(f"Scheduler {'enabled' if enabled else 'disabled'}")
+
+    def restore_all_zones_to_normal_effective_state(self) -> bool:
+        controller = self.get_catastrophe_controller()
+        if controller is None:
+            self._set_zone_status_message("Catastrophe controller unavailable")
+            return False
+        changed = bool(
+            controller.restore_all_zones_to_normal_effective_state(
+                tick_now=self.current_tick(),
+                reason="viewer_restore_all",
+            )
+        )
+        if changed:
+            self.request_zone_render_refresh()
+        self._set_zone_status_message("Restored all heal zones to normal effective state")
+        return changed
+
+    def manual_trigger_catastrophe(self, pattern_key: str) -> bool:
+        controller = self.get_catastrophe_controller()
+        if controller is None:
+            self._set_zone_status_message("Catastrophe controller unavailable")
+            return False
+        changed = bool(
+            controller.trigger_manual_pattern(
+                pattern_key=str(pattern_key),
+                tick_now=self.current_tick(),
+                source="viewer_manual",
+            )
+        )
+        if changed:
+            self.request_zone_render_refresh()
+            status = self.get_catastrophe_status()
+            self._set_zone_status_message(
+                f"Manual catastrophe triggered: {status['event_pattern_name'] or pattern_key}"
+            )
+        else:
+            self._set_zone_status_message(f"Manual catastrophe rejected: {pattern_key}")
+        return changed
 
     # ----------------------------------------------------------------------
     # Fast click picking (no GPU sync in the common case)
@@ -1724,6 +2084,7 @@ class Viewer:
             target_fps: render FPS cap. If None uses config.TARGET_FPS.
             run_dir: directory for checkpoints. If None, checkpointing disabled.
         """
+        self.engine = engine
         self.registry = registry
         self.stats = stats
 
@@ -1873,6 +2234,7 @@ class Viewer:
             # ------------------------------------------------------------------
             # 6) Render phase
             # ------------------------------------------------------------------
+            self.world_renderer.maybe_refresh_zone_cache(engine)
             self.screen.fill(COLORS["bg"])
             self.world_renderer.draw(self.screen, state_data)
             self.hud_panel.draw(self.screen, state_data)
@@ -1890,3 +2252,4 @@ class Viewer:
                 running = False
 
         pygame.quit()
+

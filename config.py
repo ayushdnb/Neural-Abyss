@@ -376,7 +376,7 @@ TELEMETRY_LOG_PPO: bool = _env_bool("FWS_TELEM_PPO", True)
 # Dedicated rich PPO training diagnostics CSV (separate from headless summary).
 # File: telemetry/ppo_training_telemetry.csv
 # Env: FWS_TELEM_PPO_RICH_CSV
-TELEMETRY_PPO_RICH_CSV: bool = _env_bool("FWS_TELEM_PPO_RICH_CSV", False)
+TELEMETRY_PPO_RICH_CSV: bool = _env_bool("FWS_TELEM_PPO_RICH_CSV", True)
 
 # Rich PPO telemetry write granularity: "update", "epoch", or "minibatch".
 # Higher detail gives better diagnostics but increases I/O/CSV size.
@@ -607,7 +607,7 @@ WALL_SEG_MIN = _env_int("FWS_WALL_SEG_MIN", 5)
 # Maximum wall segment length.
 # Env: FWS_WALL_SEG_MAX
 # If very large relative to grid size, risk of accidental partitioning increases.
-WALL_SEG_MAX = _env_int("FWS_WALL_SEG_MAX", 77)
+WALL_SEG_MAX = _env_int("FWS_WALL_SEG_MAX", 57)
 
 # Margin from boundaries or protected areas for wall placement (implementation-dependent exact usage).
 # Env: FWS_WALL_MARGIN
@@ -646,6 +646,80 @@ HEAL_ZONE_SIZE_RATIO = _env_float("FWS_HEAL_SIZE_RATIO", 5/64)
 # Compare against metabolism to understand net sustain:
 #   net ≈ HEAL_RATE - META_*_HP_PER_TICK
 HEAL_RATE            = _env_float("FWS_HEAL_RATE", 0.003)
+
+
+# =============================================================================
+# 🌪️ HEAL-ZONE CATASTROPHE SCHEDULER
+# =============================================================================
+# These knobs control the runtime scheduler that temporarily suppresses subsets
+# of heal zones. The scheduler is OFF by default so baseline behavior is
+# preserved until explicitly enabled.
+CATASTROPHE_SCHEDULER_ENABLED = _env_bool("FWS_CATASTROPHE_ENABLED", False)
+
+# Scheduler mode:
+# - "periodic": trigger when cooldown is satisfied
+# - "dynamic":  trigger only when the runtime heal-occupancy signal has stayed
+#               above threshold long enough
+CATASTROPHE_SCHEDULER_MODE = _env_str("FWS_CATASTROPHE_MODE", "periodic").strip().lower()
+if CATASTROPHE_SCHEDULER_MODE not in ("periodic", "dynamic"):
+    _config_issue(
+        f"Invalid FWS_CATASTROPHE_MODE={CATASTROPHE_SCHEDULER_MODE!r}; using 'periodic'"
+    )
+    CATASTROPHE_SCHEDULER_MODE = "periodic"
+
+# Minimum cooldown after a catastrophe is cleared before another may start.
+CATASTROPHE_COOLDOWN_TICKS = max(0, _env_int("FWS_CATASTROPHE_COOLDOWN_TICKS", 25000))
+
+# Active duration for each catastrophe event.
+CATASTROPHE_DURATION_TICKS = max(1, _env_int("FWS_CATASTROPHE_DURATION_TICKS", 5000))
+
+# Safety invariants:
+# - never suppress all heal zones
+# - prefer a configurable minimum active zone count
+# - skip triggering entirely if there are too few heal zones
+CATASTROPHE_MIN_ACTIVE_HEAL_ZONES = max(1, _env_int("FWS_CATASTROPHE_MIN_ACTIVE_HEAL_ZONES", 1))
+CATASTROPHE_MIN_ZONE_COUNT_TO_TRIGGER = max(
+    CATASTROPHE_MIN_ACTIVE_HEAL_ZONES + 1,
+    _env_int("FWS_CATASTROPHE_MIN_ZONE_COUNT_TO_TRIGGER", 3),
+)
+
+# Optional simple regional safety rule:
+# when enabled, valid catastrophes must leave at least one active zone on each
+# left/right half of the map based on zone bounding-box centers.
+CATASTROPHE_REQUIRE_BOTH_HALVES_COVERED = _env_bool(
+    "FWS_CATASTROPHE_REQUIRE_BOTH_HALVES_COVERED",
+    False,
+)
+
+# Optional dynamic trigger settings (used only when mode == "dynamic").
+# The signal is intentionally simple: fraction of alive agents currently
+# standing on effective heal support.
+CATASTROPHE_DYNAMIC_HEAL_OCCUPANCY_THRESHOLD = _env_float(
+    "FWS_CATASTROPHE_DYNAMIC_HEAL_OCCUPANCY_THRESHOLD",
+    0.35,
+)
+CATASTROPHE_DYNAMIC_SUSTAIN_TICKS = max(
+    1,
+    _env_int("FWS_CATASTROPHE_DYNAMIC_SUSTAIN_TICKS", 120),
+)
+
+# Pattern-shape knobs for simple interpretable catastrophes.
+CATASTROPHE_SMALL_SUPPRESS_FRACTION = _env_float(
+    "FWS_CATASTROPHE_SMALL_SUPPRESS_FRACTION",
+    0.25,
+)
+CATASTROPHE_MEDIUM_SUPPRESS_FRACTION = _env_float(
+    "FWS_CATASTROPHE_MEDIUM_SUPPRESS_FRACTION",
+    0.50,
+)
+CATASTROPHE_CLUSTER_SURVIVOR_FRACTION = _env_float(
+    "FWS_CATASTROPHE_CLUSTER_SURVIVOR_FRACTION",
+    0.25,
+)
+
+# Optional console logging for scheduler trigger/clear events.
+CATASTROPHE_LOG_EVENTS = _env_bool("FWS_CATASTROPHE_LOG_EVENTS", False)
+
 
 # Capture Points ("King of the Hill")
 # -----------------------------------
@@ -689,7 +763,7 @@ SOLDIER_HP = _env_float("FWS_SOLDIER_HP", 1.0)
 # Archer base HP.
 # Env: FWS_ARCHER_HP
 # Lower HP makes positioning and line-of-sight more critical.
-ARCHER_HP  = _env_float("FWS_ARCHER_HP", 0.45)
+ARCHER_HP  = _env_float("FWS_ARCHER_HP", 0.55)
 
 # Base attack reference (generic/shared fallback).
 # Env: FWS_BASE_ATK
@@ -838,7 +912,7 @@ RESPAWN_ENABLED = _env_bool("FWS_RESPAWN", True)
 
 # Minimum population floor per team (hysteresis/fill system may try to maintain this).
 # Env: FWS_RESP_FLOOR_PER_TEAM
-RESP_FLOOR_PER_TEAM      = _env_int("FWS_RESP_FLOOR_PER_TEAM", 120)
+RESP_FLOOR_PER_TEAM      = _env_int("FWS_RESP_FLOOR_PER_TEAM", 100)
 
 # Hard cap of respawns applied per tick.
 # Env: FWS_RESP_MAX_PER_TICK
@@ -887,7 +961,7 @@ RESPAWN_SPAWN_TRIES          = _env_int("FWS_RESPAWN_TRIES", 200)
 # Standard deviation of mutation noise applied on respawned brains (when mutation is used).
 # Env: FWS_MUT_STD
 # Larger => more behavioral disruption/exploration, less stability/inheritance fidelity.
-RESPAWN_MUTATION_STD         = _env_float("FWS_MUT_STD", 0.1)
+RESPAWN_MUTATION_STD         = _env_float("FWS_MUT_STD", 0.05)
 
 # Probability of cloning path vs alternate respawn path (runtime-defined semantics).
 # Env: FWS_CLONE_PROB
@@ -923,7 +997,7 @@ RESPAWN_ARCHER_SHARE         = _env_float("FWS_RESPAWN_ARCHER_SHARE", 0.50)
 # Bias for spawning toward interior regions vs edges.
 # Env: FWS_RESPAWN_INTERIOR_BIAS
 # Higher values can reduce edge/corner camping and improve contact probability.
-RESPAWN_INTERIOR_BIAS        = _env_float("FWS_RESPAWN_INTERIOR_BIAS", 0.50)
+RESPAWN_INTERIOR_BIAS        = _env_float("FWS_RESPAWN_INTERIOR_BIAS", 0.10)
 
 # ----------------------------------------------------------------------
 # Respawn evolution layer (optional; all switches default to safe/backward-compatible)
@@ -942,11 +1016,11 @@ RESPAWN_RARE_MUTATION_PHYSICAL_ENABLE: bool = _env_bool("FWS_RESP_RARE_PHYS_ENAB
 
 # Physical drift magnitude (fractional std, e.g., 0.03 = 3% std per trait multiplier).
 # Env: FWS_RESP_RARE_PHYS_STD
-RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_STD_FRAC: float = _env_float("FWS_RESP_RARE_PHYS_STD", 0.09)
+RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_STD_FRAC: float = _env_float("FWS_RESP_RARE_PHYS_STD", 0.15)
 
 # Physical drift clamp (fractional absolute cap on multiplier delta).
 # Env: FWS_RESP_RARE_PHYS_CLIP
-RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_CLIP_FRAC: float = _env_float("FWS_RESP_RARE_PHYS_CLIP", 0.15)
+RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_CLIP_FRAC: float = _env_float("FWS_RESP_RARE_PHYS_CLIP", 0.20)
 
 # Apply heavy extra brain noise only on inherited/cloned anomaly path.
 # Env: FWS_RESP_RARE_BRAIN_NOISE_ENABLE
@@ -1017,43 +1091,43 @@ TEAM_DMG_TAKEN_PENALTY = _env_float("FWS_REW_DMG_TAKEN",  0.00)
 # Dense per-tick HP reward coefficient.
 # Env: FWS_PPO_REW_HP_TICK
 # If too high and positive, "stay alive safely" can dominate and produce camping behavior.
-PPO_REWARD_HP_TICK         = _env_float("FWS_PPO_REW_HP_TICK", 0.00005)
+PPO_REWARD_HP_TICK         = _env_float("FWS_PPO_REW_HP_TICK", 0)
 # HP PPO reward mode selector (keeps legacy behavior by default).
 # Env: FWS_PPO_HP_REWARD_MODE
 # Supported values (runtime patch path):
 # - "raw"            : legacy behavior, reward = HP * PPO_REWARD_HP_TICK
 # - "threshold_ramp" : reward is gated below threshold, then scales smoothly to full reward
-PPO_HP_REWARD_MODE         = _env_str("FWS_PPO_HP_REWARD_MODE", "threshold_ramp").strip().lower()
+PPO_HP_REWARD_MODE         = _env_str("FWS_PPO_HP_REWARD_MODE", "raw").strip().lower()
 
 # HP percentage threshold used by threshold-ramp HP reward mode.
 # Env: FWS_PPO_HP_REWARD_THRESHOLD
 # Example: 0.60 => no HP PPO reward at <=60% HP, smooth ramp above it.
-PPO_HP_REWARD_THRESHOLD    = _env_float("FWS_PPO_HP_REWARD_THRESHOLD", 0.60)
+PPO_HP_REWARD_THRESHOLD    = _env_float("FWS_PPO_HP_REWARD_THRESHOLD", 10)
 
 # Individual PPO reward for damage dealt (dense combat shaping, per-agent only).
 # Env: FWS_PPO_REW_DMG_DEALT_AGENT
 # 0 disables this shaping channel.
-PPO_REWARD_DMG_DEALT_INDIVIDUAL = _env_float("FWS_PPO_REW_DMG_DEALT_AGENT", 0.2)
+PPO_REWARD_DMG_DEALT_INDIVIDUAL = _env_float("FWS_PPO_REW_DMG_DEALT_AGENT", 0.0)
 
 # Individual PPO penalty magnitude for damage taken (dense combat shaping, per-agent only).
 # Env: FWS_PPO_PEN_DMG_TAKEN_AGENT
 # Applied as a subtraction in reward code: reward -= damage_taken * this_value
-PPO_PENALTY_DMG_TAKEN_INDIVIDUAL = _env_float("FWS_PPO_PEN_DMG_TAKEN_AGENT", 0.003)
+PPO_PENALTY_DMG_TAKEN_INDIVIDUAL = _env_float("FWS_PPO_PEN_DMG_TAKEN_AGENT", 0.0)
 
 # Individual kill reward for PPO agent signal.
 # Env: FWS_PPO_REW_KILL_AGENT
 # Larger => direct combat success becomes strongly reinforced.
-PPO_REWARD_KILL_INDIVIDUAL = _env_float("FWS_PPO_REW_KILL_AGENT", 25.0)
+PPO_REWARD_KILL_INDIVIDUAL = _env_float("FWS_PPO_REW_KILL_AGENT", 0.0)
 
 # Death penalty for PPO agent signal.
 # Env: FWS_PPO_REW_DEATH
 # More negative => stronger risk aversion and survival bias.
-PPO_REWARD_DEATH           = _env_float("FWS_PPO_REW_DEATH", -0.5)
+PPO_REWARD_DEATH           = _env_float("FWS_PPO_REW_DEATH", 0)
 
 # Reward for contested CP participation/control signal (implementation-dependent exact condition).
 # Env: FWS_PPO_REW_CONTEST
 # Increasing this pushes policies toward objective zones rather than isolated survival.
-PPO_REWARD_CONTESTED_CP    = _env_float("FWS_PPO_REW_CONTEST", 2.5)
+PPO_REWARD_CONTESTED_CP    = _env_float("FWS_PPO_REW_CONTEST", 10)
 
 # =============================================================================
 # 🧠 REINFORCEMENT LEARNING (PROXIMAL POLICY OPTIMIZATION)
