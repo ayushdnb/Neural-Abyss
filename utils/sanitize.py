@@ -1,37 +1,6 @@
-"""
-runtime_sanity.py
+"""Periodic runtime validation for grid and agent tensors."""
 
-Purpose
--------
-This file provides **runtime sanity checks** for a simulation that uses PyTorch tensors
-to represent:
-
-1) A **grid/world state** tensor: shape (3, H, W)
-2) An **agent table** tensor: shape (N, >= 6)
-
-These checks are designed to fail fast when the simulation state becomes corrupted
-(e.g., NaNs/Infs appear, shapes drift, flags go out of legal range). In long-running
-GPU simulations and reinforcement learning loops, **silent corruption** is common:
-a single invalid value can propagate and destroy training signal.
-
-Key design goals
-----------------
-- **Zero behavior changes**: these functions only validate and raise errors.
-- **Cheap + callable occasionally**: intended to be called periodically, not every tick.
-- **Actionable failures**: errors identify what is wrong and where.
-
-Notes for beginners
--------------------
-- A `torch.Tensor` is a multi-dimensional numeric array, like a NumPy array, but
-  optimized for GPU acceleration and deep learning.
-- "Finite" means a number is not NaN (Not-a-Number), not +Inf, and not -Inf.
-- NaNs often come from invalid math (0/0, sqrt of negative, log of non-positive, overflow).
-- In simulations, a NaN often means a previous update produced an illegal state.
-
-IMPORTANT: We do NOT modify tensors here. We only verify constraints.
-"""
-
-from __future__ import annotations  # Allows forward references in type hints (modern Python feature).
+from __future__ import annotations
 
 import torch
 import config
@@ -132,10 +101,8 @@ def assert_grid_ok(grid: torch.Tensor) -> None:
     # In PyTorch, tensors live on a "device":
     # - CPU: grid.device.type == "cpu"
     # - GPU: grid.device.type == "cuda"  (or "mps" on Apple)
-    #
     # `config.TORCH_DEVICE` is presumably something like:
     #   torch.device("cuda") or torch.device("cuda:0") or torch.device("cpu")
-    #
     # This check is lenient: it does NOT error if the index differs
     # (e.g. cuda:0 vs cuda:1). It only cares that the type matches.
     if grid.device.type != config.TORCH_DEVICE.type:

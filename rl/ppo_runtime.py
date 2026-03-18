@@ -1,53 +1,4 @@
-# =============================================================================
-# Per-Agent PPO Runtime (No Parameter Sharing, Slot-Local Optimizers)
-# =============================================================================
-#
-# This module implements a **minimal** Proximal Policy Optimization (PPO)
-# training runtime that is designed for a **multi-agent grid simulation**.
-#
-# Key design choice:
-#   - **Per-slot independence** ("no hive mind"):
-#       Each agent slot has its own model parameters AND its own optimizer.
-#       There is no parameter sharing between slots.
-#
-# Here, each slot learns separately, which increases compute cost but allows
-# divergent behaviors and avoids “global homogenization”.
-#
-# What this runtime does:
-#   1) Collects per-agent trajectories (observations, actions, rewards, etc.)
-#   2) Every PPO window (T steps), trains each agent independently
-#   3) Supports manual flushing for dead agents before respawn
-#   4) Supports checkpoint save/load of PPO runtime state
-#
-# -----------------------------------------------------------------------------
-# PPO THEORY SUMMARY (FORMAL)
-# -----------------------------------------------------------------------------
-# PPO is a policy-gradient method that optimizes:
-#
-#   L(θ) = E[ min(r_t(θ) * A_t, clip(r_t(θ), 1-ε, 1+ε) * A_t) ]
-#
-# where:
-#   - θ are policy parameters
-#   - r_t(θ) = π_θ(a_t|s_t) / π_θ_old(a_t|s_t)  (probability ratio)
-#   - A_t is the advantage estimate (how good action a_t was vs baseline)
-#   - ε is the clipping parameter (self.clip)
-#
-# PPO also trains a critic (value function) by minimizing:
-#   (V(s_t) - R_t)^2
-# and often includes:
-#   - entropy bonus (encourages exploration)
-#
-# This implementation includes:
-#   - clipped policy objective
-#   - clipped value loss
-#   - entropy bonus
-#   - minibatches
-#   - gradient clipping
-#   - optional KL-based early stopping
-#   - GAE for advantage estimation
-#
-# =============================================================================
-
+"""Per-slot PPO runtime for independent agent training."""
 
 from __future__ import annotations
 
@@ -72,11 +23,9 @@ import config
 from engine.agent_registry import AgentsRegistry
 
 
-# ----------------------------------------------------------------------
 # Simple buffer for one agent's trajectory segment
-# ----------------------------------------------------------------------
 @dataclass
-class _Buf:
+class _RolloutBuffer:
     """
     Holds rollout data for a single agent between training windows.
 
@@ -114,7 +63,7 @@ class _PreparedTrainSlot:
     """
     aid: int
     model: nn.Module
-    buf: _Buf
+    buf: _RolloutBuffer
     obs: torch.Tensor
     act: torch.Tensor
     logp_old: torch.Tensor
@@ -134,9 +83,7 @@ def _is_torchscript_module(m: nn.Module) -> bool:
     return isinstance(m, torch.jit.ScriptModule) or isinstance(m, torch.jit.RecursiveScriptModule)
 
 
-# ----------------------------------------------------------------------
 # Main PPO runtime – one instance per simulation (shared by all agents)
-# ----------------------------------------------------------------------
 class PerAgentPPORuntime:
     """
     Minimal per-agent PPO runtime.
@@ -175,9 +122,7 @@ class PerAgentPPORuntime:
         self.obs_dim = int(obs_dim)
         self.act_dim = int(act_dim)
 
-        # ------------------------------------------------------------------
         # Hyperparameters (read from config; defaults are conservative)
-        # ------------------------------------------------------------------
         # self.T: length of a PPO rollout window (in ticks/steps).
         # self.epochs: number of PPO epochs per window update.
         # self.lr: optimizer learning rate.
@@ -198,7 +143,7 @@ class PerAgentPPORuntime:
         self.T_max    = int(getattr(config, "PPO_LR_T_MAX", 500_000))
         self.eta_min  = float(getattr(config, "PPO_LR_ETA_MIN", 1e-6))
         self._batched_ppo_attention_warned = False
-        # New config parameters (introduced by a patch in your codebase):
+        # Additional PPO stability and batching controls.
         # - minibatches: number of minibatches per epoch
         # - max_grad_norm: gradient clipping norm (stabilizes training)
         # - target_kl: early stop if KL divergence exceeds this (trust region safety)
@@ -215,9 +160,7 @@ class PerAgentPPORuntime:
             or os.getenv("FWS_PPO_STRICT_ROLLOUT_VALIDATE", "0") in ("1", "true", "True")
         )
 
-        # ------------------------------------------------------------------
         # Per-slot PPO state
-        # ------------------------------------------------------------------
         # _buf: rollout buffer per slot (aid -> _Buf)
         # _opt: optimizer per slot (aid -> torch.optim.Optimizer)
         # _sched: LR scheduler per slot (aid -> CosineAnnealingLR)
@@ -233,7 +176,6 @@ class PerAgentPPORuntime:
         #   *normal* main inference path for that slot
         # - valid[slot] tells us whether that cache line belongs to the current slot occupant
         # - pending window state remembers which slots need V(s_{t+1}) on the next tick
-        #
         # IMPORTANT:
         # - This remains strictly slot-local (no sharing / no mixing across slots).
         # - reset/flush paths explicitly invalidate reused/dead slots.
@@ -264,9 +206,7 @@ class PerAgentPPORuntime:
         self._rich_telemetry_rows_pending = []
         return rows
 
-    # ------------------------------------------------------------------
     # Shape & device assertions (fail loudly on mismatch)
-    # ------------------------------------------------------------------
     def _assert_record_shapes(
         self,
         agent_ids: torch.Tensor,
@@ -354,9 +294,7 @@ class PerAgentPPORuntime:
                 )
             seen[key] = int(aid)
 
-    # ------------------------------------------------------------------
     # Agent reset (called when a new agent respawns into an old slot)
-    # ------------------------------------------------------------------
     def reset_agent(self, aid: int) -> None:
         """
         Hard reset PPO state for a single slot.
@@ -528,9 +466,7 @@ class PerAgentPPORuntime:
         self._train_window_and_clear()
         return True
 
-    # ------------------------------------------------------------------
     # Lazy buffer / optimizer creation
-    # ------------------------------------------------------------------
     def _get_buf(self, aid: int) -> _Buf:
         """
         Return rollout buffer for slot `aid`, creating it if missing.
@@ -539,7 +475,7 @@ class PerAgentPPORuntime:
         At training time we stack lists into batched tensors.
         """
         if aid not in self._buf:
-            self._buf[aid] = _Buf([], [], [], [], [], [], [])
+            self._buf[aid] = _RolloutBuffer([], [], [], [], [], [], [])
         return self._buf[aid]
 
     def _get_opt(self, aid: int, model: nn.Module) -> optim.Optimizer:
@@ -558,9 +494,7 @@ class PerAgentPPORuntime:
             )
         return self._opt[aid]
 
-    # ------------------------------------------------------------------
     # Window timing helper
-    # ------------------------------------------------------------------
     def will_train_next_step(self) -> bool:
         """
         Return True if the *next* record_step call will trigger a PPO window train.
@@ -572,9 +506,7 @@ class PerAgentPPORuntime:
         """
         return ((self._step + 1) % self.T) == 0
 
-    # ------------------------------------------------------------------
     # Record one step (called by environment after each tick)
-    # ------------------------------------------------------------------
     @torch.no_grad()
     def record_step(
         self,
@@ -651,7 +583,6 @@ class PerAgentPPORuntime:
         logits_masked = self._mask_logits(logits, action_masks)
         logp_a = F.log_softmax(logits_masked.to(torch.float32), dim=-1).gather(1, actions.view(-1, 1)).squeeze(1)
 
-        # --- PERF PATCH A: batch detach/cast before loop ---
         # Rationale: calling agent_ids[i].item() in a Python loop creates N individual
         # GPU→CPU sync points per tick (one per agent). Similarly, per-element .detach()
         # and .to() calls inside a loop launch one tiny kernel per agent per field.
@@ -697,7 +628,6 @@ class PerAgentPPORuntime:
         self._step += 1
 
         # Train if we reached end of window.
-        #
         # Two supported modes:
         # 1) Immediate bootstrap path:
         #    Caller provided explicit bootstrap_values for this boundary step, so
@@ -713,9 +643,7 @@ class PerAgentPPORuntime:
                 self._pending_window_agent_ids = agent_ids.detach().to(self.device, dtype=torch.long).clone()
                 self._pending_window_done = done_b.detach().to(self.device, dtype=torch.bool).clone()
 
-    # ------------------------------------------------------------------
     # Public flush method – train and clear specific agents immediately
-    # ------------------------------------------------------------------
     def flush_agents(self, agent_ids: Any) -> None:
         """
         Train + clear rollout buffers for given agents *immediately*.
@@ -742,10 +670,8 @@ class PerAgentPPORuntime:
         self.invalidate_value_cache(aids)
 
 
-    # ------------------------------------------------------------------
     # PPO training helpers
-    # ------------------------------------------------------------------
-    def _clear_rollout_buffer(self, b: _Buf) -> None:
+    def _clear_rollout_buffer(self, b: _RolloutBuffer) -> None:
         """Clear one rollout buffer in-place without touching optimizer state."""
         b.obs.clear()
         b.act.clear()
@@ -1446,9 +1372,7 @@ class PerAgentPPORuntime:
                 lr_after=float(lr_after),
             )
 
-    # ------------------------------------------------------------------
     # Core training routine – shared by window flush and manual flush
-    # ------------------------------------------------------------------
     def _train_aids_and_clear(self, aids: List[int]) -> None:
         """
         Train and clear the specified slot buffers.
@@ -1571,9 +1495,7 @@ class PerAgentPPORuntime:
             return
         self._train_aids_and_clear(list(self._buf.keys()))
 
-    # ------------------------------------------------------------------
     # Checkpointing – save/load all runtime state
-    # ------------------------------------------------------------------
     def get_checkpoint_state(self) -> Dict[str, Any]:
         """
         Return a portable checkpoint payload.
@@ -1695,7 +1617,7 @@ class PerAgentPPORuntime:
         buf_in: Dict[int, Any] = state.get("buf", {})
         for aid, payload in buf_in.items():
             aid_i = int(aid)
-            self._buf[aid_i] = _Buf(
+            self._buf[aid_i] = _RolloutBuffer(
                 obs=to_dev(payload.get("obs", [])),
                 act=to_dev(payload.get("act", [])),
                 logp=to_dev(payload.get("logp", [])),
@@ -1736,9 +1658,7 @@ class PerAgentPPORuntime:
             sch = self._sched[aid_i]
             sch.load_state_dict(sch_sd)
 
-    # ------------------------------------------------------------------
     # Helper methods for PPO computations
-    # ------------------------------------------------------------------
     def _mask_logits(self, logits: torch.Tensor, action_masks: torch.Tensor) -> torch.Tensor:
         """
         Apply rollout legality mask to policy logits.

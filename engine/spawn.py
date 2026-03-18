@@ -1,23 +1,6 @@
+"""Initial spawn layout and team brain assignment utilities."""
+
 from __future__ import annotations
-# =============================================================================
-# This module implements agent spawning strategies and team-aware brain selection.
-#
-# The code operates within a grid-based simulation where:
-#   - The world state is represented by a 3-channel tensor grid[C, H, W].
-#   - Agents are tracked in an AgentsRegistry (dense tensor + module lists).
-#   - Each spawned agent is assigned:
-#       (i)  a position (x, y),
-#       (ii) a unit type (soldier vs archer) with corresponding stats,
-#       (iii) a "brain" (policy/controller network) chosen by configurable rules.
-#
-# A central design objective is to keep the spawning logic:
-#   - deterministic when desired (via seeds),
-#   - configurable (via config module knobs),
-#   - efficient (vectorizable where possible, minimal bookkeeping).
-#
-# IMPORTANT: Per your instruction, the executable code is not modified.
-# Only explanatory comments are added.
-# =============================================================================
 
 import math
 import random
@@ -94,9 +77,7 @@ def _rect_dims(n: int, max_cols: int, max_rows: int) -> Tuple[int, int, int]:
     n_eff = min(n, cols * rows)
     return cols, rows, n_eff
 
-# ----------------------------------------------------------------------
 # Team brain selection (supports exclusive split and mixed teams)
-# ----------------------------------------------------------------------
 
 # Deterministic per-team alternating counter (only used when mix+alternate).
 _TEAM_BRAIN_MIX_COUNTER = {True: 0, False: 0}  # True=red, False=blue
@@ -106,7 +87,6 @@ _TEAM_BRAIN_MIX_COUNTER = {True: 0, False: 0}  # True=red, False=blue
 #       1 -> mirror
 #       2 -> tron
 #       3 -> mirror
-#       ...
 # IMPORTANT:
 #   Because this is at module scope, it persists across calls to spawn functions.
 #   This is intentional when you want globally consistent alternation.
@@ -153,36 +133,7 @@ _TEAM_BRAIN_MIX_RNG = {True: _make_team_mix_rng(True), False: _make_team_mix_rng
 
 
 def _resolve_team_brain_kind(team_is_red: bool) -> str:
-    """
-    Returns one of the configured MLP brain kinds.
-
-    HIGH-LEVEL POLICY
-    -----------------
-    This function maps a team identity to a brain architecture name, governed by
-    config-driven policies.
-
-    Supported modes (TEAM_BRAIN_ASSIGNMENT_MODE):
-      1) "exclusive" / "split" / "team"
-         - Fixed architecture per team.
-
-      2) "mix" / "hybrid" / "both"
-         - Each team may spawn configured MLP variants according to a strategy:
-             a) alternate / roundrobin / rr
-             b) random / prob / probabilistic
-
-    STRATEGIES
-    ----------
-    alternate:
-      - deterministic cycling based on per-team counter and configured sequence
-
-    probabilistic:
-      - weighted random draw across the configured MLP family
-
-    ERROR HANDLING
-    --------------
-    If an unknown mode or strategy is configured, a ValueError is raised. This is
-    an intentionally "fail fast" policy: misconfiguration should surface early.
-    """
+    """Return the configured MLP brain kind for a team."""
     mode = str(getattr(config, "TEAM_BRAIN_ASSIGNMENT_MODE", "exclusive")).strip().lower()
     default_kind = str(getattr(config, "BRAIN_KIND", "whispering_abyss")).strip().lower()
 
@@ -273,11 +224,9 @@ def _mk_brain(device: torch.device, *, team_is_red: Optional[bool] = None) -> to
 
 def _choose_unit(is_archer_prob: float) -> float:
     # Choose between two unit types according to is_archer_prob.
-    #
     # UNIT_ARCHER and UNIT_SOLDIER are read from config.
     # The function returns float(...) to match downstream storage conventions,
     # likely because agent/unit values are stored in float tensors.
-    #
     # Bernoulli process:
     #   u ~ Uniform(0,1)
     #   if u < p => archer else soldier
@@ -597,11 +546,9 @@ def spawn_uniform_random(reg: AgentsRegistry, grid: torch.Tensor, per_team: int)
                     team_placed = True
 
             # If first attempt failed (rare), try the other team once.
-            #
             # This compensates for any subtle mismatches between:
             #   - our initial "cell free" check (grid[0]==0)
             #   - _place_if_free internal checks
-            #
             # It also handles edge cases where registration could fail for reasons
             # other than occupancy (e.g., registry constraints), though none are
             # shown explicitly here.

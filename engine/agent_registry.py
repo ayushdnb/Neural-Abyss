@@ -1,84 +1,18 @@
 from __future__ import annotations
-# ──────────────────────────────────────────────────────────────────────────────
-# Forward-annotation semantics (Python typing)
-# ──────────────────────────────────────────────────────────────────────────────
-# This directive ensures that all type annotations are stored as strings rather
-# than evaluated immediately. In large systems—especially those with complex
-# module graphs—this reduces import-time coupling and prevents NameError issues
-# when annotations refer to classes or types defined later.
-#
-# Importantly, this changes only annotation evaluation behavior; it does not
-# modify runtime tensor computations or model execution.
-from __future__ import annotations
-import weakref
-# --- PERF PATCH C: module-level brain signature cache ---
-# Rationale: _signature() is called for every alive agent every tick. It traverses
-# model.named_modules() and joins strings. Architecture never changes between ticks.
-#
-# WeakKeyDictionary is lifecycle-safe: when a brain module is replaced in register()
-# and the old reference is GC'd, its cache entry automatically vanishes.
-# No manual invalidation is needed — brain identity changes on replacement.
-_BRAIN_SIG_CACHE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
-# ──────────────────────────────────────────────────────────────────────────────
-# Standard library imports
-# ──────────────────────────────────────────────────────────────────────────────
-# dataclass: provides a concise way to define classes used primarily as data
-# containers. It auto-generates __init__, __repr__, equality, etc.
-from dataclasses import dataclass
-#
-# List, Dict, Optional: typing primitives used for clarity and static tooling.
-from typing import List, Dict, Optional
 
-# ──────────────────────────────────────────────────────────────────────────────
-# PyTorch imports
-# ──────────────────────────────────────────────────────────────────────────────
-# torch: tensor computation library (CPU/GPU).
-# torch.nn: neural network modules; used for typing and storing agent “brains”.
+import weakref
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+
 import torch
 import torch.nn as nn
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Project configuration
-# ──────────────────────────────────────────────────────────────────────────────
-# This module is expected to contain global knobs such as:
-#   • MAX_AGENTS     : maximum number of agents the registry can store
-#   • TORCH_DTYPE    : dtype for the agent_data tensor (float32/float16/bfloat16)
-#   • TORCH_DEVICE   : device string or torch.device (e.g. "cuda", "cpu")
-#   • UNIT_SOLDIER / UNIT_ARCHER : unit subtype encodings (defaults 1.0/2.0)
-#
-# The code uses getattr(...) in places for defensive defaults.
 import config
 
-# =============================================================================
-# Column layout (Struct-of-Arrays for GPU efficiency)
-# =============================================================================
-# This registry stores agent attributes in a single 2D tensor:
-#
-#   agent_data: shape (capacity, NUM_COLS)
-#
-# Each column corresponds to a specific attribute, and each row corresponds to
-# a slot (agent index) in the registry.
-#
-# This is a classic “Struct-of-Arrays” (SoA) layout:
-#   Instead of storing each agent as a Python object (Array-of-Structs), all
-#   agents’ attributes are stored column-wise in a dense GPU-friendly tensor.
-#
-# Why SoA is valuable in ML + simulation settings:
-#   • Coalesced memory access on GPU:
-#       When you read an attribute for many agents (e.g., all X positions),
-#       you access a contiguous slice, which is cache- and bandwidth-friendly.
-#   • Vectorized operations:
-#       Most simulation and RL pipelines want to operate on batches of agents
-#       simultaneously. A SoA layout encourages pure tensor operations rather
-#       than Python loops.
-#   • Lower Python overhead:
-#       Avoids per-agent Python objects, which become a bottleneck at scale.
-#
-# IMPORTANT CONSTRAINT:
-#   The tensor dtype is configured by config.TORCH_DTYPE, which may be float16
-#   under AMP (automatic mixed precision). Therefore, certain values that
-#   require exact integer fidelity (like permanent unique IDs) should not be
-#   stored solely in this float tensor. This is addressed below with agent_uids.
+# Cache architecture signatures by module identity to avoid repeating hot-path
+# introspection during bucket construction.
+_BRAIN_SIGNATURE_CACHE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
 COL_ALIVE = 0       # float: 1.0 alive, 0.0 dead
 COL_TEAM  = 1       # float: 2.0 red, 3.0 blue
 COL_X     = 2       # float: x coordinate
@@ -91,39 +25,29 @@ COL_ATK    = 8      # float: attack power for this agent
 COL_AGENT_ID = 9    # float: permanent unique ID for this agent
 NUM_COLS = 10
 
-# -----------------------------------------------------------------------------
 # Configuration coherence: optional synchronization hook
-# -----------------------------------------------------------------------------
 # Some codebases store the number of agent features in configuration so that
 # other modules can allocate tensors of compatible shape.
-#
 # This conditional ensures:
 #   • If config.AGENT_FEATURES exists (i.e., the configuration expects it),
 #     it is updated to match this module’s NUM_COLS.
-#
 # NOTE:
 #   This does not create config.AGENT_FEATURES if it does not already exist.
 #   It merely synchronizes it if present.
-if hasattr(config, 'AGENT_FEATURES'):
+if hasattr(config, "AGENT_FEATURES"):
     config.AGENT_FEATURES = NUM_COLS
 
-# -----------------------------------------------------------------------------
 # Team identifiers
-# -----------------------------------------------------------------------------
 # The grid/occupancy code elsewhere appears to encode team identity as:
 #   2.0 = red
 #   3.0 = blue
-#
 # These are floats because agent_data is float-typed. The choice of 2.0/3.0 is
 # likely aligned with occupancy channel conventions in the grid representation.
 TEAM_RED_ID  = 2.0
 TEAM_BLUE_ID = 3.0
 
-# -----------------------------------------------------------------------------
 # Unit subtype identifiers
-# -----------------------------------------------------------------------------
 # Unit encodings are read from config if present; otherwise default to 1.0/2.0.
-#
 # Casting to float ensures compatibility with the float agent_data tensor.
 UNIT_SOLDIER = float(getattr(config, "UNIT_SOLDIER", 1.0))
 UNIT_ARCHER  = float(getattr(config, "UNIT_ARCHER", 2.0))
@@ -131,16 +55,12 @@ UNIT_ARCHER  = float(getattr(config, "UNIT_ARCHER", 2.0))
 # Sentinel architecture class id for slots without a valid brain assignment.
 ARCH_CLASS_INVALID = -1
 
-# =============================================================================
 # Buckets: allow grouping agents with same NN architecture
-# =============================================================================
 # In multi-agent RL or simulation environments, it is common to have many agents
 # sharing the same model architecture, but not necessarily the same instance.
-#
 # “Bucketing” groups agents by a signature that describes their NN structure.
 # This enables batched inference where agents with identical architectures can
 # be processed together more efficiently.
-#
 # Even if each agent has its own parameters (distinct nn.Module instance),
 # inference can still be batched if the forward pass shape is compatible, though
 # parameter batching is non-trivial without additional engineering. This design
@@ -148,20 +68,13 @@ ARCH_CLASS_INVALID = -1
 # step toward throughput optimization.
 @dataclass
 class Bucket:
-    # signature: a string describing the model architecture (not parameters),
-    # used as a grouping key.
+    """Agents sharing a compatible model architecture for batched inference."""
+
     signature: str
-
-    # indices: LongTensor [K] containing the registry slots belonging to this
-    # bucket. These are agent indices in the registry.
     indices: torch.Tensor
-
-    # models: list of nn.Module objects corresponding to those indices, in the
-    # same order. The list length is K, matching indices.
     models: List[nn.Module]
-    # locs[j] == position of indices[j] within alive_idx, so alive_idx[locs] == indices.
-    # This eliminates torch.searchsorted in the caller (tick.py) each tick.
-    locs: torch.Tensor      # shape (K,), dtype long
+    # locs[j] is the position of indices[j] inside alive_idx.
+    locs: torch.Tensor
 
 
 class AgentsRegistry:
@@ -212,22 +125,17 @@ class AgentsRegistry:
 
         # Internal monotonically increasing counter for assigning globally unique
         # IDs. This is separate from the registry slot index.
-        #
         # Motivation:
         #   • Slots can be reused after agents die.
         #   • A permanent unique ID can be used for analytics, lineage tracking,
         #     reproducibility, and debugging across long simulations.
         self._next_agent_id: int = 0
 
-        # ---------------------------------------------------------------------
         # Main agent tensor (SoA layout)
-        # ---------------------------------------------------------------------
         # agent_data: shape (capacity, NUM_COLS)
-        #
         # dtype is configurable (may be float32, float16, bfloat16).
         # device is configurable as well. Note: the code uses config.TORCH_DEVICE
         # rather than self.device; this presumes the config and grid device match.
-        #
         # The tensor is initialized with zeros; columns are populated on register().
         self.agent_data = torch.zeros(
             (self.capacity, NUM_COLS),
@@ -239,14 +147,11 @@ class AgentsRegistry:
         # This is redundant with zeros initialization but makes intent explicit.
         self.agent_data[:, COL_ALIVE] = 0.0
 
-        # ---------------------------------------------------------------------
         # Permanent unique IDs stored as int64
-        # ---------------------------------------------------------------------
         # Rationale:
         #   Under mixed precision (float16), large integers lose precision.
         #   Over long runs, agent IDs can become large enough that float16 cannot
         #   represent them exactly, causing collisions or incorrect identity.
-        #
         # Therefore:
         #   • agent_uids is the authoritative UID store (int64).
         #   • COL_AGENT_ID in agent_data is auxiliary, possibly clamped.
@@ -257,9 +162,7 @@ class AgentsRegistry:
             device=config.TORCH_DEVICE,
         )
 
-        # ---------------------------------------------------------------------
         # Brains and generations stored separately (Python lists)
-        # ---------------------------------------------------------------------
         # brains: per-slot nn.Module or None.
         #   Cannot be stored in a tensor; modules are Python objects with state.
         self.brains: List[Optional[nn.Module]] = [None] * self.capacity
@@ -267,17 +170,13 @@ class AgentsRegistry:
         # generations: per-slot integer generation index (e.g., evolutionary runs).
         self.generations: List[int] = [0] * self.capacity
 
-        # ---------------------------------------------------------------------
         # Persistent per-slot architecture metadata
-        # ---------------------------------------------------------------------
         # brain_arch_ids[slot] stores a small integer class id describing the
         # architecture of the brain currently assigned to that slot.
-        #
         # Important:
         #   • This is NOT a parameter hash.
         #   • Distinct brains with the same structure share the same class id.
         #   • Empty / invalid slots use ARCH_CLASS_INVALID.
-        #
         # This tensor lives on the registry device so build_buckets() can group
         # alive slots without per-agent Python signature recomputation.
         self.brain_arch_ids = torch.full(
@@ -292,13 +191,10 @@ class AgentsRegistry:
         self.signature_to_arch_id: Dict[str, int] = {}
         self.arch_id_to_signature: Dict[int, str] = {}
 
-        # ---------------------------------------------------------------------
         # Expose column constants as instance attributes
-        # ---------------------------------------------------------------------
         # This is a convenience so external code can access:
         #   registry.COL_HP, registry.COL_X, etc.
         # without relying on module-level constants.
-        #
         # Note: It duplicates information already defined above; duplication is
         # acceptable here for ergonomics.
         self.COL_ALIVE, self.COL_TEAM, self.COL_X, self.COL_Y, self.COL_HP, self.COL_UNIT = 0, 1, 2, 3, 4, 5
@@ -525,13 +421,10 @@ class AgentsRegistry:
         self.agent_uids[slot] = int(agent_id)
 
         # Also store a float representation of agent_id in agent_data.
-        #
         # Motivation:
         #   Some downstream tooling or debugging UI may rely on agent_data only.
-        #
         # Risk:
         #   If dtype is float16, large IDs cannot be represented exactly.
-        #
         # Mitigation implemented here:
         #   Attempt to clamp to maximum representable float value of d.dtype
         #   using torch.finfo(d.dtype).max.
@@ -544,10 +437,8 @@ class AgentsRegistry:
             d[slot, COL_AGENT_ID] = float(agent_id)
 
         # Store the brain module in the per-slot list.
-        #
         # brain.to(self.device) moves parameters to the same device as the grid,
         # ensuring inference happens without device mismatch.
-        #
         # Note: this mutates brain in-place in the sense that it returns a module
         # placed on the target device; PyTorch modules are typically moved by
         # calling .to(...) which returns the same module reference.
@@ -640,7 +531,7 @@ class AgentsRegistry:
           • modules are exotic or dynamically defined
           • any attribute access fails
         """
-        cached = _BRAIN_SIG_CACHE.get(model)
+        cached = _BRAIN_SIGNATURE_CACHE.get(model)
         if cached is not None:
             return cached
         sig_parts: List[str] = [model.__class__.__name__]
@@ -654,7 +545,7 @@ class AgentsRegistry:
             pass
         result = "|".join(sig_parts)
         try:
-            _BRAIN_SIG_CACHE[model] = result
+            _BRAIN_SIGNATURE_CACHE[model] = result
         except TypeError:
             pass  # non-weakly-referenceable objects (TorchScript) fall through gracefully
         return result
@@ -806,4 +697,3 @@ class AgentsRegistry:
             out.append(Bucket(signature=signature, indices=idx, models=models, locs=locs))
 
         return out
-

@@ -1,11 +1,6 @@
+"""Respawn policy and slot reactivation logic."""
+
 from __future__ import annotations
-# ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-# This directive postpones evaluation of type annotations.
-# Practical effect: annotations are treated as strings (or otherwise deferred),
-# which avoids forward-reference issues and can reduce import-time circularity.
-# This is especially valuable in larger codebases where modules refer to each
-# other (e.g., registry ↔ brains ↔ environment).
-# ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 from dataclasses import dataclass, field
 # dataclass:
@@ -20,12 +15,8 @@ from typing import Optional, Tuple, List, Dict
 # Tuple[A, B] indicates fixed-size tuple with (A, B)
 # List[T] and Dict[K, V] for container typing (readability + static checking)
 
-import random
 import copy
 import random
-# NOTE: "random" is imported twice. This is redundant but harmless.
-# Per your instruction, we do not remove or modify any code.
-# Redundant imports can occur from merges or rapid iteration.
 
 import torch
 import torch.jit
@@ -60,7 +51,6 @@ from .agent_registry import (
 #   - AgentsRegistry: core state container for agents (tensor storage + brains list).
 #   - Column indices (COL_*) that index into reg.agent_data.
 #   - TEAM_* constants: numeric IDs used as team labels in tensors & grid occupancy.
-#
 # A key design pattern here is "struct-of-arrays":
 #   - agent_data is a 2D tensor of shape (N_agents, N_fields)
 #   - each field is a column (indexed by COL_* constants)
@@ -75,13 +65,10 @@ from agent.mlp_brain import (
 #   - TransformerBrain (learnable, not necessarily TorchScript)
 #   - scripted_transformer_brain (TorchScript-ready version for non-PPO mode)
 #   - TronBrain, MirrorBrain (likely lighter MLP-based / heuristic / special policies)
-#
 # The policy selection logic is team-aware when TEAM_BRAIN_ASSIGNMENT is enabled.
 
 
-# ----------------------------------------------------------------------
 # Respawn configuration dataclass (extended with new parameters)
-# ----------------------------------------------------------------------
 @dataclass
 class RespawnCfg:
     """Configuration for agent respawning.
@@ -226,9 +213,7 @@ class RespawnCfg:
     )
 
 
-# ----------------------------------------------------------------------
 # Helper functions for team counts and distribution
-# ----------------------------------------------------------------------
 @dataclass
 class TeamCounts:
     """Simple container for alive agent counts per team."""
@@ -318,9 +303,7 @@ def _cap(n: int, cfg: RespawnCfg) -> int:
     return max(0, min(n, cfg.max_per_tick))
 
 
-# ----------------------------------------------------------------------
 # Team brain selection (supports exclusive split and mixed teams)
-# ----------------------------------------------------------------------
 
 _TEAM_BRAIN_MIX_COUNTER = {TEAM_RED_ID: 0, TEAM_BLUE_ID: 0}
 # Per-team counter used for deterministic alternation strategies.
@@ -329,11 +312,9 @@ _TEAM_BRAIN_MIX_COUNTER = {TEAM_RED_ID: 0, TEAM_BLUE_ID: 0}
 def _make_team_mix_rng(team_id: float):
     # This function constructs a random number generator (RNG) used when the
     # team brain assignment mode uses probabilistic mixing.
-    #
     # If TEAM_BRAIN_MIX_SEED == 0:
     #   - Use SystemRandom(), which draws entropy from the OS.
     #   - This is non-deterministic across runs (not reproducible).
-    #
     # Otherwise:
     #   - Use random.Random(seed + salt) for deterministic behavior.
     #   - "salt" ensures red and blue do not share identical RNG streams even if
@@ -352,7 +333,6 @@ _TEAM_BRAIN_MIX_RNG = {
 
 def _resolve_team_brain_kind_from_team(team_id: float) -> str:
     # Determine the "brain kind" to use for a team.
-    #
     # config knobs:
     #   TEAM_BRAIN_ASSIGNMENT_MODE:
     #     - "exclusive" / "split" / "team":
@@ -360,13 +340,11 @@ def _resolve_team_brain_kind_from_team(team_id: float) -> str:
     #         blue -> mirror
     #     - "mix" / "hybrid" / "both":
     #         choose tron/mirror per spawn using a chosen strategy.
-    #
     # TEAM_BRAIN_MIX_STRATEGY:
     #   - "alternate" / "roundrobin" / "rr":
     #       deterministic alternation, controlled by _TEAM_BRAIN_MIX_COUNTER
     #   - "random" / "prob" / "probabilistic":
     #       draw from RNG with probability p_tron
-    #
     # If team_id is neither red nor blue, fall back to config.BRAIN_KIND.
     mode = str(getattr(config, "TEAM_BRAIN_ASSIGNMENT_MODE", "exclusive")).strip().lower()
     default_kind = str(getattr(config, "BRAIN_KIND", "whispering_abyss")).strip().lower()
@@ -419,41 +397,12 @@ def _infer_kind_from_parent(parent: torch.nn.Module) -> Optional[str]:
     return brain_kind_from_module(parent)
 
 
-# ----------------------------------------------------------------------
 # Brain creation and cloning (preserves team-specific assignment)
-# ----------------------------------------------------------------------
 def _new_brain(device: torch.device, *, team_id: Optional[float] = None) -> torch.nn.Module:
-    """Create a new brain module.
+    """Create a brain module for a newly activated slot.
 
-    HIGH-LEVEL BEHAVIOR
-    -------------------
-    This function decides which model architecture to instantiate based on:
-      - PPO_ENABLED (training mode)
-      - TEAM_BRAIN_ASSIGNMENT (team-specific assignment enabled)
-      - TEAM_BRAIN_ASSIGNMENT_MODE (exclusive vs mix)
-      - BRAIN_KIND fallback
-
-    OBSERVATION AND ACTION SPACES
-    -----------------------------
-    obs_dim = OBS_DIM: dimensionality of observation vector.
-    act_dim = NUM_ACTIONS: size of discrete action space.
-    These values are read from config using getattr to avoid KeyError if missing.
-
-    POLICY MODE SPLIT
-    -----------------
-    - Non-PPO mode:
-        returns scripted_transformer_brain(...), then .to(device)
-      This suggests inference-optimized brain with TorchScript compatibility.
-
-    - PPO mode:
-        selects "brain_kind" (tron/mirror/transformer) and instantiates that class.
-
-    TEAM-SPECIFIC ASSIGNMENT
-    ------------------------
-    If TEAM_BRAIN_ASSIGNMENT is True and team_id is provided:
-      brain_kind is derived by _resolve_team_brain_kind_from_team(team_id)
-    else:
-      brain_kind is config.BRAIN_KIND
+    The architecture depends on PPO mode, team assignment settings, and the
+    configured default brain kind.
     """
     obs_dim = int(getattr(config, "OBS_DIM", 0))
     act_dim = int(getattr(config, "NUM_ACTIONS", 41))
@@ -465,7 +414,6 @@ def _new_brain(device: torch.device, *, team_id: Optional[float] = None) -> torc
         brain_kind = str(getattr(config, "BRAIN_KIND", "whispering_abyss")).strip().lower()
 
     return create_mlp_brain(brain_kind, obs_dim, act_dim).to(device)
-
 
 
 def _clone_brain(
@@ -541,7 +489,6 @@ def _clone_brain(
     return child
 
 
-
 @torch.no_grad()
 def _perturb_brain_(brain: torch.nn.Module, std: float) -> None:
     """Add small Gaussian noise to all trainable parameters.
@@ -575,9 +522,7 @@ def _perturb_brain_(brain: torch.nn.Module, std: float) -> None:
             p.add_(torch.randn_like(p) * std)
 
 
-# ----------------------------------------------------------------------
 # Spawn cell selection (with wall margin)
-# ----------------------------------------------------------------------
 def _cell_free(grid: torch.Tensor, x: int, y: int, cfg: RespawnCfg) -> bool:
     """Check if a cell is free for spawning (no wall, no agent).
 
@@ -697,9 +642,7 @@ def _pick_location(
     return _pick_uniform(grid, cfg)
 
 
-# ----------------------------------------------------------------------
 # Unit type and stats (from config)
-# ----------------------------------------------------------------------
 def _choose_unit(cfg: RespawnCfg) -> int:
     """Randomly choose a unit type based on spawn_archer_ratio.
 
@@ -772,9 +715,7 @@ def _unit_stats(unit_id: int, cfg: RespawnCfg) -> Tuple[float, float, int]:
     return cfg.soldier_hp, cfg.soldier_atk, cfg.vision_soldier
 
 
-# ----------------------------------------------------------------------
 # Write agent to registry (direct tensor assignment, preserves old behavior)
-# ----------------------------------------------------------------------
 def _write_agent_to_registry(
     reg: AgentsRegistry,
     slot: int,
@@ -863,9 +804,7 @@ def _write_agent_to_registry(
         reg.generations[slot] = int(generation)
 
 
-# ----------------------------------------------------------------------
 # Parent selection + anomaly helpers
-# ----------------------------------------------------------------------
 def _pick_parent_slot(parents: torch.Tensor, data: torch.Tensor, cfg: RespawnCfg) -> int:
     """Choose a parent slot according to configured policy (defaults to uniform random)."""
     n = int(parents.numel())
@@ -924,9 +863,7 @@ def _apply_rare_physical_drift(hp0: float, atk0: float, vision0: int, cfg: Respa
     return hp1, atk1, vis1
 
 
-# ----------------------------------------------------------------------
 # Core respawn function (spawns a given number of agents for a team)
-# ----------------------------------------------------------------------
 @torch.no_grad()
 def _respawn_some(
     reg: AgentsRegistry,
@@ -991,7 +928,6 @@ def _respawn_some(
         slot = int(dead_slots[k].item())
 
         # Decide whether to clone an existing parent or create a fresh brain.
-        #
         # use_clone is True only if:
         #   - there exists at least one alive parent in this team (parents.numel() > 0)
         #   - random coin flip < clone_prob
@@ -1131,7 +1067,6 @@ def _respawn_some(
         )
 
         # Telemetry hook: capture spawn metadata without affecting simulation.
-        #
         # meta_out is an optional list. If provided, append a dict describing spawn.
         # This can be used by logging/telemetry systems to record births,
         # evolutionary lineage, and spawn positions.
@@ -1183,12 +1118,10 @@ def _respawn_some(
             })
 
         # Update grid to reflect the spawned agent.
-        #
         # IMPORTANT CONTRACT (as stated in comment):
         #   grid[0]: occupancy code
         #   grid[1]: hp
         #   grid[2]: slot index (-1 for empty)
-        #
         # Here occupancy is set to float(team_id), which implies TEAM_RED_ID and
         # TEAM_BLUE_ID are chosen to match the occupancy encoding for teams
         # (commonly 2.0 and 3.0).
@@ -1201,9 +1134,7 @@ def _respawn_some(
     return spawned
 
 
-# ----------------------------------------------------------------------
 # RespawnController: advanced team-aware respawn logic
-# ----------------------------------------------------------------------
 class RespawnController:
     """Controller that manages floor-based and periodic respawning.
 
@@ -1310,16 +1241,12 @@ class RespawnController:
         counts = _team_counts(reg)
         spawned_r = spawned_b = 0
 
-        # ------------------------------------------------------------------
         # 1) FLOOR-BASED RESPAWN WITH COOLDOWN (HYSTERESIS)
-        # ------------------------------------------------------------------
-        #
         # If counts.red < floor and cooldown passed:
         #   need = floor - counts.red
         #   spawn = min(need, max_per_tick)
         #   if we reach floor after spawning:
         #       set cooldown to tick + cooldown_ticks
-        #
         # This hysteresis prevents repeated firing due to small fluctuations.
         if counts.red < self.cfg.floor_per_team and tick >= self._cooldown_red_until:
             need = self.cfg.floor_per_team - counts.red
@@ -1351,10 +1278,7 @@ class RespawnController:
             if counts.blue + spawned >= self.cfg.floor_per_team:
                 self._cooldown_blue_until = tick + self.cfg.cooldown_ticks
 
-        # ------------------------------------------------------------------
         # 2) PERIODIC RESPAWN BUDGET (INVERSE SPLIT)
-        # ------------------------------------------------------------------
-        #
         # Every period_ticks, allocate period_budget respawns.
         # Distribution is based on inverse of alive counts, so smaller team
         # receives a larger share.
@@ -1385,9 +1309,7 @@ class RespawnController:
         return spawned_r, spawned_b
 
 
-# ----------------------------------------------------------------------
 # Public API: respawn_tick (backward compatible with old code)
-# ----------------------------------------------------------------------
 def respawn_tick(reg: AgentsRegistry, grid: torch.Tensor, cfg: RespawnCfg) -> None:
     """
     Perform one tick of respawning.

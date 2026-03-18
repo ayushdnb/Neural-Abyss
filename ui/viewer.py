@@ -1,63 +1,4 @@
-"""
-viewer.py – Real-time graphical interface for Neural Siege.
-
-================================================================================
-WHAT THIS FILE IS (HIGH-LEVEL)
---------------------------------------------------------------------------------
-This module implements the *Viewer* for a grid-based simulation called "Neural
-Siege". The Viewer is responsible for:
-
-1) Creating and managing a Pygame window (the GUI).
-2) Rendering the game world (terrain + agents) efficiently.
-3) Handling user input (keyboard + mouse) for camera, toggles, selection, etc.
-4) Controlling simulation speed (pause, single-step, speed multiplier).
-5) Optional checkpointing (manual via hotkey + automatic periodic/trigger).
-
-IMPORTANT ARCHITECTURE NOTE
---------------------------------------------------------------------------------
-- The simulation itself is NOT implemented here. That lives in the Engine.
-- The Viewer calls `engine.run_tick()` to advance the simulation.
-- The Viewer reads simulation state (grid tensors + registry tensors) to draw.
-
-PERFORMANCE PRINCIPLE (VERY IMPORTANT)
---------------------------------------------------------------------------------
-In this project the simulation runs on the GPU (via PyTorch tensors), but the GUI
-(Pygame) runs on the CPU. Copying data from GPU to CPU forces synchronization
-and is expensive. If we do that every frame, the UI will stutter.
-
-So we:
-- Maintain CPU-side caches (numpy arrays) for only the minimal data needed to draw.
-- Refresh those caches only once every N frames (configurable).
-
-This is a common pattern in real-time systems:
-- Producer (GPU simulation) generates fast state updates.
-- Consumer (CPU renderer) samples the state at a manageable cadence.
-
-================================================================================
-BEGINNER-FRIENDLY NOTES
---------------------------------------------------------------------------------
-- Pygame is a 2D graphics library: you "draw" shapes/images onto a Surface, then
-  present it to the screen with `pygame.display.flip()`.
-
-- A "grid world" here means:
-  - There is a 2D map of H x W cells.
-  - Each cell can contain terrain (empty, wall, zones) and/or agents.
-
-- A "camera" converts coordinates:
-  - World/grid coordinates: (x,y) in cells
-  - Screen coordinates: pixel positions in the window
-  This lets you pan and zoom.
-
-================================================================================
-ADVANCED NOTES
---------------------------------------------------------------------------------
-- Static background caching: draw terrain once into a Surface, reuse it.
-- UI caching: caching rendered text avoids expensive font rendering each frame.
-- Monkey-patching PPO: hooking record_step allows tracking per-agent score without
-  rewriting the PPO trainer (but must be done carefully to preserve behavior).
-
-================================================================================
-"""
+"""Real-time viewer for Neural Abyss."""
 
 from __future__ import annotations
 
@@ -87,9 +28,7 @@ from engine.agent_registry import (
     COL_HP_MAX, COL_VISION, COL_ATK, COL_AGENT_ID
 )
 
-# ==============================================================================
 # Constants & colour palette
-# ==============================================================================
 FONT_NAME = "consolas"
 
 # Colors stored as (R, G, B). Some overlays use (R, G, B, A) for alpha blending.
@@ -170,9 +109,7 @@ RAY_COLORS = {
 }
 
 
-# ==============================================================================
 # Small safety helpers for color handling
-# ==============================================================================
 def _clamp_u8(x) -> int:
     """
     Clamp any value to the integer range [0, 255].
@@ -215,9 +152,7 @@ def _rgb(col) -> tuple[int, int, int]:
     return (_clamp_u8(r), _clamp_u8(g), _clamp_u8(b))
 
 
-# ==============================================================================
 # Utility functions
-# ==============================================================================
 def _center_window():
     """
     Hint to SDL (the backend library used by Pygame) to center the window.
@@ -256,9 +191,7 @@ def _param_count(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-# ==============================================================================
 # Text caching
-# ==============================================================================
 class TextCache:
     """
     Caches both pygame.Font objects (per size) and rendered text Surfaces.
@@ -332,9 +265,7 @@ class TextCache:
         return self.cache[key]
 
 
-# ==============================================================================
 # Layout management
-# ==============================================================================
 class LayoutManager:
     """
     Computes rectangles (pygame.Rect) for:
@@ -394,9 +325,7 @@ class LayoutManager:
         return pygame.Rect(0, self.viewer.Hpix - 126, self.viewer.Wpix, 126)
 
 
-# ==============================================================================
 # World renderer
-# ==============================================================================
 class WorldRenderer:
     """
     Draws the world grid, agents, and overlays into the Pygame window.
@@ -583,9 +512,7 @@ class WorldRenderer:
         # Cell size in pixels (depends on camera zoom)
         c = self.cam.cell_px
 
-        # ----------------------------------------------------------------------
         # Control point outlines
-        # ----------------------------------------------------------------------
         # Draw into an alpha surface so we can overlay semi-transparent outlines.
         cp_overlay = pygame.Surface(wrect.size, pygame.SRCALPHA)
 
@@ -620,9 +547,7 @@ class WorldRenderer:
 
         surf.blit(cp_overlay, wrect.topleft)
 
-        # ----------------------------------------------------------------------
         # Agents
-        # ----------------------------------------------------------------------
         for slot_id in state_data["alive_indices"]:
             entry = state_data["agent_map"].get(slot_id, None)
             if entry is None:
@@ -656,9 +581,7 @@ class WorldRenderer:
                     max(1, c // 6),
                 )
 
-        # ----------------------------------------------------------------------
         # Optional overlays controlled by flags/toggles
-        # ----------------------------------------------------------------------
         if self.viewer.battle_view_enabled:
             self._draw_hp_bars(surf, wrect, c, state_data)
         if self.viewer.show_brain_types:
@@ -934,9 +857,7 @@ class WorldRenderer:
             pygame.draw.line(surf, color, start_pos_screen, end_pos_screen, 1)
 
 
-# ==============================================================================
 # HUD Panel (bottom)
-# ==============================================================================
 class HudPanel:
     """
     Bottom bar rendering: tick counter, pause/speed indicator, team stats,
@@ -1144,9 +1065,7 @@ class HudPanel:
         )
 
 
-# ==============================================================================
 # Side Panel (right)
-# ==============================================================================
 class SidePanel:
     """
     Right panel:
@@ -1334,9 +1253,7 @@ class SidePanel:
         self._draw_legend(surf, x, y)
 
 
-# ==============================================================================
 # Minimap
-# ==============================================================================
 class Minimap:
     """
     Displays a small overview of the map:
@@ -1392,9 +1309,7 @@ class Minimap:
         pygame.draw.rect(surf, COLORS["border"], map_rect, 1)
 
 
-# ==============================================================================
 # Input handling
-# ==============================================================================
 class InputHandler:
     """
     Central event handler for the Viewer.
@@ -1562,9 +1477,7 @@ class InputHandler:
         return running, advance_tick
 
 
-# ==============================================================================
 # Animation manager (placeholder)
-# ==============================================================================
 class AnimationManager:
     """
     Simple placeholder for transient animations (e.g., damage flashes).
@@ -1600,9 +1513,7 @@ class AnimationManager:
                 )
 
 
-# ==============================================================================
 # Main Viewer class
-# ==============================================================================
 class Viewer:
     """
     Main application window: runs the Pygame loop and coordinates everything.
@@ -1625,7 +1536,7 @@ class Viewer:
 
         # Pygame init sets up SDL + subsystems
         pygame.init()
-        pygame.display.set_caption("Neural Siege")
+        pygame.display.set_caption("Neural Abyss")
 
         self.grid = grid
         self.margin = 8
@@ -1903,9 +1814,7 @@ class Viewer:
             self._set_zone_status_message(f"Manual catastrophe rejected: {pattern_key}")
         return changed
 
-    # ----------------------------------------------------------------------
     # Fast click picking (no GPU sync in the common case)
-    # ----------------------------------------------------------------------
     def fast_grid_pick_slot(self, gx: int, gy: int) -> Optional[int]:
         """
         Return the agent slot ID at grid cell (gx, gy) using cached id grid.
@@ -1930,9 +1839,7 @@ class Viewer:
 
         return None
 
-    # ----------------------------------------------------------------------
     # State refresh (bulk GPU->CPU copy)
-    # ----------------------------------------------------------------------
     def _refresh_state_cpu(self):
         """
         Copy the minimal data needed for rendering/picking from GPU to CPU.
@@ -2013,9 +1920,7 @@ class Viewer:
                 "agent_map": self._cached_agent_map,
             }
 
-    # ----------------------------------------------------------------------
     # PPO score hook (accumulate per-agent rewards)
-    # ----------------------------------------------------------------------
     def _install_score_hook(self, engine, registry):
         """
         Monkey-patch the PPO trainer's record_step() method to collect rewards.
@@ -2061,9 +1966,7 @@ class Viewer:
 
         engine._ppo.record_step = record_step_with_score_tracking
 
-    # ----------------------------------------------------------------------
     # Main run loop
-    # ----------------------------------------------------------------------
     def run(
         self,
         engine,
@@ -2118,14 +2021,10 @@ class Viewer:
         self._last_pick_refresh_frame = frame_count
 
         while running:
-            # ------------------------------------------------------------------
             # 1) Input phase (selection, toggles, camera)
-            # ------------------------------------------------------------------
             running, advance_tick = self.input_handler.handle()
 
-            # ------------------------------------------------------------------
             # 2) Manual checkpoint save (safe between ticks)
-            # ------------------------------------------------------------------
             if self.save_requested:
                 self.save_requested = False
 
@@ -2165,9 +2064,7 @@ class Viewer:
                         self._ckpt_last_status = f"Checkpoint FAILED: {type(ex).__name__}: {ex}"
                         print("[checkpoint]", self._ckpt_last_status)
 
-            # ------------------------------------------------------------------
             # 3) Decide how many simulation ticks to run this frame
-            # ------------------------------------------------------------------
             num_ticks_this_frame = 0
 
             if not self.paused:
@@ -2183,16 +2080,12 @@ class Viewer:
                 # Single step when paused
                 num_ticks_this_frame = 1
 
-            # ------------------------------------------------------------------
             # 4) Run simulation ticks
-            # ------------------------------------------------------------------
             for _ in range(num_ticks_this_frame):
                 engine.run_tick()
                 self.hud_panel.update()
 
-                # ------------------------------------------------------------------
                 # 4a) Automatic checkpointing (trigger file + periodic)
-                # ------------------------------------------------------------------
                 if ckpt_mgr is not None:
                     trig = Path(run_dir) / str(getattr(config, "CHECKPOINT_TRIGGER_FILE", "checkpoint.now"))
 
@@ -2214,9 +2107,7 @@ class Viewer:
                         keep_last_n=int(getattr(config, "CHECKPOINT_KEEP_LAST_N", 1)),
                     )
 
-            # ------------------------------------------------------------------
             # 5) Refresh CPU state caches if needed (performance-critical)
-            # ------------------------------------------------------------------
             if (frame_count - self._last_state_refresh_frame) >= self.STATE_REFRESH_EVERY_FRAMES:
                 self._refresh_state_cpu()
                 self._last_state_refresh_frame = frame_count
@@ -2231,9 +2122,7 @@ class Viewer:
                 self._refresh_state_cpu()
                 state_data = self._cached_state_data
 
-            # ------------------------------------------------------------------
             # 6) Render phase
-            # ------------------------------------------------------------------
             self.world_renderer.maybe_refresh_zone_cache(engine)
             self.screen.fill(COLORS["bg"])
             self.world_renderer.draw(self.screen, state_data)
@@ -2252,4 +2141,3 @@ class Viewer:
                 running = False
 
         pygame.quit()
-

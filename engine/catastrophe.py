@@ -536,9 +536,7 @@ class HealZoneCatastropheController:
             "last_skip_reason": str(self.last_skip_reason),
         }
 
-    # ------------------------------------------------------------------
     # Internal runtime helpers
-    # ------------------------------------------------------------------
     def _update_dynamic_signal(self, runtime_signal: Optional[CatastropheRuntimeSignal]) -> None:
         if runtime_signal is None:
             return
@@ -794,4 +792,3 @@ def _opt_int(v: Any) -> Optional[int]:
     if v is None:
         return None
     return int(v)
-

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-Infinite_War_Simulation configuration module.
+Neural Abyss configuration module.
 
 This file is written to serve two purposes at once:
 1. executable runtime configuration, and
@@ -327,7 +327,7 @@ CHECKPOINT_TRIGGER_FILE: str = _env_str("FWS_CHECKPOINT_TRIGGER_FILE", "checkpoi
 # Print status every N ticks in headless mode.
 # 0 disables periodic prints.
 # Lower values give more feedback but more console noise.
-HEADLESS_PRINT_EVERY_TICKS: int = _env_int("FWS_HEADLESS_PRINT_EVERY_TICKS", 1000)
+HEADLESS_PRINT_EVERY_TICKS: int = _env_int("FWS_HEADLESS_PRINT_EVERY_TICKS", 2000)
 
 # HEADLESS_PRINT_LEVEL
 # --------------------
@@ -410,7 +410,7 @@ TELEMETRY_LOG_BIRTHS: bool = _env_bool("FWS_TELEM_BIRTHS", True)
 TELEMETRY_LOG_DEATHS: bool = _env_bool("FWS_TELEM_DEATHS", True)
 TELEMETRY_LOG_DAMAGE: bool = _env_bool("FWS_TELEM_DAMAGE", True)
 TELEMETRY_LOG_KILLS: bool = _env_bool("FWS_TELEM_KILLS", True)
-TELEMETRY_LOG_MOVES: bool = _env_bool("FWS_TELEM_MOVES", True)
+TELEMETRY_LOG_MOVES: bool = _env_bool("FWS_TELEM_MOVES", False)
 TELEMETRY_LOG_PPO: bool = _env_bool("FWS_TELEM_PPO", True)
 
 # TELEMETRY_PPO_RICH_CSV
@@ -564,17 +564,17 @@ VMAP_STACK_CACHE_MAX: int = _env_int("FWS_VMAP_STACK_CACHE_MAX", 128)
 # Grid size.
 # Increase for larger, sparser, slower worlds.
 # Decrease for faster, denser experiments.
-GRID_WIDTH: int = _env_int("FWS_GRID_W", 100)
-GRID_HEIGHT: int = _env_int("FWS_GRID_H", 100)
+GRID_WIDTH: int = _env_int("FWS_GRID_W", 128)
+GRID_HEIGHT: int = _env_int("FWS_GRID_H", 128)
 
 # Starting population per team.
 # Increase for richer population dynamics and heavier compute.
 # Decrease for fast debugging.
-START_AGENTS_PER_TEAM: int = _env_int("FWS_START_PER_TEAM", 150)
+START_AGENTS_PER_TEAM: int = _env_int("FWS_START_PER_TEAM", 200)
 
 # Total registry slot capacity.
 # Must be large enough for the starting population plus respawn dynamics.
-MAX_AGENTS: int = _env_int("FWS_MAX_AGENTS", 400)
+MAX_AGENTS: int = _env_int("FWS_MAX_AGENTS", 500)
 
 # Run length cap.
 # 0 means unlimited.
@@ -595,11 +595,11 @@ AGENT_FEATURES: int = 10
 # Random wall count.
 # Raise for more obstacle structure and tactical routing.
 # Lower for more open battlefields.
-RANDOM_WALLS: int = _env_int("FWS_RAND_WALLS", 12)
+RANDOM_WALLS: int = _env_int("FWS_RAND_WALLS", 18)
 
 # Wall segment length bounds.
 WALL_SEG_MIN: int = _env_int("FWS_WALL_SEG_MIN", 5)
-WALL_SEG_MAX: int = _env_int("FWS_WALL_SEG_MAX", 57)
+WALL_SEG_MAX: int = _env_int("FWS_WALL_SEG_MAX", 40)
 
 # Boundary margin for wall placement.
 WALL_AVOID_MARGIN: int = _env_int("FWS_WALL_MARGIN", 3)
@@ -613,7 +613,7 @@ MAP_WALL_GAP_PROB: float = _env_float("FWS_MAP_WALL_GAP_PROB", 0.20)
 # Heal-zone parameters.
 # Raise count/size/rate when sustain should matter more.
 # Lower them when combat lethality or territorial churn should dominate.
-HEAL_ZONE_COUNT: int = _env_int("FWS_HEAL_COUNT", 15)
+HEAL_ZONE_COUNT: int = _env_int("FWS_HEAL_COUNT", 10)
 HEAL_ZONE_SIZE_RATIO: float = _env_float("FWS_HEAL_SIZE_RATIO", 5 / 64)
 HEAL_RATE: float = _env_float("FWS_HEAL_RATE", 0.003)
 
@@ -625,7 +625,7 @@ HEAL_RATE: float = _env_float("FWS_HEAL_RATE", 0.003)
 # Enable or disable the scheduler entirely.
 # Turn on when heal camping is too stable.
 # Leave off when studying the base heal-zone ecology.
-CATASTROPHE_SCHEDULER_ENABLED: bool = _env_bool("FWS_CATASTROPHE_ENABLED", False)
+CATASTROPHE_SCHEDULER_ENABLED: bool = _env_bool("FWS_CATASTROPHE_ENABLED", True)
 
 # Scheduler mode.
 # Valid values:
@@ -633,7 +633,7 @@ CATASTROPHE_SCHEDULER_ENABLED: bool = _env_bool("FWS_CATASTROPHE_ENABLED", False
 #   "dynamic"  : triggered by sustained heal occupancy signal
 # Use periodic for simple controlled experiments.
 # Use dynamic when you want response to emergent behavior.
-CATASTROPHE_SCHEDULER_MODE: str = _env_str("FWS_CATASTROPHE_MODE", "periodic").strip().lower()
+CATASTROPHE_SCHEDULER_MODE: str = _env_str("FWS_CATASTROPHE_MODE", "dynamic").strip().lower()
 if CATASTROPHE_SCHEDULER_MODE not in ("periodic", "dynamic"):
     _config_issue(
         f"Invalid FWS_CATASTROPHE_MODE={CATASTROPHE_SCHEDULER_MODE!r}; using 'periodic'"
@@ -641,10 +641,10 @@ if CATASTROPHE_SCHEDULER_MODE not in ("periodic", "dynamic"):
     CATASTROPHE_SCHEDULER_MODE = "periodic"
 
 # Cooldown after one catastrophe clears.
-CATASTROPHE_COOLDOWN_TICKS: int = max(0, _env_int("FWS_CATASTROPHE_COOLDOWN_TICKS", 25_000))
+CATASTROPHE_COOLDOWN_TICKS: int = max(0, _env_int("FWS_CATASTROPHE_COOLDOWN_TICKS", 12_000))
 
 # Duration of one catastrophe event.
-CATASTROPHE_DURATION_TICKS: int = max(1, _env_int("FWS_CATASTROPHE_DURATION_TICKS", 5_000))
+CATASTROPHE_DURATION_TICKS: int = max(1, _env_int("FWS_CATASTROPHE_DURATION_TICKS", 3_000))
 
 # Never suppress all heal zones; keep at least this many active.
 CATASTROPHE_MIN_ACTIVE_HEAL_ZONES: int = max(1, _env_int("FWS_CATASTROPHE_MIN_ACTIVE_HEAL_ZONES", 1))
@@ -692,7 +692,7 @@ CATASTROPHE_CLUSTER_SURVIVOR_FRACTION: float = _env_float(
 )
 
 # Log catastrophe trigger/clear events to console.
-CATASTROPHE_LOG_EVENTS: bool = _env_bool("FWS_CATASTROPHE_LOG_EVENTS", False)
+CATASTROPHE_LOG_EVENTS: bool = _env_bool("FWS_CATASTROPHE_LOG_EVENTS", True)
 
 
 # Capture points.
@@ -700,7 +700,7 @@ CATASTROPHE_LOG_EVENTS: bool = _env_bool("FWS_CATASTROPHE_LOG_EVENTS", False)
 # Lower reward to make CP mostly informational/spatial rather than score-driving.
 CP_COUNT: int = _env_int("FWS_CP_COUNT", 7)
 CP_SIZE_RATIO: float = _env_float("FWS_CP_SIZE_RATIO", 0.08)
-CP_REWARD_PER_TICK: float = _env_float("FWS_CP_REWARD", 0.0)
+CP_REWARD_PER_TICK: float = _env_float("FWS_CP_REWARD", 0.005)
 
 
 # =============================================================================
@@ -718,7 +718,7 @@ UNIT_ARCHER: int = UNIT_ARCHER_ID
 MAX_HP: float = _env_float("FWS_MAX_HP", 1.0)
 SOLDIER_HP: float = _env_float("FWS_SOLDIER_HP", 1.0)
 ARCHER_HP: float = _env_float("FWS_ARCHER_HP", 0.65)
-BASE_ATK: float = _env_float("FWS_BASE_ATK", 0.20)
+BASE_ATK: float = _env_float("FWS_BASE_ATK", 0.18)
 SOLDIER_ATK: float = _env_float("FWS_SOLDIER_ATK", 0.15)
 ARCHER_ATK: float = _env_float("FWS_ARCHER_ATK", 0.10)
 MAX_ATK: float = max(SOLDIER_ATK, ARCHER_ATK, BASE_ATK, 1e-6)
@@ -737,8 +737,8 @@ META_ARCHER_HP_PER_TICK: float = _env_float("FWS_META_ARCHER", 0.0010)
 # Vision ranges.
 # Raise to make agents more informed and long-range aware.
 # Lower to make combat more local and uncertain.
-VISION_RANGE_SOLDIER: int = _env_int("FWS_VISION_SOLDIER", 6)
-VISION_RANGE_ARCHER: int = _env_int("FWS_VISION_ARCHER", 14)
+VISION_RANGE_SOLDIER: int = _env_int("FWS_VISION_SOLDIER", 8)
+VISION_RANGE_ARCHER: int = _env_int("FWS_VISION_ARCHER", 16)
 
 # Class-specific vision lookup used elsewhere in the engine.
 VISION_RANGE_BY_UNIT = {
@@ -755,7 +755,7 @@ RAY_MAX_STEPS: int = RAYCAST_MAX_STEPS
 # Radius for broader neighborhood context features.
 # Raise when richer local-context sensing is desired.
 # Lower when simplifying observation context.
-INSTINCT_RADIUS: int = _env_int("FWS_INSTINCT_RADIUS", 16)
+INSTINCT_RADIUS: int = _env_int("FWS_INSTINCT_RADIUS", 20)
 
 
 # =============================================================================
@@ -826,10 +826,10 @@ RESPAWN_ENABLED: bool = _env_bool("FWS_RESPAWN", True)
 RESP_FLOOR_PER_TEAM: int = _env_int("FWS_RESP_FLOOR_PER_TEAM", 100)
 
 # Hard cap on respawns per tick.
-RESP_MAX_PER_TICK: int = _env_int("FWS_RESP_MAX_PER_TICK", 1)
+RESP_MAX_PER_TICK: int = _env_int("FWS_RESP_MAX_PER_TICK", 3)
 
 # Periodic reinforcement window.
-RESP_PERIOD_TICKS: int = _env_int("FWS_RESP_PERIOD_TICKS", 20_000)
+RESP_PERIOD_TICKS: int = _env_int("FWS_RESP_PERIOD_TICKS", 10_000)
 RESP_PERIOD_BUDGET: int = _env_int("FWS_RESP_PERIOD_BUDGET", 40)
 
 # Cooldown hysteresis to avoid rapid refill oscillation.
@@ -857,13 +857,13 @@ SPAWN_ARCHER_RATIO: float = _env_float("FWS_SPAWN_ARCHER_RATIO", 0.35)
 # Core respawn probabilities and placement search budget.
 RESPAWN_PROB_PER_DEAD: float = _env_float("FWS_RESPAWN_PROB", 0.05)
 RESPAWN_SPAWN_TRIES: int = _env_int("FWS_RESPAWN_TRIES", 200)
-RESPAWN_MUTATION_STD: float = _env_float("FWS_MUT_STD", 0.05)
+RESPAWN_MUTATION_STD: float = _env_float("FWS_MUT_STD", 0.08)
 RESPAWN_CLONE_PROB: float = _env_float("FWS_CLONE_PROB", 1.0)
 RESPAWN_USE_TEAM_ELITE: bool = _env_bool("FWS_TEAM_ELITE", True)
 RESPAWN_RESET_OPT_ON_RESPAWN: bool = _env_bool("FWS_RESET_OPT", True)
 RESPAWN_JITTER_RADIUS: int = _env_int("FWS_RESP_JITTER", 1)
-RESPAWN_COOLDOWN_TICKS: int = _env_int("FWS_RESPAWN_CD", 500)
-RESPAWN_BATCH_PER_TEAM: int = _env_int("FWS_RESPAWN_BATCH", 1)
+RESPAWN_COOLDOWN_TICKS: int = _env_int("FWS_RESPAWN_CD", 300)
+RESPAWN_BATCH_PER_TEAM: int = _env_int("FWS_RESPAWN_BATCH", 2)
 RESPAWN_ARCHER_SHARE: float = _env_float("FWS_RESPAWN_ARCHER_SHARE", 0.50)
 RESPAWN_INTERIOR_BIAS: float = _env_float("FWS_RESPAWN_INTERIOR_BIAS", 0.10)
 
@@ -930,13 +930,13 @@ RESPAWN_SPAWN_NEAR_PARENT_RADIUS: int = _env_int(
 # =============================================================================
 
 # Team-level combat rewards/penalties.
-TEAM_KILL_REWARD: float = _env_float("FWS_REW_KILL", 0.0)
-TEAM_DMG_DEALT_REWARD: float = _env_float("FWS_REW_DMG_DEALT", 0.00)
-TEAM_DEATH_PENALTY: float = _env_float("FWS_REW_DEATH", 0.0)
-TEAM_DMG_TAKEN_PENALTY: float = _env_float("FWS_REW_DMG_TAKEN", 0.00)
+TEAM_KILL_REWARD: float = _env_float("FWS_REW_KILL", 1.0)
+TEAM_DMG_DEALT_REWARD: float = _env_float("FWS_REW_DMG_DEALT", 0.30)
+TEAM_DEATH_PENALTY: float = _env_float("FWS_REW_DEATH", -0.5)
+TEAM_DMG_TAKEN_PENALTY: float = _env_float("FWS_REW_DMG_TAKEN", -0.10)
 
 # PPO dense HP reward.
-PPO_REWARD_HP_TICK: float = _env_float("FWS_PPO_REW_HP_TICK", 0.0)
+PPO_REWARD_HP_TICK: float = _env_float("FWS_PPO_REW_HP_TICK", 0.005)
 
 # PPO_HP_REWARD_MODE
 # ------------------
@@ -955,11 +955,11 @@ PPO_HP_REWARD_MODE: str = _env_str("FWS_PPO_HP_REWARD_MODE", "raw").strip().lowe
 PPO_HP_REWARD_THRESHOLD: float = _env_float("FWS_PPO_HP_REWARD_THRESHOLD", 10)
 
 # Individual PPO reward terms.
-PPO_REWARD_DMG_DEALT_INDIVIDUAL: float = _env_float("FWS_PPO_REW_DMG_DEALT_AGENT", 0.0)
-PPO_PENALTY_DMG_TAKEN_INDIVIDUAL: float = _env_float("FWS_PPO_PEN_DMG_TAKEN_AGENT", 0.0)
-PPO_REWARD_KILL_INDIVIDUAL: float = _env_float("FWS_PPO_REW_KILL_AGENT", 1.0)
-PPO_REWARD_DEATH: float = _env_float("FWS_PPO_REW_DEATH", 0.0)
-PPO_REWARD_CONTESTED_CP: float = _env_float("FWS_PPO_REW_CONTEST", 20)
+PPO_REWARD_DMG_DEALT_INDIVIDUAL: float = _env_float("FWS_PPO_REW_DMG_DEALT_AGENT", 0.5)
+PPO_PENALTY_DMG_TAKEN_INDIVIDUAL: float = _env_float("FWS_PPO_PEN_DMG_TAKEN_AGENT", -0.2)
+PPO_REWARD_KILL_INDIVIDUAL: float = _env_float("FWS_PPO_REW_KILL_AGENT", 2.0)
+PPO_REWARD_DEATH: float = _env_float("FWS_PPO_REW_DEATH", -1.0)
+PPO_REWARD_CONTESTED_CP: float = _env_float("FWS_PPO_REW_CONTEST", 0.5)
 
 
 # =============================================================================
@@ -991,11 +991,11 @@ PPO_ENTROPY_COEF: float = _env_float("FWS_PPO_ENTROPY", 0.05)
 PPO_VALUE_COEF: float = _env_float("FWS_PPO_VCOEF", 0.5)
 PPO_EPOCHS: int = _env_int("FWS_PPO_EPOCHS", 4)
 PPO_MINIBATCHES: int = _env_int("FWS_PPO_MINIB", 8)
-PPO_MAX_GRAD_NORM: float = _env_float("FWS_PPO_MAXGN", 0.5)
+PPO_MAX_GRAD_NORM: float = _env_float("FWS_PPO_MAXGN", 1.0)
 PPO_TARGET_KL: float = _env_float("FWS_PPO_TKL", 0.02)
 PPO_GAMMA: float = _env_float("FWS_PPO_GAMMA", 0.995)
 PPO_LAMBDA: float = _env_float("FWS_PPO_LAMBDA", 0.95)
-PPO_UPDATE_TICKS: int = _env_int("FWS_PPO_UPDATE_TICKS", 5)
+PPO_UPDATE_TICKS: int = _env_int("FWS_PPO_UPDATE_TICKS", 3)
 
 # Compatibility alias.
 # If the older env variable is set but the newer one is not, backfill it.
@@ -1067,11 +1067,11 @@ TEAM_BRAIN_MIX_SEQUENCE = tuple(
 )
 
 # Weighted probabilities used by random/probabilistic mixing.
-TEAM_BRAIN_MIX_P_WHISPERING_ABYSS: float = _env_float("FWS_TEAM_BRAIN_P_WHISPERING_ABYSS", 0.20)
-TEAM_BRAIN_MIX_P_VEIL_OF_ECHOES: float = _env_float("FWS_TEAM_BRAIN_P_VEIL_OF_ECHOES", 0.20)
-TEAM_BRAIN_MIX_P_CATHEDRAL_OF_ASH: float = _env_float("FWS_TEAM_BRAIN_P_CATHEDRAL_OF_ASH", 0.20)
-TEAM_BRAIN_MIX_P_DREAMER_IN_BLACK_FOG: float = _env_float("FWS_TEAM_BRAIN_P_DREAMER_IN_BLACK_FOG", 0.20)
-TEAM_BRAIN_MIX_P_OBSIDIAN_PULSE: float = _env_float("FWS_TEAM_BRAIN_P_OBSIDIAN_PULSE", 0.20)
+TEAM_BRAIN_MIX_P_WHISPERING_ABYSS: float = _env_float("FWS_TEAM_BRAIN_P_WHISPERING_ABYSS", 0.10)
+TEAM_BRAIN_MIX_P_VEIL_OF_ECHOES: float = _env_float("FWS_TEAM_BRAIN_P_VEIL_OF_ECHOES", 0.15)
+TEAM_BRAIN_MIX_P_CATHEDRAL_OF_ASH: float = _env_float("FWS_TEAM_BRAIN_P_CATHEDRAL_OF_ASH", 0.25)
+TEAM_BRAIN_MIX_P_DREAMER_IN_BLACK_FOG: float = _env_float("FWS_TEAM_BRAIN_P_DREAMER_IN_BLACK_FOG", 0.25)
+TEAM_BRAIN_MIX_P_OBSIDIAN_PULSE: float = _env_float("FWS_TEAM_BRAIN_P_OBSIDIAN_PULSE", 0.25)
 
 # Separate seed for team-brain mixing logic.
 # Set explicitly when you want architecture-mixture randomness decoupled from the
@@ -1090,7 +1090,7 @@ TEAM_BRAIN_MIX_SEED: int = _env_int("FWS_TEAM_BRAIN_MIX_SEED", int(globals().get
 # Shared embedding width for the two-token input contract.
 # Increase when you want more representational capacity.
 # Decrease for lighter, faster models.
-BRAIN_MLP_D_MODEL: int = _env_int("FWS_BRAIN_MLP_DMODEL", 32)
+BRAIN_MLP_D_MODEL: int = _env_int("FWS_BRAIN_MLP_DMODEL", 48)
 
 # Derived final input width = 2 tokens * d_model.
 BRAIN_MLP_FINAL_INPUT_WIDTH: int = 2 * BRAIN_MLP_D_MODEL
@@ -1557,7 +1557,7 @@ _validate_config_invariants()
 def summary_str() -> str:
     """Return a compact one-line summary of the active run configuration."""
     return (
-        f"[Neural Siege: Custom] "
+        f"[Neural Abyss] "
         f"dev={DEVICE.type} "
         f"grid={GRID_WIDTH}x{GRID_HEIGHT} "
         f"start={START_AGENTS_PER_TEAM}/team "

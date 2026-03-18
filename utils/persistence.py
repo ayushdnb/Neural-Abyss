@@ -1,60 +1,4 @@
-"""
-A **Windows-friendly**, **multiprocessing-based** background writer that records simulation/training
-results to disk *without* stalling the main simulation loop.
-
-Why this file exists (high-level)
----------------------------------
-In simulations, reinforcement learning training loops, or real-time game-like engines, the main loop
-often runs at high frequency (e.g., tens of ticks per second or more). Writing to disk (CSV/JSON)
-can be unexpectedly expensive because:
-
-1) Disk I/O is slow relative to CPU/GPU compute.
-2) Python file writes can block.
-3) CSV writers and frequent flushes can introduce latency spikes.
-4) If you log a lot, the main loop may jitter (uneven tick time), causing unstable training or a laggy sim.
-
-So the common engineering solution is:
-- Put disk I/O into a **separate process**
-- Send "write requests" (messages) from the main process to the writer process via a **Queue**
-- The main process continues running almost uninterrupted.
-
-This is exactly what this module implements.
-
-Key architecture
-----------------
-Main Process (simulation/training loop)
-    |
-    |  (Queue message: "write this tick row")
-    V
-Writer Process (background)
-    |
-    |  writes CSV/JSON to disk
-    V
-Filesystem (results/sim_YYYY-MM-DD_HH-MM-SS/...)
-
-Important multiprocessing context (esp. on Windows)
----------------------------------------------------
-On Windows, `multiprocessing` uses "spawn" (new Python process starts fresh) rather than "fork".
-That means:
-- The child process does NOT automatically inherit open file handles safely.
-- You must open files inside the child process, not in the parent.
-- Functions and objects used as process targets must be importable at top level.
-
-This code follows those rules.
-
-Performance philosophy
-----------------------
-- The main loop should never block on logging.
-- If the queue is full, it's better to drop logs than to freeze the simulation.
-  (This is a conscious choice: "best-effort" telemetry.)
-
-No math-heavy content here
---------------------------
-There is no advanced math in this module. The core concepts are systems/programming concepts:
-- Producer/consumer queue
-- Inter-process communication (IPC)
-- Event/message-driven I/O
-"""
+"""Background writer process for simulation outputs."""
 
 from __future__ import annotations
 
@@ -66,21 +10,16 @@ import os
 import json
 import csv
 import datetime
-import queue  # IMPORTANT: this is the *standard library* "queue" module (for queue.Empty/queue.Full)
+import queue
 
 
-# =============================================================================
 # Message Protocol (Typed "commands" sent to the writer process)
-# =============================================================================
-#
 # We define a small set of message types. The main process will put these message
 # objects into a multiprocessing.Queue. The writer process will read them and act.
-#
 # This pattern is often called:
 # - "message passing"
 # - "command pattern"
 # - "actor model" (loosely)
-#
 # The purpose is to avoid sending raw tuples like ("write_tick", row) everywhere,
 # and instead have explicit, typed message classes.
 # This improves readability, correctness, and makes refactors safer.
@@ -172,9 +111,7 @@ class _MsgClose:
     pass
 
 
-# =============================================================================
 # Background writer loop (runs inside the child process)
-# =============================================================================
 
 def _writer_loop(q: Queue) -> None:
     """
@@ -211,12 +148,7 @@ def _writer_loop(q: Queue) -> None:
     deaths_fieldnames_expected = None
     strict_csv_schema = False
 
-    # --- NEW: Ignore Ctrl+C in this subprocess; main process coordinates shutdown. ---
-    # Why:
-    # - On Windows, Ctrl+C can be delivered to *all* processes in the console process group.
-    # - The main process is responsible for coordinated shutdown and for sending _MsgClose.
-    # - If this subprocess reacted to SIGINT by raising KeyboardInterrupt and exiting, you could
-    #   lose buffered logs and/or leave the main process confused about writer state.
+        # The parent process owns shutdown coordination and sends _MsgClose.
     try:
         import signal as _signal
         _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
@@ -226,9 +158,7 @@ def _writer_loop(q: Queue) -> None:
 
     try:
         while True:
-            # -----------------------------------------------------------------
             # 1) Receive message (non-busy waiting)
-            # -----------------------------------------------------------------
             try:
                 # Wait up to 0.2 seconds for a message.
                 # If nothing arrives, we loop again.
@@ -241,9 +171,7 @@ def _writer_loop(q: Queue) -> None:
                 # No message available right now.
                 continue
 
-            # -----------------------------------------------------------------
             # 2) Handle init message
-            # -----------------------------------------------------------------
             if isinstance(msg, _MsgInit):
                 run_dir = msg.run_dir
                 append_existing = bool(getattr(msg, "append_existing", False))
@@ -298,9 +226,7 @@ def _writer_loop(q: Queue) -> None:
                 else:
                     deaths_fieldnames_expected = None
 
-            # -----------------------------------------------------------------
             # 3) Handle tick stats row
-            # -----------------------------------------------------------------
             elif isinstance(msg, _MsgTickRow):
                 # Lazily create CSV writer on first row to determine the columns.
                 if stats_writer is None:
@@ -322,9 +248,7 @@ def _writer_loop(q: Queue) -> None:
                 # Flush to ensure row hits disk.
                 stats_fp.flush()
 
-            # -----------------------------------------------------------------
             # 4) Handle deaths batch
-            # -----------------------------------------------------------------
             elif isinstance(msg, _MsgDeaths):
                 # If list is empty, nothing to write.
                 if not msg.rows:
@@ -346,14 +270,11 @@ def _writer_loop(q: Queue) -> None:
                 deaths_writer.writerows(msg.rows)
                 deaths_fp.flush()
 
-            # -----------------------------------------------------------------
             # 5) Handle model metadata save
-            # -----------------------------------------------------------------
             elif isinstance(msg, _MsgSaveModel):
                 # "Torch-agnostic" metadata:
                 # - If an object has .size() (like a torch tensor), record its shape as list(...)
                 # - Else store a generic marker
-                #
                 # This avoids importing torch in this subprocess.
                 meta = {
                     k: (list(v.size()) if hasattr(v, "size") else "tensor")
@@ -366,9 +287,7 @@ def _writer_loop(q: Queue) -> None:
                 with open(os.path.join(run_dir, f"{msg.label}.state_meta.json"), "w", encoding="utf-8") as f:
                     json.dump(meta, f, indent=2)
 
-            # -----------------------------------------------------------------
             # 6) Handle shutdown
-            # -----------------------------------------------------------------
             elif isinstance(msg, _MsgClose):
                 break
 
@@ -391,9 +310,7 @@ def _writer_loop(q: Queue) -> None:
             pass
 
 
-# =============================================================================
 # Public API (used by the main process)
-# =============================================================================
 
 class ResultsWriter:
     """
@@ -436,7 +353,6 @@ class ResultsWriter:
 
     def __init__(self) -> None:
         # Queue used for IPC (inter-process communication).
-        #
         # maxsize=1024:
         # - Limits memory usage.
         # - Provides backpressure signal (queue.Full).
@@ -504,7 +420,6 @@ class ResultsWriter:
             raise FileNotFoundError(f"append_existing run_dir does not exist: {self.run_dir}")
 
         # Create the background process.
-        #
         # target=_writer_loop: function executed in child process
         # args=(self.q,): pass the Queue object to the child
         self.p = Process(target=_writer_loop, args=(self.q,), daemon=True)

@@ -1,6 +1,6 @@
+"""Grouped forward execution for heterogeneous agent models."""
+
 from __future__ import annotations
-# ^ Postpones evaluation of type hints (PEP 563 / modern Python behavior via __future__).
-#   This helps avoid issues when using forward references (types not yet defined at parse time).
 
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -19,12 +19,9 @@ import config
 #   - VMAP_MIN_BUCKET: minimum bucket size for vmap
 #   - VMAP_DEBUG: print debug messages
 
-# --------------------------------------------------------------------------------------
 # Optional imports from torch.func (PyTorch functional transforms).
-#
 # These APIs may not exist in older or minimal PyTorch builds, so we import them defensively.
 # If the import fails, we set them to None and fall back to a safe Python loop.
-# --------------------------------------------------------------------------------------
 try:
     from torch.func import functional_call, vmap, stack_module_state
 except Exception:
@@ -51,7 +48,6 @@ _VMAP_WARNED: bool = False
 
 
 # Cache for stacked torch.func module state used by the vmap inference path.
-#
 # Safety model:
 # - Cache reuse is keyed by the ordered model identities and an explicit
 #   fingerprint of every parameter/buffer tensor currently owned by those models.
@@ -340,7 +336,6 @@ def _ensemble_forward_vmap(models: List[nn.Module], obs: torch.Tensor) -> Tuple[
     # Stack parameters and buffers from each model:
     # - params_batched: pytree-like structure where each tensor has leading dim K
     # - buffers_batched: same idea for buffers (e.g., running stats in BatchNorm)
-    #
     # The expensive stack_module_state(models) reconstruction is cached as long as
     # the ordered model list and each model's parameter/buffer freshness tokens
     # remain unchanged.
@@ -352,12 +347,10 @@ def _ensemble_forward_vmap(models: List[nn.Module], obs: torch.Tensor) -> Tuple[
         raise RuntimeError(f"vmap: obs must be (K,F). got {tuple(x.shape)} expected K={K}")
 
     # Define a per-model forward function for vmap.
-    #
     # Inputs (per single model i):
     # - params_i: parameters of model i
     # - buffers_i: buffers of model i
     # - x_i: observation for model i (shape (F,))
-    #
     # Output:
     # - logits for model i, shape (A,)
     # - value for model i, scalar

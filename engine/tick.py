@@ -1,54 +1,4 @@
-# Infinite_War_Simulation/engine/tick.py
-# =============================================================================
-# Tick Engine (Combat-First, Vectorized, Multi-Agent RL Simulation)
-# =============================================================================
-#
-# This file implements the **core simulation loop** (“tick loop”) for a large,
-# grid-based, multi-agent environment. The environment is designed to run
-# **thousands of agents in parallel** using **PyTorch tensor operations**,
-# typically on a **GPU (CUDA)**.
-#
-# ---------------------------------------------------------------------------
-# HIGH-LEVEL CONCEPTS (READ THIS FIRST)
-# ---------------------------------------------------------------------------
-#
-# 1) "Tick" / "Frame" / "Step"
-#    A simulation advances in discrete time steps called ticks. Each tick:
-#       - Agents observe the world (Observation construction)
-#       - Agents choose actions (Policy / Neural network forward pass)
-#       - The environment applies physics/game rules (combat, movement, zones)
-#       - Rewards/telemetry are recorded (for RL training and analytics)
-#       - Time advances by 1
-#
-# 2) Vectorization (Why PyTorch?)
-#    The key performance goal is to avoid Python loops over agents.
-#    Instead, we represent agent properties as tensors:
-#       - positions: (N,)
-#       - health:    (N,)
-#       - actions:   (N,)
-#    and compute updates in parallel on GPU.
-#
-# 3) World State Exists in Two Places (CRITICAL INVARIANT)
-#    - Agent registry: per-agent “truth” (positions, hp, team, unit, alive flag)
-#    - Grid tensor: a spatial map used for fast queries (occupancy, hp channel, slot id)
-#
-#    These must remain consistent. Any mismatch can cause subtle bugs:
-#       - “ghost agents” on the grid but dead in registry
-#       - slot-id mismatches
-#       - collisions / combat targeting errors
-#
-# 4) Combat-First Semantics
-#    In THIS engine: combat resolves BEFORE movement.
-#    Consequence:
-#       - An agent killed in combat does NOT get to move in the same tick.
-#    This changes dynamics compared to movement-first engines.
-#
-# 5) PPO Integration (Reinforcement Learning)
-#    PPO (Proximal Policy Optimization) requires collecting trajectories:
-#       - obs_t, action_t, logits_t, value_t, reward_t, done_t, bootstrap_value_t+1
-#    This engine records those per tick (if PPO is enabled).
-#
-# =============================================================================
+"""Core tick loop for simulation state updates."""
 
 from __future__ import annotations
 
@@ -57,14 +7,10 @@ import collections
 import os
 from typing import Dict, Optional, List, Tuple, TYPE_CHECKING
 
-# -------------------------------------------------------------------------
 # PyTorch is used for tensor math and GPU acceleration.
-# -------------------------------------------------------------------------
 import torch
 
-# -------------------------------------------------------------------------
 # Project imports (simulation config + engine subsystems)
-# -------------------------------------------------------------------------
 import config
 from simulation.stats import SimulationStats
 from engine.agent_registry import (
@@ -80,40 +26,30 @@ from engine.catastrophe import CatastropheRuntimeSignal, HealZoneCatastropheCont
 from agent.ensemble import ensemble_forward
 
 
-# -------------------------------------------------------------------------
 # TYPE_CHECKING is True only for static analysis / IDE type checking.
 # This avoids runtime circular imports while still enabling autocomplete.
-# -------------------------------------------------------------------------
 if TYPE_CHECKING:
     from rl.ppo_runtime import PerAgentPPORuntime
 
-# -------------------------------------------------------------------------
 # Optional PPO runtime import:
 # The PPO runtime might not exist / might fail to import in some deployments.
 # In that case, PPO is disabled at runtime.
-# -------------------------------------------------------------------------
 try:
     from rl.ppo_runtime import PerAgentPPORuntime as _PerAgentPPORuntimeRT
 except Exception:
     _PerAgentPPORuntimeRT = None
 
 
-# =============================================================================
 # TickMetrics: per-tick counters (telemetry-like numeric metrics)
-# =============================================================================
-#
 # A dataclass automatically generates:
 #   - __init__
 #   - readable __repr__
 #   - comparisons (optional)
-#
 # Here it is used as a simple “struct” to track what happened in one tick.
-#
 # NOTE ABOUT DESIGN:
 # - These are cheap scalar aggregates (Python ints/floats) updated once per tick.
 # - They are meant for printing/logging/telemetry dashboards, not for training.
 # - Keeping them minimal avoids overhead in the hot loop.
-# =============================================================================
 @dataclass
 class TickMetrics:
     """Holds counters for one simulation tick."""
@@ -142,10 +78,7 @@ class TickMetrics:
     move_conflict_tie: int = 0
 
 
-# =============================================================================
 # TickEngine: the main simulation stepper
-# =============================================================================
-#
 # Responsibilities per tick:
 #   1) Build observations for alive agents
 #   2) Build action masks (legal actions)
@@ -156,19 +89,15 @@ class TickMetrics:
 #   7) Environment effects (healing, metabolism, capture points)
 #   8) PPO logging (if enabled)
 #   9) Respawn dead agents
-#
 # IMPORTANT: This implementation emphasizes:
 #   - GPU parallelism
 #   - deterministic aggregation where duplicate indices occur (e.g., multi-attacker damage)
 #   - invariant checks (optional, debug mode)
-# =============================================================================
 class TickEngine:
-    # =========================================================================
     # CORE THEORY: THE GAME LOOP (Tick Engine)
     # A simulation runs in "Ticks" or frames. Each tick, the engine looks at the
     # world, decides what every entity should do, and then applies the rules of
     # physics/gameplay. This class manages that massive update.
-    #
     # Responsibilities:
     #   - Process attacks (damage, kills)
     #   - Apply deaths (combat-first)
@@ -176,7 +105,6 @@ class TickEngine:
     #   - Apply zone healing and capture point scoring
     #   - Record telemetry and PPO data
     #   - Respawn dead agents
-    # =========================================================================
 
     def __init__(
         self,
@@ -252,7 +180,6 @@ class TickEngine:
         # - registry data dtype (often float32/float16)
         self._grid_dt = self.grid.dtype
         self._data_dt = self.registry.agent_data.dtype
-        # --- PERF PATCH B: preallocated movement conflict buffers ---
         # Rationale: run_tick() creates 4 fresh GPU tensors (zeros/full, H×W) every tick
         # inside the movement hot path. Preallocating once and using .zero_()/.fill_()
         # in-place eliminates the per-tick allocator overhead.
@@ -264,14 +191,10 @@ class TickEngine:
         # Cached scalar constant used in movement occupancy check.
         self._g_wall = torch.tensor(1.0, device=self.device, dtype=self._grid_dt)
 
-        # ================================================================
         # Preallocated per-tick reward / observation scratch
-        # ================================================================
-        #
         # These tensors are capacity-bounded and reused in-place every tick.
         # This removes several hot torch.zeros/torch.empty allocations from run_tick()
         # and _build_transformer_obs() without changing what the simulation computes.
-        #
         self._capacity = int(self.registry.capacity)
         self._reward_individual_total = torch.zeros(self._capacity, device=self.device, dtype=self._data_dt)
         self._reward_kill_individual = torch.zeros(self._capacity, device=self.device, dtype=torch.float32)
@@ -289,17 +212,12 @@ class TickEngine:
             dtype=self._data_dt,
         )
 
-        # ================================================================
         # Instinct cache / scratch (computed under no_grad)
-        # ================================================================
-        #
         # "Instinct" here is a computed feature: local density of allies/enemies
         # around each agent within a radius R. Computing offsets for a discrete
         # circle can be expensive, so we cache offsets by radius.
-        #
         # The (N,M) scratch tensors are allocated lazily because M depends on the
         # configured instinct radius. They are sliced to the live alive-count each call.
-        #
         self._instinct_cached_r: int = -999999
         self._instinct_offsets: Optional[torch.Tensor] = None
         self._instinct_area: float = 1.0
@@ -315,25 +233,17 @@ class TickEngine:
         self._instinct_noise = torch.empty((self._capacity,), device=self.device, dtype=torch.float32)
         self._instinct_out = torch.empty((self._capacity, 4), device=self.device, dtype=self._data_dt)
 
-        # ================================================================
         # THEORY: Constants on GPU
-        # ================================================================
-        #
         # Creating small tensors repeatedly can be expensive and can cause
         # device synchronization overhead. So we allocate frequently used
         # constants once on the correct device and dtype.
-        #
         self._g0 = torch.tensor(0.0, device=self.device, dtype=self._grid_dt)     # grid “zero”
         self._gneg = torch.tensor(-1.0, device=self.device, dtype=self._grid_dt)  # grid “-1”
         self._d0 = torch.tensor(0.0, device=self.device, dtype=self._data_dt)     # data “zero”
 
-        # ================================================================
         # PPO integration
-        # ================================================================
-        #
         # PPO_ENABLED: feature flag in config.
         # If enabled and runtime class is importable, initialize PPO runtime.
-        #
         self._ppo_enabled = bool(getattr(config, "PPO_ENABLED", False))
         self._ppo: Optional["PerAgentPPORuntime"] = None
         if self._ppo_enabled and _PerAgentPPORuntimeRT is not None:
@@ -344,9 +254,7 @@ class TickEngine:
                 act_dim=self._ACTIONS,
             )
 
-    # -------------------------------------------------------------------------
     # Per-tick scratch reset helpers
-    # -------------------------------------------------------------------------
     def _reset_tick_reward_buffers(
         self,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -372,9 +280,7 @@ class TickEngine:
             self._reward_healing_recovered,
         )
 
-    # -------------------------------------------------------------------------
     # PPO: reset state for agents that just respawned
-    # -------------------------------------------------------------------------
     def _ppo_reset_on_respawn(self, was_dead: torch.Tensor) -> None:
         """
         Reset per-slot PPO state for any slot that was dead before respawn
@@ -406,9 +312,7 @@ class TickEngine:
             suffix = "" if spawned_slots.numel() <= 16 else "..."
             print(f"[ppo] reset state for {int(spawned_slots.numel())} respawned slots: {sl}{suffix}")
 
-    # -------------------------------------------------------------------------
     # Zones: ensure masks are on the correct device
-    # -------------------------------------------------------------------------
     def _ensure_zone_tensors(self) -> None:
         """
         Convert zone masks to tensors on the simulation device.
@@ -481,9 +385,7 @@ class TickEngine:
             on_heal_count=on_heal_count,
         )
 
-    # -------------------------------------------------------------------------
     # Indexing helper
-    # -------------------------------------------------------------------------
     @staticmethod
     def _as_long(x: torch.Tensor) -> torch.Tensor:
         """
@@ -494,9 +396,7 @@ class TickEngine:
         """
         return x.to(torch.long)
 
-    # -------------------------------------------------------------------------
     # Identity helpers (SLOT ID vs PERSISTENT AGENT UID)
-    # -------------------------------------------------------------------------
     def _slot_ids_to_agent_uids_list(self, slot_idx: torch.Tensor) -> List[int]:
         """
         Convert registry slot indices -> persistent agent ids (UIDs) for telemetry/analysis.
@@ -531,9 +431,7 @@ class TickEngine:
             .tolist()
         )
 
-    # -------------------------------------------------------------------------
     # Grid HP sync helper (minimize grid/registry desync windows)
-    # -------------------------------------------------------------------------
     def _sync_grid_hp_for_slots(self, slot_idx: torch.Tensor) -> None:
         """
         Sync grid HP channel (grid[1]) from registry HP for the given slots.
@@ -550,9 +448,7 @@ class TickEngine:
         gy = self._as_long(data[slot_idx, COL_Y])
         self.grid[1, gy, gx] = data[slot_idx, COL_HP].to(self._grid_dt)
 
-    # -------------------------------------------------------------------------
     # Optional telemetry phase context helper (safe no-op if telemetry lacks API)
-    # -------------------------------------------------------------------------
     def _telemetry_set_phase(self, telemetry, *, tick: int, phase: str) -> None:
         """
         Best-effort phase marker for telemetry event ordering.
@@ -569,9 +465,7 @@ class TickEngine:
             # Telemetry should never destabilize sim.
             pass
 
-    # -------------------------------------------------------------------------
     # Alive filtering
-    # -------------------------------------------------------------------------
     def _recompute_alive_idx(self) -> torch.Tensor:
         """
         Returns a 1D tensor of slot indices where the agent is alive.
@@ -582,9 +476,7 @@ class TickEngine:
         """
         return (self.registry.agent_data[:, COL_ALIVE] > 0.5).nonzero(as_tuple=False).squeeze(1)
 
-    # -------------------------------------------------------------------------
     # Instinct scratch: lazily sized (capacity, M) reusable buffers
-    # -------------------------------------------------------------------------
     def _ensure_instinct_scratch(self, min_offsets: int) -> None:
         """
         Ensure the reusable instinct scratch tensors can hold (capacity, min_offsets).
@@ -612,9 +504,7 @@ class TickEngine:
         self._instinct_enemy_occ = torch.empty((self._capacity,), device=self.device, dtype=self._grid_dt)
         self._instinct_scratch_m = need_m
 
-    # -------------------------------------------------------------------------
     # Instinct offsets: cached discrete circle offsets
-    # -------------------------------------------------------------------------
     @torch.no_grad()
     def _get_instinct_offsets(self) -> Tuple[torch.Tensor, float]:
         """
@@ -659,9 +549,7 @@ class TickEngine:
 
         return self._instinct_offsets, self._instinct_area
 
-    # -------------------------------------------------------------------------
     # Instinct feature computation
-    # -------------------------------------------------------------------------
     @torch.no_grad()
     def _compute_instinct_context(
         self,
@@ -708,15 +596,11 @@ class TickEngine:
         ally_arch = self._instinct_ally_arch_mask[:N, :M]
         ally_sold = self._instinct_ally_sold_mask[:N, :M]
 
-        # ---------------------------------------------------------------------
         # Broadcasting (important tensor technique)
-        # ---------------------------------------------------------------------
         # x0: (N,1), y0: (N,1)
         # ox: (1,M), oy: (1,M)
         # x0+ox => (N,M), y0+oy => (N,M)
-        #
         # This computes all neighborhood coordinates for all agents at once.
-        # ---------------------------------------------------------------------
         x0 = pos_xy[:, 0].to(torch.long).view(N, 1)
         y0 = pos_xy[:, 1].to(torch.long).view(N, 1)
         ox = offsets[:, 0].view(1, M)
@@ -789,9 +673,7 @@ class TickEngine:
         out[:, 3].copy_(threat.to(self._data_dt))
         return out
 
-    # -------------------------------------------------------------------------
     # Death application: remove dead agents from grid and update stats/metrics
-    # -------------------------------------------------------------------------
     def _apply_deaths(
         self,
         sel: torch.Tensor,
@@ -910,9 +792,7 @@ class TickEngine:
             if credit_kills:
                 self.stats.add_kill("red", blue_deaths)
 
-        # -----------------------------------------------------------------
         # STATE MUTATION (registry + grid)
-        # -----------------------------------------------------------------
         # We apply the world-state mutation before emitting death telemetry so that
         # post-death readers do not observe "death event emitted but agent still alive on grid".
         gx = self._as_long(data[dead_idx, COL_X])
@@ -956,9 +836,7 @@ class TickEngine:
         # Then mark registry ALIVE=0 (agent remains in slot storage, but dead).
         data[dead_idx, COL_ALIVE] = self._d0
 
-        # -----------------------------------------------------------------
         # TELEMETRY (after state mutation)
-        # -----------------------------------------------------------------
         telemetry = getattr(self, "telemetry", None)
         if telemetry is not None and getattr(telemetry, "enabled", False):
             try:
@@ -999,9 +877,7 @@ class TickEngine:
             metrics.deaths_unknown += int(dead_idx.numel())
         return red_deaths, blue_deaths
 
-    # -------------------------------------------------------------------------
     # Observation builder for transformer/policy
-    # -------------------------------------------------------------------------
     @torch.no_grad()
     def _build_transformer_obs(self, alive_idx: torch.Tensor, pos_xy: torch.Tensor) -> torch.Tensor:
         """
@@ -1068,7 +944,6 @@ class TickEngine:
         # - normalized attack and vision
         # - zone flags
         # - normalized global stats
-        #
         # Build the exact same 23-column layout, but write directly into a single
         # preallocated tensor to avoid many temporary (N,) vectors each tick.
         rich_base = self._obs_rich_base[:N]
@@ -1120,9 +995,7 @@ class TickEngine:
             )
         return obs
 
-    # -------------------------------------------------------------------------
     # Debug invariants to catch grid<->registry desync
-    # -------------------------------------------------------------------------
     def _debug_invariants(self, where: str) -> None:
         """
         Optional, gated invariants to catch grid<->registry desync early.
@@ -1179,9 +1052,7 @@ class TickEngine:
         if ghost.any():
             raise RuntimeError(f"[invariants:{where}] ghost cells: grid[2]>=0 but grid[0]==0")
 
-    # =============================================================================
     # run_tick: main step function
-    # =============================================================================
     @torch.no_grad()
     def run_tick(self) -> Dict[str, float]:
         """
@@ -1247,9 +1118,7 @@ class TickEngine:
             self._debug_invariants("post_respawn")
             return vars(metrics)
 
-        # ---------------------------------------------------------------------
         # 1) GET OBSERVATIONS
-        # ---------------------------------------------------------------------
         pos_xy = self.registry.positions_xy(alive_idx)
         obs = self._build_transformer_obs(alive_idx, pos_xy)
         if obs.dim() != 2 or int(obs.shape[1]) != int(config.OBS_DIM):
@@ -1257,9 +1126,7 @@ class TickEngine:
                 f"[obs] shape mismatch: got {tuple(obs.shape)}, expected (N,{int(config.OBS_DIM)})"
             )
 
-        # ---------------------------------------------------------------------
         # 2) GET ACTION MASK (prevents illegal actions)
-        # ---------------------------------------------------------------------
         # Mask shape convention: (N_alive, NUM_ACTIONS) boolean
         # mask[i, a] == True means action a is legal for agent i.
         mask = build_mask(
@@ -1275,15 +1142,12 @@ class TickEngine:
         # PPO record buffers (only used if PPO enabled)
         rec_agent_ids, rec_obs, rec_logits, rec_values, rec_actions, rec_action_masks, rec_teams = [], [], [], [], [], [], []
 
-        # ---------------------------------------------------------------------
         # 3) AI DECISION TIME (bucketed inference)
-        # ---------------------------------------------------------------------
         # Agents can have different models/brains. We group them into buckets to run
         # ensemble_forward efficiently per model type.
         neg_inf = torch.finfo(torch.float32).min
         for bucket in self.registry.build_buckets(alive_idx):
             # loc are positions of bucket.indices within alive_idx (sorted alignment assumed)
-            # PERF PATCH D: locs are precomputed in build_buckets; no searchsorted needed.
             loc = bucket.locs
             bucket_obs = obs[loc]
             bucket_mask = mask[loc]
@@ -1309,9 +1173,7 @@ class TickEngine:
 
             actions[loc] = a
 
-        # ---------------------------------------------------------------------
         # Debug: force actions / validate actions
-        # ---------------------------------------------------------------------
         force = os.getenv("FWS_DEBUG_FORCE_ACTIONS", "").strip()
         if force:
             parts = [p.strip() for p in force.split(",") if p.strip()]
@@ -1373,9 +1235,7 @@ class TickEngine:
         # Victim slot -> credited killer slot for combat deaths in this tick.
         combat_killer_slot_by_victim: Dict[int, int] = {}
 
-        # ---------------------------------------------------------------------
         # 4) COMBAT (combat-first semantics)
-        # ---------------------------------------------------------------------
         if alive_idx.numel() > 0:
             # Attack actions are encoded as action >= 9 in this project.
             if (is_attack := actions >= 9).any():
@@ -1385,14 +1245,12 @@ class TickEngine:
                 # - atk_act in [9..] encodes a direction and a range (1..4)
                 # r = ((atk_act - 9) % 4) + 1  => range ∈ {1,2,3,4}
                 # dir_idx = (atk_act - 9) // 4 => direction index into DIRS8
-                #
                 # Math note:
                 # A single integer encodes 2 parameters via quotient and remainder.
                 # This is a standard encoding pattern:
                 #   x = q * base + rem
                 #   q = x // base
                 #   rem = x % base
-                #
                 r, dir_idx = ((atk_act - 9) % 4) + 1, (atk_act - 9) // 4
 
                 # Direction vector scaled by range r:
@@ -1474,19 +1332,14 @@ class TickEngine:
                     atk_idx = atk_idx[is_enemy]
 
                     if victims.numel() > 0:
-                        # =====================================================
                         # DETERMINISTIC FOCUS-FIRE DAMAGE
-                        # =====================================================
-                        #
                         # Duplicate index hazard:
                         #   If multiple attackers hit the same victim, writing
                         #   victim_hp[victim] -= dmg in parallel can race.
-                        #
                         # Safe approach:
                         #   1) Sort by victim id
                         #   2) Compute total damage per unique victim
                         #   3) Apply hp -= total_damage once per victim
-                        #
                         dmg = data[atk_idx, COL_ATK]
                         order = victims.argsort()
                         sv = victims[order]
@@ -1517,7 +1370,7 @@ class TickEngine:
                         kill_event_killer_slots = None
                         kill_event_victim_slots = None
 
-                        # PATCH: reward/credit exactly one attacker per kill (not all contributors).
+                        # Preserve single-attacker kill credit to match the established reward contract.
                         # Why:
                         # - Prevents multi-attacker focus-fire from granting multiple kill credits
                         #   for the same victim in one tick.
@@ -1684,9 +1537,7 @@ class TickEngine:
                         metrics.attacks += int(atk_idx.numel())
                         # ===== END NEW DAMAGE =====
 
-        # ---------------------------------------------------------------------
         # 5) Apply deaths after combat
-        # ---------------------------------------------------------------------
         # IMPORTANT SEMANTIC:
         # - Combat damage is applied first.
         # - Combat deaths are resolved here (before movement).
@@ -1702,9 +1553,7 @@ class TickEngine:
         combat_bd += bD
         self._debug_invariants("post_combat")
 
-        # ---------------------------------------------------------------------
         # 6) MOVE HANDLING WITH CONFLICT RESOLUTION (Law 1)
-        # ---------------------------------------------------------------------
         # Combat-first semantics: agents killed this tick do NOT move.
         alive_after = (data[alive_idx, COL_ALIVE] > 0.5)
 
@@ -1720,9 +1569,7 @@ class TickEngine:
         metrics.move_conflict_tie = 0
 
         if is_move.any():
-            # -----------------------------------------------------------------
             # 6.1) Compute intended destinations for ALL attempted moves
-            # -----------------------------------------------------------------
             move_idx_all = alive_idx[is_move]
             a_all = actions[is_move]               # chosen action code (1..8)
             dir_idx = a_all - 1                    # 0..7
@@ -1757,9 +1604,7 @@ class TickEngine:
             lost_mask = torch.empty((0,), device=self.device, dtype=torch.bool)
             can_locs = torch.empty((0,), device=self.device, dtype=torch.long)
 
-            # -----------------------------------------------------------------
             # 6.2) Resolve moves among those whose destination is empty
-            # -----------------------------------------------------------------
             if can_move_all.any():
                 move_idx = move_idx_all[can_move_all]
                 x0, y0, nx, ny = x0_all[can_move_all], y0_all[can_move_all], nx_all[can_move_all], ny_all[can_move_all]
@@ -1778,7 +1623,6 @@ class TickEngine:
                 claim_cnt.scatter_add_(0, dest_key, torch.ones_like(dest_key, dtype=torch.int32))
 
                 try:
-                    # PERF PATCH B: reuse buffer; fill_() is in-place, no alloc.
                     max_hp = self._move_max_hp.fill_(torch.finfo(hp.dtype).min)
                     max_hp.scatter_reduce_(0, dest_key, hp, reduce="amax", include_self=True)
                     is_max = (hp == max_hp[dest_key])
@@ -1840,9 +1684,7 @@ class TickEngine:
                     # Count moved winners
                     metrics.moved = int(w_move_idx.numel())
 
-            # -----------------------------------------------------------------
             # 6.3) Telemetry: movement aggregates + optional per-agent events
-            # -----------------------------------------------------------------
             if telemetry is not None and getattr(telemetry, "enabled", False) and bool(getattr(telemetry, "log_moves", False)):
                 self._telemetry_set_phase(telemetry, tick=tick_now, phase="move")
 
@@ -1861,19 +1703,15 @@ class TickEngine:
                 except Exception:
                     pass
 
-                # -------------------------------------------------------------
                 # Per-agent movement totals (AgentLife snapshot)
-                # -------------------------------------------------------------
                 # NOTE: This runs *after* conflict resolution and after winner moves are applied,
                 # so outcomes are finalized.
-                #
                 # Why this exists:
                 # - The simulation already records high-level move aggregates (move_summary.csv)
                 # - It also optionally records sampled per-move events (events_*.jsonl)
                 # - But AgentLife snapshots (agent_life.csv) typically want *per-agent totals*
                 #   (e.g., moves attempted/success/blocked counts) so you can analyze behavior
                 #   per agent over long runs without reading huge event logs.
-                #
                 # This hook sends, in one vectorized call, the "attempted move outcome code"
                 # for every slot that attempted to move this tick. Telemetry can then accumulate
                 # these per slot across ticks.
@@ -1883,7 +1721,6 @@ class TickEngine:
                     if n_all > 0 and hasattr(telemetry, "record_move_totals_by_slot"):
                         # Outcome codes for attempted moves:
                         # 0=success | 1=blocked_wall | 2=blocked_occupied | 3=conflict_lost | 4=conflict_tie
-                        #
                         # Default is "blocked_occupied" because:
                         # - The most general non-empty case is “occupied”
                         # - We then refine wall-blocks and can-move / conflict outcomes below.
@@ -1989,9 +1826,7 @@ class TickEngine:
         # ----- END MOVE HANDLING -----
         self._debug_invariants("post_move")
 
-        # ---------------------------------------------------------------------
         # 7) ENVIRONMENT (Heal, Metabolism, Objectives)
-        # ---------------------------------------------------------------------
         # IMPORTANT SEMANTIC:
         # - This phase runs AFTER movement.
         # - Metabolism/starvation deaths therefore happen AFTER movement in the same tick.
@@ -2076,9 +1911,7 @@ class TickEngine:
                                 )
                                 reward_contested_cp_individual.index_add_(0, winners_idx, cp_add)
 
-        # ---------------------------------------------------------------------
         # 8) PPO REINFORCEMENT LEARNING LOGGING
-        # ---------------------------------------------------------------------
         if self._ppo and rec_agent_ids:
             # IMPORTANT: these are REGISTRY SLOT IDS captured at decision time (not persistent UIDs).
             # PPO runtime is slot-based because it tracks per-slot state in the live registry.
@@ -2159,11 +1992,9 @@ class TickEngine:
                         pass
 
             # PPO window bootstrap now comes from the persistent slot-local value cache.
-            #
             # On the final step of a window, record_step() stages the boundary batch.
             # The next tick's *normal* main inference pass updates the cache with V(s_{t+1})
             # for the surviving slots, and finalize_pending_window_from_cache() consumes it.
-            #
             # This removes the old duplicate post-step:
             #   positions_xy -> _build_transformer_obs -> build_buckets -> ensemble_forward
             # bootstrap-only pass from the hot path.
@@ -2180,9 +2011,7 @@ class TickEngine:
                     bootstrap_values=None,
                 )
 
-        # ---------------------------------------------------------------------
         # 9) Advance tick, flush PPO dead, respawn
-        # ---------------------------------------------------------------------
         self.stats.on_tick_advanced(1)
         metrics.tick = int(self.stats.tick)
 
@@ -2226,6 +2055,3 @@ class TickEngine:
 
         # Return metrics as a dict
         return vars(metrics)
-
-
-

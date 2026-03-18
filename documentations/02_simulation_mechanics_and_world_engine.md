@@ -2,7 +2,7 @@
 
 ## Document purpose
 
-This volume explains the simulated world implemented by the `Neural-Abyss` codebase and, more specifically, the mechanics that transform world state from one tick to the next.
+This volume explains the simulated world implemented by the `Neural Abyss` codebase and, more specifically, the mechanics that transform world state from one tick to the next.
 
 The goal is not to restate source code line by line. The goal is to make the runtime understandable.
 

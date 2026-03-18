@@ -1,55 +1,6 @@
-from __future__ import annotations
+"""MLP policy/value networks used by agent slots."""
 
-# =============================================================================
-# MLP BRAIN FAMILY
-# =============================================================================
-# This module defines a family of simple MLP-based policy/value networks for
-# agents in the simulation.
-#
-# High-level purpose:
-# - Take the flat observation vector coming from the environment.
-# - Split it into:
-#     1) ray features   -> structured spatial/perception signal
-#     2) rich features  -> compact non-ray scalar/context signal
-# - Convert those two parts into exactly TWO learned tokens:
-#     1) a summarized ray token
-#     2) a rich-feature token
-# - Concatenate the two tokens into one flat feature vector.
-# - Feed that final vector into a chosen MLP trunk.
-# - Produce:
-#     1) actor logits   -> action preferences for policy sampling / PPO
-#     2) critic value   -> scalar state-value estimate
-#
-# Architectural intent:
-# - Keep the observation contract explicit and validated.
-# - Keep all MLP variants on the exact same input interface.
-# - Make the family easy to batch, easy to reason about, and easy to compare.
-# - Preserve strict per-agent model individuality while simplifying internals.
-#
-# Mathematical sketch:
-#   obs_flat ∈ R^(32*8 + 27)
-#   rays_raw -> shape (B, 32, 8)
-#   rich_vec -> shape (B, 27)
-#
-#   ray_emb_i = Linear(LayerNorm(ray_i)) ∈ R^D
-#   ray_token = mean_i(ray_emb_i) ∈ R^D
-#
-#   rich_token = Linear(LayerNorm(rich_vec)) ∈ R^D
-#
-#   x = concat(ray_token, rich_token) ∈ R^(2D)
-#   x = Norm(x)
-#   h = trunk(x)
-#   logits = actor_head(h)
-#   value = critic_head(h)
-#
-# This file is intentionally defensive:
-# - It validates observation dimensions.
-# - It validates final tensor shapes.
-# - It raises hard errors when config/runtime assumptions do not match.
-#
-# That is important in tightly coupled training systems because silent shape
-# mismatches can corrupt PPO training in ways that are difficult to diagnose.
-# =============================================================================
+from __future__ import annotations
 
 import math
 from typing import Dict, Optional, Tuple
@@ -405,17 +356,13 @@ class _BaseMLPBrain(nn.Module):
         self.obs_dim = int(obs_dim)
         self.act_dim = int(act_dim)
 
-        # ---------------------------------------------------------------------
         # Observation schema parameters.
-        # ---------------------------------------------------------------------
         # These define the expected meaning of the flattened observation vector.
-        #
         # Current expected structure:
         #   total_obs_dim = (num_rays * ray_feat_dim) + rich_total_dim
         #                 = (32 * 8) + (23 + 4)
         #                 = 256 + 27
         #                 = 283
-        #
         # This matches the observation spec used elsewhere in the project.
         self.num_rays = int(getattr(config, "RAY_TOKEN_COUNT", 32))
         self.ray_feat_dim = int(getattr(config, "RAY_FEAT_DIM", 8))
@@ -427,7 +374,6 @@ class _BaseMLPBrain(nn.Module):
         cfg_obs_dim = int(getattr(config, "OBS_DIM", expected_obs_dim))
 
         # Hard validation against config.
-        #
         # Why fail fast here?
         # Because if observation layout changes silently but the network still
         # runs, training can degrade or collapse without obvious errors.
@@ -438,7 +384,6 @@ class _BaseMLPBrain(nn.Module):
             )
 
         # Hard validation against constructor input.
-        #
         # This protects the factory/runtime boundary. If some caller passes
         # an inconsistent obs_dim, the mismatch is surfaced immediately.
         if self.obs_dim != expected_obs_dim:
@@ -446,9 +391,7 @@ class _BaseMLPBrain(nn.Module):
                 f"[{self.__class__.__name__}] obs_dim mismatch: ctor={self.obs_dim}, expected={expected_obs_dim}"
             )
 
-        # ---------------------------------------------------------------------
         # Shared two-token input interface.
-        # ---------------------------------------------------------------------
         # D is the learned token width (sometimes analogous to a model width).
         # Final flat input width is exactly 2D because we concatenate:
         #   [ray_summary_token, rich_token]
@@ -462,26 +405,20 @@ class _BaseMLPBrain(nn.Module):
                 f"[{self.__class__.__name__}] final input width mismatch with config"
             )
 
-        # ---------------------------------------------------------------------
         # Shared two-token embedding pipeline.
-        # ---------------------------------------------------------------------
         # Contract:
-        #
         #   rays_raw: (B, 32, 8)
         #       -> LayerNorm over feature dim
         #       -> Linear(8 -> D) per ray
         #       -> mean across the 32 rays
         #       -> ray token: (B, D)
-        #
         #   rich_vec: (B, 27)
         #       -> LayerNorm
         #       -> Linear(27 -> D)
         #       -> rich token: (B, D)
-        #
         #   concat(ray_token, rich_token)
         #       -> (B, 2D)
         #       -> final input normalization
-        #
         # Why mean summarize the rays?
         # - It converts variable structured ray channels into one fixed-size
         #   token without attention.

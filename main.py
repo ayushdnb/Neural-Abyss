@@ -1,55 +1,10 @@
-"""
-Infinite War Simulation – Main entry point
-==========================================
+"""Top-level runtime orchestration for Neural Abyss."""
 
-This file is the **application orchestrator**: it wires together all major subsystems:
-
-- **Configuration** (`config`)                    → all tunable knobs live here
-- **World/grid creation** (`engine.grid`, `engine.mapgen`)
-- **Agent population** (`engine.spawn`, `engine.agent_registry`)
-- **Simulation stepper** (`engine.tick.TickEngine`) → advances the world one tick
-- **Statistics** (`simulation.stats.SimulationStats`)
-- **Persistence / logging** (`utils.persistence.ResultsWriter`)
-- **Telemetry** (`utils.telemetry.TelemetrySession`)
-- **Checkpointing** (`utils.checkpointing.CheckpointManager`)
-- **Optional UI** (`ui.viewer.Viewer`)
-- **Optional video recording** (OpenCV; if installed)
-
-This file is intentionally "top-level glue code". It should not contain the physics/AI logic.
-Instead it *coordinates* components and defines runtime behavior such as:
-- headless loop vs UI loop
-- where results are saved
-- how checkpoints are loaded/saved
-- how shutdown is handled
-
-A "tick" is one iteration of that loop. Everything in this file revolves around
-creating the objects needed for ticks, then repeatedly calling `engine.run_tick()`.
-
-
-Deterministic runs are vital in ML + simulation
-
-This file supports deterministic seeding via `FWS_SEED` environment variable.
-
-Windows note
-------------
-Multiprocessing behaves differently on Windows ("spawn"), so this project uses a
-dedicated background writer process (`ResultsWriter`) that is explicitly Windows-friendly.
-"""
-
-from __future__ import annotations  # Allows forward references in type hints (Python typing feature)
+from __future__ import annotations
 
 import os
 
-# ---------------------------------------------------------------------
-# Windows Ctrl+C mitigation for Intel Fortran runtime (MKL/oneAPI, etc.)
-# ---------------------------------------------------------------------
-# Some native numeric stacks on Windows (Intel Fortran runtime) install a console Ctrl+C
-# handler that aborts the process with:
-#   forrtl: error (200): program aborting due to control-C event
-# This abort bypasses Python's KeyboardInterrupt and prevents graceful shutdown.
-#
-# Intel documents an official opt-out via FOR_DISABLE_CONSOLE_CTRL_HANDLER.
-# This MUST be set before importing numpy/torch/scipy (they may load MKL/ifcore).
+# Keep Ctrl+C mapped to KeyboardInterrupt on Windows before importing numerical stacks.
 if os.name == "nt":
     if os.getenv("FWS_WIN_FORRTL_MITIGATE", "1").strip().lower() in ("1", "true", "yes", "y", "on", "t"):
         os.environ.setdefault("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "TRUE")
@@ -64,24 +19,14 @@ from typing import Optional
 import torch
 import numpy as np
 
-# OpenCV is optional. If it is missing, video recording is disabled gracefully.
 try:
     import cv2  # type: ignore
 except Exception:
     cv2 = None
 
-# ---------------------------------------------------------------------
-# Local project modules
-# ---------------------------------------------------------------------
-# Each import below corresponds to a subsystem. "main.py" should *not*
-# re-implement their logic; it just ties them together.
-
 try:
     import config
 except ModuleNotFoundError:
-    # If executed from inside the package directory (common Windows workflow),
-    # the repo root may not be on sys.path, so top-level `config.py` is not importable.
-    # Fix by adding the parent directory of this file (repo root) to sys.path.
     import sys as _sys
     _repo_root = Path(__file__).resolve().parent.parent
     if str(_repo_root) not in _sys.path:
@@ -99,84 +44,29 @@ from ui.viewer import Viewer
 from utils.checkpointing import CheckpointManager, resolve_checkpoint_path
 
 
-# =============================================================================
 # Reproducibility utilities
-# =============================================================================
 
 def seed_everything(seed: int) -> None:
-    """
-    Set all random number generators to a fixed seed for reproducibility.
-
-    This includes:
-    - Python's built-in `random`
-    - NumPy RNG
-    - PyTorch RNG (CPU)
-    - PyTorch RNG (CUDA) if GPU is available
-
-    Why this matters
-    ----------------
-    Many simulation behaviors depend on random sampling:
-    - initial spawn positions
-    - random map walls
-    - stochastic policy sampling in RL
-
-    If you seed everything, runs become (mostly) reproducible given the same
-    hardware/software settings.
-
-    Caveat (important, honest engineering)
-    --------------------------------------
-    Full determinism on GPU is not always guaranteed because:
-    - Some CUDA kernels are nondeterministic for performance reasons.
-    - Multi-thread scheduling can vary.
-    - Certain atomic operations can produce different orderings.
-
-    Still, seeding massively improves reproducibility.
-    """
+    """Seed Python, NumPy, and PyTorch RNG state."""
     import random
 
-    # Make hashing stable. Without this, iteration order of hash-based structures
-    # can vary between runs, affecting behavior.
     os.environ["PYTHONHASHSEED"] = str(seed)
-
-    # Python stdlib RNG (used by some utilities / fallback random calls).
     random.seed(seed)
 
-    # NumPy seeding (used for array sampling, mapgen randomness, etc.)
     try:
         np.random.seed(seed)
     except Exception:
         pass
 
-    # PyTorch seeding (CPU)
     torch.manual_seed(seed)
 
-    # CUDA seeding (only if GPU is present)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)  # For multi-GPU setups
+        torch.cuda.manual_seed_all(seed)
 
-
-# =============================================================================
-# Configuration snapshot for reproducibility / logging
-# =============================================================================
 
 def _config_snapshot() -> dict:
-    """
-    Create a lightweight, JSON-serializable snapshot of the current config.
-
-    Why snapshot config?
-    --------------------
-    If you run the sim for 10 days and later want to replicate results, you must know:
-    - grid size, reward weights, PPO hyperparameters, etc.
-
-    Storing a snapshot in the run directory provides "experiment provenance":
-    a permanent record of how the run was configured.
-
-    Implementation detail
-    ---------------------
-    We only store values that are JSON-serializable.
-    Any non-serializable objects (e.g., device objects) are converted to primitives.
-    """
+    """Return the JSON-serializable runtime configuration snapshot."""
     return {
         "summary": config.summary_str(),
         "GRID_W": config.GRID_WIDTH,
@@ -264,9 +154,7 @@ def _telemetry_schema_manifest(grid: torch.Tensor, zones) -> dict:
     }
 
 
-# =============================================================================
 # Small helpers
-# =============================================================================
 
 def _seed_all_from_env() -> Optional[int]:
     """
@@ -350,9 +238,7 @@ def _atomic_json_dump(obj: dict, path: Path) -> None:
     os.replace(tmp, path)
 
 
-# =============================================================================
 # Optional video recording (simple occupancy visualization)
-# =============================================================================
 
 class _SimpleRecorder:
     """
@@ -460,7 +346,6 @@ class _SimpleRecorder:
             print(f"[video] saved → {self.path}")
 
 
-
 class _NoopRecorder:
     """No-op recorder used for explicit inspector/no-output mode."""
 
@@ -495,101 +380,45 @@ def _infer_resume_run_dir_from_checkpoint_path(checkpoint_path: str) -> Path:
     return run_dir
 
 
-# =============================================================================
 # Headless loop (no UI) – optimized for long runs
-# =============================================================================
 
 def _headless_loop(
     engine: TickEngine,
     stats: SimulationStats,
-    reg: AgentsRegistry,
+    registry: AgentsRegistry,
     grid: torch.Tensor,
-    rw: ResultsWriter,
+    results_writer: ResultsWriter,
     limit: int,
-    ckpt_mgr: Optional[CheckpointManager] = None,
+    checkpoint_manager: Optional[CheckpointManager] = None,
 ) -> None:
-    """
-    Run the simulation without a graphical UI (headless mode).
-
-    This is used for:
-    - long training runs (hours/days)
-    - running on servers
-    - benchmarking
-
-    Parameters
-    ----------
-    engine:
-        TickEngine that advances simulation by one tick (engine.run_tick()).
-    stats:
-        SimulationStats object collecting tick count, scores, kills, deaths, etc.
-    reg:
-        AgentsRegistry storing agent state tensors (positions, hp, team, etc.).
-    grid:
-        The world grid tensor (occupancy + features).
-    rw:
-        ResultsWriter (background process) used to write stats/death logs.
-    limit:
-        Max ticks. If 0, run forever.
-    ckpt_mgr:
-        Optional CheckpointManager enabling manual and periodic checkpoints.
-
-    Safety / correctness focus
-    --------------------------
-    Long unattended runs can silently break (NaNs, corruption, leaks).
-    This loop includes:
-    - periodic sanity checks
-    - periodic printing
-    - optional profiling hooks
-    - checkpoint triggers
-
-    Signal shutdown design (important)
-    ----------------------------------
-    In headless mode, Ctrl+C (SIGINT) can arrive "between ticks".
-    We do NOT want to begin a new tick after shutdown is requested.
-    Therefore we:
-    - check `engine.shutdown_requested["flag"]` at the top of each loop
-    - run exactly one tick
-    - flush minimal outputs for that tick
-    - check again and break if requested
-    """
-    # Lazy import: avoids importing profiler utilities unless needed.
+    """Run the simulation loop without the UI."""
+    from utils.profiler import torch_profiler_ctx, nvidia_smi_summary
     from utils.profiler import torch_profiler_ctx, nvidia_smi_summary
     from utils.sanitize import runtime_sanity_check
 
     # Optional torch profiler context manager (enabled via config)
-    with torch_profiler_ctx() as prof:
+    with torch_profiler_ctx() as profiler:
         try:
-            # -----------------------------------------------------------------
-            # PATCHED BLOCK:
             # - replace ONLY while header + first lines
             # - add shutdown check at bottom of loop
-            # -----------------------------------------------------------------
             while limit == 0 or stats.tick < limit:
                 # If a signal requested shutdown, do not start a new tick.
                 # `engine.shutdown_requested` is attached in main() after signal registration.
                 if getattr(engine, "shutdown_requested", {}).get("flag", False):
                     break
 
-                # ------------------------------------------------------------
                 # 1) Advance the simulation by exactly one tick
-                # ------------------------------------------------------------
                 tick_metrics = engine.run_tick()
 
 
-                # ------------------------------------------------------------
                 # 2) Log tick summary (non-blocking)
-                # ------------------------------------------------------------
-                rw.write_tick(stats.as_row())
+                results_writer.write_tick(stats.as_row())
 
-                # ------------------------------------------------------------
                 # 3) Log deaths/kill events (batch)
-                # ------------------------------------------------------------
                 deaths = stats.drain_dead_log()
                 if deaths:
-                    rw.write_deaths(deaths)
-                # ------------------------------------------------------------
+                    results_writer.write_deaths(deaths)
                 # 3b) Additive headless telemetry sidecar (decoupled from print mode)
-                # ------------------------------------------------------------
                 gpu_probe_line = None
                 telemetry = getattr(engine, "telemetry", None)
                 if telemetry is not None and getattr(telemetry, "enabled", False):
@@ -614,37 +443,30 @@ def _headless_loop(
                     break
 
 
-                # ------------------------------------------------------------
                 # 4) Periodic sanity check
-                # ------------------------------------------------------------
                 # A sanity check is a defensive validation routine to catch:
                 # - NaNs/infs
                 # - impossible values (negative HP, out-of-bounds positions)
                 # - corrupted tensors
-                #
                 # Running it every tick would be expensive, so we do it periodically.
                 if (stats.tick % 500) == 0:
-                    runtime_sanity_check(grid, reg.agent_data)
+                    runtime_sanity_check(grid, registry.agent_data)
 
-                # ------------------------------------------------------------
                 # 5) Profiler bookkeeping
-                # ------------------------------------------------------------
                 # If profiler is enabled, advance its internal step counter.
-                if prof is not None:
-                    prof.step()
+                if profiler is not None:
+                    profiler.step()
 
-                # ------------------------------------------------------------
                 # 6) Checkpointing
-                # ------------------------------------------------------------
-                if ckpt_mgr is not None:
+                if checkpoint_manager is not None:
                     # Manual checkpoint trigger file:
                     # create "checkpoint.now" (or configured filename) in run_dir to force save.
-                    trig = Path(rw.run_dir) / str(getattr(config, "CHECKPOINT_TRIGGER_FILE", "checkpoint.now"))
+                    trigger_path = Path(results_writer.run_dir) / str(getattr(config, "CHECKPOINT_TRIGGER_FILE", "checkpoint.now"))
 
-                    ckpt_mgr.maybe_save_trigger_file(
-                        trigger_path=trig,
+                    checkpoint_manager.maybe_save_trigger_file(
+                        trigger_path=trigger_path,
                         engine=engine,
-                        registry=reg,
+                        registry=registry,
                         stats=stats,
                         default_pin=bool(getattr(config, "CHECKPOINT_PIN_ON_MANUAL", True)),
                         pin_tag=str(getattr(config, "CHECKPOINT_PIN_TAG", "manual")),
@@ -652,17 +474,15 @@ def _headless_loop(
                     )
 
                     # Periodic checkpoints (every N ticks)
-                    ckpt_mgr.maybe_save_periodic(
+                    checkpoint_manager.maybe_save_periodic(
                         engine=engine,
-                        registry=reg,
+                        registry=registry,
                         stats=stats,
                         every_ticks=int(getattr(config, "CHECKPOINT_EVERY_TICKS", 0)),
                         keep_last_n=int(getattr(config, "CHECKPOINT_KEEP_LAST_N", 1)),
                     )
 
-                # ------------------------------------------------------------
                 # 7) Periodic status print
-                # ------------------------------------------------------------
                 pe = int(getattr(config, "HEADLESS_PRINT_EVERY_TICKS", 100))
                 if pe > 0 and (stats.tick % pe) == 0:
                     # Reuse GPU probe if already collected for telemetry on this tick.
@@ -679,12 +499,11 @@ def _headless_loop(
 
                     if lvl >= 1:
                         # Access agent_data tensor (vectorized state store)
-                        d = reg.agent_data
+                        d = registry.agent_data
 
                         # NOTE: This code assumes:
                         # - column 0: some "alive indicator" (or hp proxy)
                         # - column 1: team id (2=red, 3=blue)
-                        #
                         # Important: if your registry columns differ, adjust these indices.
                         alive = (d[:, 0] > 0.5)
                         red_alive = int((alive & (d[:, 1] == 2.0)).sum().item())
@@ -696,7 +515,7 @@ def _headless_loop(
 
                     if lvl >= 2:
                         # Average HP among alive agents
-                        d = reg.agent_data
+                        d = registry.agent_data
                         alive = (d[:, 0] > 0.5)
 
                         # column 4 assumed to be health (HP)
@@ -716,38 +535,13 @@ def _headless_loop(
 
         except KeyboardInterrupt:
             # Let outer main() handle final flush/shutdown
-            print("\n[main] Interrupted — shutting down gracefully.")
+            print("\n[main] Interrupted; shutting down gracefully.")
 
 
-# =============================================================================
 # Main entry point
-# =============================================================================
 
 def main() -> None:
-    """
-    Main entry point of the simulation.
-
-    Responsibilities
-    ----------------
-    1) Configure runtime (precision, seed, print banner)
-    2) Restore from checkpoint OR build a new world
-    3) Create TickEngine
-    4) Start logging (ResultsWriter) and telemetry
-    5) Optional video recorder
-    6) Run either UI loop or headless loop
-    7) On exit: save summary, checkpoint, close resources
-
-    This function is deliberately long because it's orchestration. The actual
-    simulation logic should be inside engine/ and agent/ modules.
-
-    Advanced engineering note:
-    --------------------------
-    A "graceful shutdown" means:
-    - do not corrupt logs/checkpoints
-    - do not leave files half-written
-    - do not kill background writer mid-transaction
-    - still respond quickly to Ctrl+C by checking a shutdown flag between ticks
-    """
+    """Initialize the runtime and execute the selected run loop."""
     # PyTorch can use different matmul kernels; "high" may improve performance on some GPUs.
     torch.set_float32_matmul_precision("high")
 
@@ -765,10 +559,8 @@ def main() -> None:
     if inspector_no_output_mode:
         print("[main] Inspector UI no-output mode enabled (no results/telemetry/checkpoints/files).")
 
-    # ------------------------------------------------------------------
     # 1) Checkpoint loading or fresh world creation
-    # ------------------------------------------------------------------
-    ckpt = None
+    checkpoint_data = None
     checkpoint_path = getattr(config, "CHECKPOINT_PATH", "")
 
     if checkpoint_path:
@@ -776,13 +568,13 @@ def main() -> None:
         print(f"[main] Resuming from checkpoint: {checkpoint_path}")
 
         # Load on CPU first (reduces GPU fragmentation / spikes)
-        ckpt = CheckpointManager.load(checkpoint_path, map_location="cpu")
+        checkpoint_data = CheckpointManager.load(checkpoint_path, map_location="cpu")
 
         # Restore world grid and zones
-        grid = ckpt["world"]["grid"].to(config.TORCH_DEVICE)
+        grid = checkpoint_data["world"]["grid"].to(config.TORCH_DEVICE)
 
         zones = CheckpointManager.zones_from_checkpoint(
-            ckpt["world"],
+            checkpoint_data["world"],
             device=torch.device(config.TORCH_DEVICE),
         )
 
@@ -814,54 +606,48 @@ def main() -> None:
             spawn_uniform_random(registry, grid, per_team=config.START_AGENTS_PER_TEAM)
             print("[UNIFORM_RANDOM_SPAWNING]")
 
-    # ------------------------------------------------------------------
     # 2) Create the tick engine (core simulation logic)
-    # ------------------------------------------------------------------
     print("[INITIATING_TICK_ENGINE]")
     engine = TickEngine(registry, grid, stats, zones=zones)
 
-    # ------------------------------------------------------------------
     # 3) If resuming, apply runtime state (brains, RNG, PPO buffers, etc.)
-    # ------------------------------------------------------------------
-    if ckpt is not None:
+    if checkpoint_data is not None:
         CheckpointManager.apply_loaded_checkpoint(
-            ckpt,
+            checkpoint_data,
             engine=engine,
             registry=registry,
             stats=stats,
             device=torch.device(config.TORCH_DEVICE),
         )
-        ckpt_tick = int(ckpt.get("meta", {}).get("tick", stats.tick))
-        if int(stats.tick) != ckpt_tick:
+        checkpoint_tick = int(checkpoint_data.get("meta", {}).get("tick", stats.tick))
+        if int(stats.tick) != checkpoint_tick:
             raise RuntimeError(
-                f"[main] checkpoint tick mismatch after restore: stats.tick={int(stats.tick)} manifest_tick={ckpt_tick}"
+                f"[main] checkpoint tick mismatch after restore: stats.tick={int(stats.tick)} manifest_tick={checkpoint_tick}"
             )
         print("[main] Runtime state restored from checkpoint.")
 
-    # ------------------------------------------------------------------
     # 4) Results directory & background logging process
-    # ------------------------------------------------------------------
     resume_continuity_active = False
-    rw = None
+    results_writer = None
     run_dir: Optional[Path] = None
-    ckpt_mgr = None
+    checkpoint_manager = None
     telemetry = None
 
     if inspector_no_output_mode:
         # Explicit no-output inspector UI mode: no results folder, no writer, no telemetry, no checkpoints.
         recorder = _NoopRecorder()
     else:
-        resume_requested = bool(ckpt is not None)
+        resume_requested = bool(checkpoint_data is not None)
         continuity_cfg = bool(getattr(config, "RESUME_OUTPUT_CONTINUITY", True))
         force_new_on_resume = bool(getattr(config, "RESUME_FORCE_NEW_RUN", False))
         resume_continuity_active = bool(resume_requested and continuity_cfg and (not force_new_on_resume))
 
-        rw = ResultsWriter()
+        results_writer = ResultsWriter()
 
         if resume_continuity_active:
             inferred_run_dir = _infer_resume_run_dir_from_checkpoint_path(checkpoint_path)
             run_dir = Path(
-                rw.start(
+                results_writer.start(
                     config_obj=_config_snapshot(),
                     run_dir=str(inferred_run_dir),
                     append_existing=True,
@@ -871,19 +657,15 @@ def main() -> None:
             print(f"[main] Results → {run_dir} (resume-in-place append)")
         else:
             # start() creates a fresh run directory and writes config.json there
-            run_dir = Path(rw.start(config_obj=_config_snapshot()))
+            run_dir = Path(results_writer.start(config_obj=_config_snapshot()))
             # Defensive: ensure directory exists (should already, but safe)
             _mkdir_p(run_dir)
             print(f"[main] Results → {run_dir}")
 
-        # ------------------------------------------------------------------
         # 5) Checkpoint manager (saves into run_dir/checkpoints/)
-        # ------------------------------------------------------------------
-        ckpt_mgr = CheckpointManager(run_dir)
+        checkpoint_manager = CheckpointManager(run_dir)
 
-        # ------------------------------------------------------------------
         # 6) Telemetry (optional, must never crash sim)
-        # ------------------------------------------------------------------
         try:
             telemetry = TelemetrySession(run_dir)
 
@@ -899,13 +681,13 @@ def main() -> None:
                 )
 
                 telemetry_manifest = _telemetry_schema_manifest(grid, zones)
-                if resume_continuity_active and ckpt is not None:
+                if resume_continuity_active and checkpoint_data is not None:
                     telemetry.validate_schema_manifest_compat(telemetry_manifest)
                 else:
                     telemetry.write_schema_manifest(telemetry_manifest)
 
                 # Resume-in-place: preserve original run_meta.json by default (avoid overwrite).
-                if not (resume_continuity_active and ckpt is not None):
+                if not (resume_continuity_active and checkpoint_data is not None):
                     telemetry.write_run_meta(
                         {
                             "schema_version": getattr(config, "TELEMETRY_SCHEMA_VERSION", "v2"),
@@ -915,25 +697,23 @@ def main() -> None:
                             "grid_h": int(grid.shape[1]),
                             "grid_w": int(grid.shape[2]),
                             "start_tick": int(stats.tick),
-                            "resume": bool(ckpt is not None),
-                            "resume_from": (checkpoint_path if ckpt is not None else None),
+                            "resume": bool(checkpoint_data is not None),
+                            "resume_from": (checkpoint_path if checkpoint_data is not None else None),
                         }
                     )
 
-                if ckpt is not None:
+                if checkpoint_data is not None:
                     telemetry.record_resume(tick=int(stats.tick), checkpoint_path=str(checkpoint_path))
 
                 # Bootstrap initial population as "birth events" so lineage tracking is consistent.
                 # Skip on resume-in-place to avoid duplicate bootstrap birth rows in the same lineage files.
-                if not (resume_continuity_active and ckpt is not None):
+                if not (resume_continuity_active and checkpoint_data is not None):
                     telemetry.bootstrap_from_registry(registry, tick=int(stats.tick), note="bootstrap_run_start")
 
         except Exception as e:
             print(f"[main] Telemetry init failed: {e}")
 
-        # ------------------------------------------------------------------
         # 7) Optional video recorder
-        # ------------------------------------------------------------------
         recorder = _SimpleRecorder(
             run_dir,
             grid,
@@ -941,46 +721,23 @@ def main() -> None:
             scale=getattr(config, "VIDEO_SCALE", 4),
         )
 
-    # Wrap engine.run_tick so we can record frames without modifying TickEngine itself.
     _orig_run_tick = engine.run_tick
 
     def _run_tick_with_recording():
-        """
-        Decorator-style wrapper around engine.run_tick.
-
-        This is a classic technique:
-        - store original function
-        - define new function that calls original + extra work
-        - replace method reference
-
-        It lets us add recording behavior without editing engine code.
-        """
+        """Record frames around the original tick callback when enabled."""
         out = _orig_run_tick()
 
         if recorder.enabled and (stats.tick % getattr(config, "VIDEO_EVERY_TICKS", 1) == 0):
             recorder.write()
-        # Preserve original run_tick() return value (TickMetrics dict) so callers like
-        # headless telemetry can consume it without changing TickEngine.
         return out
-    engine.run_tick = _run_tick_with_recording  # monkey-patch: replace method at runtime
+    engine.run_tick = _run_tick_with_recording
 
-    # ------------------------------------------------------------------
-    # 8) Graceful shutdown on signals
-    # ------------------------------------------------------------------
     shutdown_requested = {"flag": False}
 
     def _signal_handler(signum, frame) -> None:
-        """
-        Signal handler for SIGINT (Ctrl+C) and SIGTERM.
-
-        We set a flag rather than abruptly killing logic.
-        That allows:
-        - finishing current tick safely
-        - flushing logs
-        - writing summary/checkpoint
-        """
+        """Request shutdown after the current tick completes."""
         shutdown_requested["flag"] = True
-        print(f"\n[main] Signal {signum} received — will finish current tick and shut down.")
+        print(f"\n[main] Signal {signum} received; finishing current tick before shutdown.")
 
     # Register SIGINT and SIGTERM when available
     for sig in (signal.SIGINT, getattr(signal, "SIGTERM", signal.SIGINT)):
@@ -990,19 +747,14 @@ def main() -> None:
             # Some environments (e.g., notebooks) restrict signal registration
             pass
 
-    # ------------------------------------------------------------------
-    # PATCHED BLOCK:
     # - after signal registration loop in main(), add engine attachment
-    # ------------------------------------------------------------------
     # Expose shutdown flag to engine (headless loop + UI loop can poll it)
     try:
         engine.shutdown_requested = shutdown_requested
     except Exception:
         pass
 
-    # ------------------------------------------------------------------
     # 9) Run loop (UI or headless)
-    # ------------------------------------------------------------------
     start_ts = time.strftime("%Y-%m-%d_%H-%M-%S")
     start_time = time.time()
 
@@ -1031,22 +783,19 @@ def main() -> None:
                 stats,
                 registry,
                 grid,
-                rw,
+                results_writer,
                 limit=config.TICK_LIMIT,
-                ckpt_mgr=ckpt_mgr,
+                checkpoint_manager=checkpoint_manager,
             )
 
-        # ------------------------------------------------------------------
-        # PATCHED BLOCK:
         # - after UI/headless run completes inside the try: block,
         #   add conversion of flag to KeyboardInterrupt to reuse shutdown path
-        # ------------------------------------------------------------------
         # If a signal requested shutdown, translate it into the existing KeyboardInterrupt path.
         if shutdown_requested.get("flag", False):
             raise KeyboardInterrupt
 
     except KeyboardInterrupt:
-        print("\n[main] Interrupted — flushing logs…")
+        print("\n[main] Interrupted; flushing logs...")
         status = "interrupted"
 
     except Exception as e:
@@ -1062,40 +811,32 @@ def main() -> None:
         raise
 
     finally:
-        # ------------------------------------------------------------------
         # 10) Persist final death logs
-        # ------------------------------------------------------------------
         try:
             deaths = stats.drain_dead_log()
-            if deaths and rw is not None:
-                rw.write_deaths(deaths)
+            if deaths and results_writer is not None:
+                results_writer.write_deaths(deaths)
         except Exception:
             pass
 
-        # ------------------------------------------------------------------
         # 11) Close telemetry first so final snapshots/events reach the same horizon
         #     before checkpoint + summary are frozen.
-        # ------------------------------------------------------------------
         try:
             if telemetry is not None:
                 telemetry.close()
         except Exception:
             pass
 
-        # ------------------------------------------------------------------
         # 12) On-exit checkpoint
-        # ------------------------------------------------------------------
-        if ckpt_mgr is not None and bool(getattr(config, "CHECKPOINT_ON_EXIT", True)):
+        if checkpoint_manager is not None and bool(getattr(config, "CHECKPOINT_ON_EXIT", True)):
             try:
-                out = ckpt_mgr.save_atomic(engine=engine, registry=registry, stats=stats, notes="on_exit")
-                ckpt_mgr.prune_keep_last_n(int(getattr(config, "CHECKPOINT_KEEP_LAST_N", 1)))
+                out = checkpoint_manager.save_atomic(engine=engine, registry=registry, stats=stats, notes="on_exit")
+                checkpoint_manager.prune_keep_last_n(int(getattr(config, "CHECKPOINT_KEEP_LAST_N", 1)))
                 print("[checkpoint] on-exit saved:", out.name)
             except Exception as ex:
                 print("[checkpoint] on-exit FAILED:", type(ex).__name__, ex)
 
-        # ------------------------------------------------------------------
         # 13) Final summary (atomic JSON)
-        # ------------------------------------------------------------------
         try:
             summary = {
                 "status": status,
@@ -1120,12 +861,10 @@ def main() -> None:
             except Exception:
                 pass
 
-        # ------------------------------------------------------------------
         # 14) Shutdown background writer and recorder
-        # ------------------------------------------------------------------
         try:
-            if rw is not None:
-                rw.close()
+            if results_writer is not None:
+                results_writer.close()
         except Exception:
             pass
 
@@ -1137,17 +876,5 @@ def main() -> None:
         print("[main] Shutdown complete.")
 
 
-# =============================================================================
-# Standard Python entry-point guard
-# =============================================================================
-#
-# When you run:
-#     python main.py
-# Python sets __name__ == "__main__" for this file.
-# If the file is imported as a module, __name__ will be "main" (or package.main),
-# and the code below will NOT execute.
-#
-# This is crucial for multiprocessing on Windows to avoid recursively spawning processes.
-#
 if __name__ == "__main__":
     main()

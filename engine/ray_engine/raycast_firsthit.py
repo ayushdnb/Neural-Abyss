@@ -1,97 +1,71 @@
 from __future__ import annotations
-# ──────────────────────────────────────────────────────────────────────────────
 # Future annotations
-# ──────────────────────────────────────────────────────────────────────────────
 # This import changes how Python evaluates type annotations.
 # With this enabled, annotations are stored as strings (forward references) and
 # are not immediately evaluated at function definition time.
-#
 # Practical benefits:
 #   • Prevents import-order issues in complex projects (especially with circular
 #     imports between modules).
 #   • Allows referencing types that are defined later in the same module.
 #   • Slightly reduces runtime overhead during import.
-#
 # This affects only annotation behavior; it does not alter tensor computation.
 from __future__ import annotations
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Typing imports
-# ──────────────────────────────────────────────────────────────────────────────
 # Optional[T] means the value is either of type T or it is None.
 # Here, `max_steps_each` may be omitted, in which case a default range is used.
 from typing import Optional
 
-# ──────────────────────────────────────────────────────────────────────────────
 # PyTorch import
-# ──────────────────────────────────────────────────────────────────────────────
 # torch is the primary tensor computation library used for:
 #   • CPU/GPU execution
 #   • efficient vectorized operations
 #   • tensor indexing and broadcasting
-#
 # In this module, torch is used for building an integer unit map and for batched
 # raycasting feature extraction.
 import torch
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Project configuration import
-# ──────────────────────────────────────────────────────────────────────────────
 # The code reads several configuration knobs from `config`, typically including:
 #   • TORCH_DTYPE         : floating dtype for returned features (e.g. float32)
 #   • RAYCAST_MAX_STEPS   : global maximum ray length in grid steps
 #   • MAX_HP              : normalization constant for hit points
-#
 # getattr(...) is used defensively so missing fields do not immediately crash.
 import config
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Grid representation documentation
-# ──────────────────────────────────────────────────────────────────────────────
 # This module assumes a "grid" tensor of shape (3, H, W) with the following
 # semantics per channel:
-#
 #   channel 0: occupancy / tile type encoding
 #       0 = empty
 #       1 = wall
 #       2 = red team occupancy marker
 #       3 = blue team occupancy marker
-#
 #   channel 1: hp (hit points), typically in [0, MAX_HP]
-#
 #   channel 2: agent_id
 #       -1 indicates no agent present
 #       >=0 indicates an agent exists at that cell (agent registry index/id)
-#
 # Additionally, an HxW `unit_map` is used for unit subtype classification:
 #   -1 = empty/no agent
 #    1 = soldier
 #    2 = archer
-# ──────────────────────────────────────────────────────────────────────────────
 
-# ──────────────────────────────────────────────────────────────────────────────
 # DIRS8: the 8-connected neighborhood directions
-# ──────────────────────────────────────────────────────────────────────────────
 # These are the standard 8 compass directions (including diagonals) used in many
 # grid-world environments, corresponding to 8-neighborhood connectivity:
-#
 #   Index: 0   1    2   3   4   5    6   7
 #   Dir:   N  NE    E  SE   S  SW    W  NW
-#
 # Coordinate convention used here:
 #   The direction vectors are in (dx, dy) format.
 #   • dx increases as we move to the right (east).
 #   • dy increases as we move downward (south).
-#
 # Hence:
 #   N  = ( 0, -1)
 #   E  = ( 1,  0)
 #   S  = ( 0,  1)
 #   W  = (-1,  0)
-#
 # Diagonals follow accordingly:
 #   NE = ( 1, -1), SE = ( 1,  1), SW = (-1,  1), NW = (-1, -1)
-#
 # The comment notes this ordering is consistent with `move_mask`, which strongly
 # implies other parts of the project assume the same directional indexing.
 DIRS8 = torch.tensor(
@@ -108,19 +82,15 @@ DIRS8 = torch.tensor(
     dtype=torch.long
 )
 
-# ──────────────────────────────────────────────────────────────────────────────
 # One-hot class count for ray "first hit" classification
-# ──────────────────────────────────────────────────────────────────────────────
 # The ray feature encodes what the ray hits first using a one-hot vector with 6
 # possible classes:
-#
 #   0 = none          (no hit within max range)
 #   1 = wall
 #   2 = red-soldier
 #   3 = red-archer
 #   4 = blue-soldier
 #   5 = blue-archer
-#
 # The encoding for soldier/archer is derived from `unit_map` values {1,2}, while
 # red/blue is derived from occupancy channel values {2,3}.
 _TYPE_CLASSES = 6
@@ -194,11 +164,8 @@ def build_unit_map(agent_data: torch.Tensor, grid: torch.Tensor) -> torch.Tensor
     if not has_agent.any():
         return unit_map
 
-    # -------------------------------------------------------------------------
     # Gather unit type by agent id and place it in the spatial map.
-    # -------------------------------------------------------------------------
     # Local import to avoid circular module dependencies.
-    #
     # COL_UNIT is assumed to be the column index in agent_data that stores the
     # unit subtype. The comment indicates it is float values {1.0, 2.0}.
     from ..agent_registry import COL_UNIT  # local import to avoid circulars
@@ -206,7 +173,6 @@ def build_unit_map(agent_data: torch.Tensor, grid: torch.Tensor) -> torch.Tensor
     # units_by_id:
     #   A vector of length N (number of agents), where units_by_id[i] is the unit
     #   subtype of agent i.
-    #
     # It is cast to int32 to align with the desired unit_map encoding.
     units_by_id = agent_data[:, COL_UNIT].to(torch.int32)  # (N,)
 
@@ -214,7 +180,6 @@ def build_unit_map(agent_data: torch.Tensor, grid: torch.Tensor) -> torch.Tensor
     #   An (H, W) tensor where for each cell:
     #     • if has_agent is True, value = units_by_id[agent_id]
     #     • else, value = -1
-    #
     # ids.clamp_min(0) ensures that empty cells (ids=-1) do not attempt to index
     # units_by_id with a negative index. These entries are anyway discarded by
     # torch.where using has_agent as the condition.
@@ -282,9 +247,7 @@ def raycast8_firsthit(
       • It avoids Python loops, which is critical for speed at scale.
     """
 
-    # -------------------------------------------------------------------------
     # Device and dtype policy
-    # -------------------------------------------------------------------------
     # Ensure computation takes place on the same device as grid to avoid
     # costly device transfers and to enable GPU acceleration.
     device = grid.device
@@ -294,9 +257,7 @@ def raycast8_firsthit(
     # (e.g. float16/bfloat16) or preserve numeric stability (float32).
     dtype = getattr(config, "TORCH_DTYPE", torch.float32)
 
-    # -------------------------------------------------------------------------
     # Input normalization: positions, sizes
-    # -------------------------------------------------------------------------
     # pos_xy: agent coordinates, expected as integer indices (x, y).
     # Force onto device and long dtype for safe grid indexing.
     pos_xy = pos_xy.to(dtype=torch.long, device=device)
@@ -307,9 +268,7 @@ def raycast8_firsthit(
     # H, W = grid height and width.
     H, W = int(grid.size(1)), int(grid.size(2))
 
-    # -------------------------------------------------------------------------
     # Configure ray length: global cap and per-agent effective max
-    # -------------------------------------------------------------------------
     # R_global is a hard maximum number of steps for any ray.
     # It bounds computation and memory cost.
     R_global = int(getattr(config, "RAYCAST_MAX_STEPS", 10))
@@ -325,9 +284,7 @@ def raycast8_firsthit(
             R_global
         )
 
-    # -------------------------------------------------------------------------
     # Construct coordinates for all agents × rays × steps
-    # -------------------------------------------------------------------------
     # dirs: (1, 8, 2) direction vectors.
     # Broadcasting allows adding these to all agents in one operation.
     dirs = DIRS8.to(device).view(1, 8, 2)                    # (1,8,2)
@@ -350,14 +307,11 @@ def raycast8_firsthit(
     coords = base + dirs.view(1, 8, 1, 2) * steps            # (N,8,S,2)
 
     # Split coords into x and y and clamp to grid bounds.
-    #
     # clamp_ is in-place, reducing allocations.
     x = coords[..., 0].clamp_(0, W - 1)                      # (N,8,S)
     y = coords[..., 1].clamp_(0, H - 1)                      # (N,8,S)
 
-    # -------------------------------------------------------------------------
     # Active mask: disable steps beyond each agent's max vision range
-    # -------------------------------------------------------------------------
     # step_ids is (1, 1, S) holding 1..S.
     step_ids = torch.arange(
         1, R_global + 1,
@@ -369,24 +323,18 @@ def raycast8_firsthit(
     # active[i, 0, s] is True if s+1 <= max_steps_each[i].
     active = step_ids <= max_steps_each.view(N, 1, 1)        # (N,1,S)
 
-    # -------------------------------------------------------------------------
     # Gather grid values along the ray paths
-    # -------------------------------------------------------------------------
     # occ: occupancy type along rays.
     # hp:  hit points along rays.
     # uid: unit subtype along rays from unit_map.
-    #
     # Note: uid is not directly used to locate hits; it is used later for
     # class resolution (soldier vs archer) once an agent hit is confirmed.
     occ = grid[0][y, x]                                      # (N,8,S)
     hp  = grid[1][y, x]                                      # (N,8,S)
     uid = unit_map[y, x]                                     # (N,8,S) ∈ {-1,1,2}
 
-    # -------------------------------------------------------------------------
     # Determine hit masks: wall hits and agent hits (within active range)
-    # -------------------------------------------------------------------------
     # is_wall: True where occupancy indicates wall and the step is within range.
-    #
     # Broadcasting note:
     #   active is (N,1,S) and is_wall is (N,8,S); the singleton ray dimension
     #   in active broadcasts to 8 automatically.
@@ -395,9 +343,7 @@ def raycast8_firsthit(
     # has_agent: True where agent_id channel indicates presence and within range.
     has_agent = (grid[2][y, x] >= 0) & active                # (N,8,S)
 
-    # -------------------------------------------------------------------------
     # Compute first-hit indices for wall and agent separately
-    # -------------------------------------------------------------------------
     # First wall step index for each (N,8).
     any_wall = is_wall.any(dim=-1)                           # (N,8) whether any wall exists along ray
 
@@ -416,9 +362,7 @@ def raycast8_firsthit(
         torch.full(has_agent.shape[:-1], -1, device=device, dtype=torch.long),
     )  # (N,8)
 
-    # -------------------------------------------------------------------------
     # Resolve which hit occurs first (wall vs agent) per ray
-    # -------------------------------------------------------------------------
     # first_kind is the semantic class code:
     #   0 = none
     #   1 = wall
@@ -458,14 +402,11 @@ def raycast8_firsthit(
         first_idx[only_agent] = idx_agent[only_agent]
         first_kind[only_agent] = -2                            # agent (temp)
 
-    # -------------------------------------------------------------------------
     # Resolve agent hits into {2,3,4,5} class codes using team + unit subtype
-    # -------------------------------------------------------------------------
     agent_mask = (first_kind == -2)
 
     if agent_mask.any():
         # Gather the (y, x) coordinates at the first-hit step for each (N,8).
-        #
         # As before, clamp_min(0) avoids invalid gather indices; entries that
         # were actually invalid are not in agent_mask and thus not used.
         gather_y = torch.gather(
@@ -500,11 +441,8 @@ def raycast8_firsthit(
         # Write back resolved codes into first_kind for those rays.
         first_kind[agent_mask] = code[agent_mask]
 
-    # -------------------------------------------------------------------------
     # Distance feature: normalize by each agent's own max vision
-    # -------------------------------------------------------------------------
     # den: (N,8) denominator equals max_steps_each per agent, expanded to match rays.
-    #
     # clamp_min(1) avoids division by zero if any agent has max_steps_each=0.
     den = max_steps_each.clamp_min(1).to(torch.float32).view(N, 1).expand(N, 8)
 
@@ -517,9 +455,7 @@ def raycast8_firsthit(
     # dist_norm: normalized distance to first hit, or 0 if no hit.
     dist_norm = (dist_idx / den) * valid
 
-    # -------------------------------------------------------------------------
     # HP feature: gather HP at the first-hit location and normalize
-    # -------------------------------------------------------------------------
     # hp_first: gather HP from hp along step dimension at first_idx.
     hp_first = torch.gather(
         hp,
@@ -530,9 +466,7 @@ def raycast8_firsthit(
     # Zero out invalid rays (no hit).
     hp_first = hp_first * valid
 
-    # -------------------------------------------------------------------------
     # One-hot encoding for the 6 first-hit classes
-    # -------------------------------------------------------------------------
     onehot = torch.zeros((N, 8, _TYPE_CLASSES), dtype=dtype, device=device)
 
     # Ensure indices are within [0, 5] before scattering.
@@ -541,9 +475,7 @@ def raycast8_firsthit(
     # Scatter 1.0 into the correct class slot.
     onehot.scatter_(2, idx_valid.unsqueeze(-1), 1.0)
 
-    # -------------------------------------------------------------------------
     # Normalize HP by MAX_HP with defensive safeguards
-    # -------------------------------------------------------------------------
     max_hp = float(getattr(config, "MAX_HP", 1.0))
     if max_hp <= 0:  # avoid division by zero or negative normalization
         max_hp = 1.0
@@ -554,10 +486,8 @@ def raycast8_firsthit(
     # dist_norm should match dtype for consistent downstream consumption.
     dist_norm = dist_norm.to(dtype)
 
-    # -------------------------------------------------------------------------
     # Assemble final feature tensor:
     #   onehot(6) + dist_norm(1) + hp_norm(1) = 8 dims per ray
-    # -------------------------------------------------------------------------
     feat = torch.cat(
         [onehot, dist_norm.unsqueeze(-1), hp_norm.unsqueeze(-1)],
         dim=-1

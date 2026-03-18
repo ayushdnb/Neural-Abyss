@@ -1,14 +1,10 @@
-from __future__ import annotations  # Postpones evaluation of type annotations (PEP 563 / PEP 649-related behavior),
-                                   # allowing forward references without quotes and reducing runtime import cycles.
-                                   # Practical benefit: you can annotate with classes/types defined later in the file
-                                   # (or in conditional imports) without NameError at import time.
+"""Grid allocation and device consistency checks."""
 
-import torch                 # PyTorch: tensor library + GPU acceleration + autograd engine.
-import config                # Project-local configuration module (must define GRID_HEIGHT, GRID_WIDTH, TORCH_DTYPE, etc.).
+from __future__ import annotations
 
-import torch                 # NOTE: duplicate import; kept intentionally to preserve code exactly as provided.
-from torch import Tensor     # Tensor type alias from torch; useful for annotations and readability.
-                             # Also kept exactly as provided even if unused, to preserve the original code.
+import torch
+import config
+from torch import Tensor
 
 def make_grid(device: torch.device) -> torch.Tensor:
     """
@@ -75,50 +71,38 @@ def make_grid(device: torch.device) -> torch.Tensor:
     H, W = config.GRID_HEIGHT, config.GRID_WIDTH
 
     # Allocate a tensor of zeros with shape (3, H, W).
-    #
     # torch.zeros(...) creates a tensor filled with 0.0 (or 0 for integer dtypes).
     # dtype=config.TORCH_DTYPE ensures consistency across the system:
     #   - computations remain in a known precision (e.g., float32),
     #   - reduces accidental dtype promotion/demotion,
     #   - improves reproducibility and performance predictability.
-    #
     # device=device places the tensor directly on the target device (CPU/GPU).
     g = torch.zeros((3, H, W), dtype=config.TORCH_DTYPE, device=device)
 
-    # -------------------------------------------------------------------------
     # WALL INITIALIZATION (BOUNDARY CONDITIONS)
-    # -------------------------------------------------------------------------
     # We create a "box" of walls around the perimeter of the grid.
-    #
     # This is a common technique in grid simulations:
     # - It avoids needing extra bounds checks during movement or ray-casting.
     # - Agents cannot leave the map because boundary cells are non-traversable.
-    #
     # Here, we set occupancy channel (channel 0) to 1.0 (wall code) on:
     #   - top row:    y = 0
     #   - bottom row: y = H-1
     #   - left col:   x = 0
     #   - right col:  x = W-1
-    #
     # Indexing details:
     #   g[0, 0, :]     => channel 0, row 0, all columns
     #   g[0, H-1, :]   => channel 0, row H-1, all columns
     #   g[0, :, 0]     => channel 0, all rows, column 0
     #   g[0, :, W-1]   => channel 0, all rows, column W-1
-    #
     # Note: Semicolons are used to place multiple statements on one line.
     # Kept exactly as provided.
     g[0, 0, :] = 1.0; g[0, H-1, :] = 1.0; g[0, :, 0] = 1.0; g[0, :, W-1] = 1.0
 
-    # -------------------------------------------------------------------------
     # AGENT ID INITIALIZATION
-    # -------------------------------------------------------------------------
     # Channel 2 stores agent_id. We set it to -1.0 everywhere.
-    #
     # Why -1?
     # - In indexing contexts, valid IDs are usually non-negative (0..N-1).
     # - -1 is a conventional sentinel meaning "no agent present".
-    #
     # Why fill_?
     # - g[2] selects channel 2 with shape (H, W) as a view.
     # - .fill_(value) performs an in-place fill on that view efficiently.
@@ -190,21 +174,16 @@ def assert_on_same_device(*tensors: torch.Tensor) -> None:
 
     # Iterate through each provided tensor and validate constraints.
     for t in tensors:
-        # ---------------------------------------------------------------------
         # DEVICE CONSISTENCY CHECK
-        # ---------------------------------------------------------------------
         # If any tensor is on a different device than the reference, abort.
         # Example mismatch: dev=cpu vs t.device=cuda:0
         if t.device != dev:
             raise RuntimeError(f"Device mismatch: {dev} vs {t.device}")
 
-        # ---------------------------------------------------------------------
         # FLOAT DTYPE CONSISTENCY CHECK
-        # ---------------------------------------------------------------------
         # Only enforce dtype for floating point tensors.
         # This avoids incorrectly rejecting integer/boolean tensors that are
         # legitimately used as indices/masks.
-        #
         # If floating, the dtype must match the project's configured float dtype.
         # This is commonly float32 for speed, or float16/bfloat16 for AMP/mixed precision.
         if t.is_floating_point() and t.dtype != config.TORCH_DTYPE:

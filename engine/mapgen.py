@@ -1,40 +1,28 @@
 from __future__ import annotations
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Standard library and typing imports
-# ──────────────────────────────────────────────────────────────────────────────
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 import random
 
-# ──────────────────────────────────────────────────────────────────────────────
 # PyTorch import
-# ──────────────────────────────────────────────────────────────────────────────
 import torch
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Project configuration
-# ──────────────────────────────────────────────────────────────────────────────
 import config
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Grid channels documentation
-# ──────────────────────────────────────────────────────────────────────────────
 # The code operates on a grid tensor of shape (3, H, W) with these semantics:
-#
 #   grid[0] occupancy (tile kind / team marker)
 #       0 empty
 #       1 wall
 #       2 red occupancy marker
 #       3 blue occupancy marker
-#
 #   grid[1] hp
 #       typically 0..MAX_HP; for walls/empty tiles, it is usually 0 or unused.
-#
 #   grid[2] agent_id
 #       -1 indicates no agent is present
 #       >=0 indicates an agent exists in that cell (registry slot/id)
-#
 # Zone masks intentionally remain off-grid. This keeps special map semantics
 # additive and avoids forcing unrelated renderer / engine / serialization changes.
 
@@ -159,9 +147,7 @@ class Zones:
 
         self.rebuild_effective_heal_mask()
 
-    # ------------------------------------------------------------------
     # Public compatibility properties
-    # ------------------------------------------------------------------
     @property
     def heal_mask(self) -> torch.Tensor:
         """Single derived runtime truth for active heal cells."""
@@ -197,9 +183,7 @@ class Zones:
         """Monotonic revision for effective-heal-mask changes only."""
         return int(self._runtime_heal_revision)
 
-    # ------------------------------------------------------------------
     # Public heal-zone API required by catastrophe foundation work
-    # ------------------------------------------------------------------
     def rebuild_effective_heal_mask(self) -> torch.Tensor:
         """
         Recompute the effective heal mask from base geometry + runtime state.
@@ -422,9 +406,7 @@ class Zones:
             cp_masks=cp_masks,
         )
 
-    # ------------------------------------------------------------------
     # Internal helpers
-    # ------------------------------------------------------------------
     def _set_manual_zone_enabled(
         self,
         zone_id: str,
@@ -604,9 +586,7 @@ class Zones:
             raise IndexError(f"cell ({x}, {y}) is outside heal grid bounds ({self.W}, {self.H})")
 
 
-# ------------------------------------------------------------------------------
 # Random thin gray walls (1-cell thick, meandering segments)
-# ------------------------------------------------------------------------------
 @torch.no_grad()
 def add_random_walls(
     grid: torch.Tensor,
@@ -711,9 +691,7 @@ def add_random_walls(
                 pass
 
 
-# ------------------------------------------------------------------------------
 # Heal & Capture zones (rectangular patches, scaled to grid)
-# ------------------------------------------------------------------------------
 @torch.no_grad()
 def make_zones(
     H: int,
@@ -768,4 +746,3 @@ def make_zones(
             cp_masks.append(m)
 
     return Zones(heal_zones=heal_zones, cp_masks=cp_masks)
-

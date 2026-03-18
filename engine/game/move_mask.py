@@ -7,21 +7,16 @@ from __future__ import annotations
 import torch
 import config
 
-# ============================================================================
 # Action Masking with Optional Line-of-Sight (LOS) Wall Blocking
-# ============================================================================
 # This module builds an action mask for each agent in a grid-based simulation.
-#
 # "Action mask" meaning:
 #   - A boolean tensor mask[N, A] where:
 #       mask[n, a] = True  -> action "a" is currently valid for agent "n"
 #       mask[n, a] = False -> action "a" is invalid and should be disallowed
-#
 # This is typically used in RL with discrete actions to:
 #   - prevent illegal actions from being sampled by the policy
 #   - reduce wasted exploration on impossible moves
 #   - simplify credit assignment by removing nonsensical actions
-#
 # The environment uses an occupancy grid:
 #   grid: (3, H, W) float
 #     - channel 0 (grid[0]) is occupancy / type map.
@@ -31,30 +26,24 @@ import config
 #         2.0 = team red (or red unit marker)
 #         3.0 = team blue (or blue unit marker)
 #       (Other channels exist but are not used in this mask builder.)
-#
 # "Teams" tensor:
 #   teams: (N,) float where team identity is encoded as 2.0 (red) or 3.0 (blue)
-#
 # "Units" tensor:
 #   unit: (N,) where:
 #     1 = soldier
 #     2 = archer
-#
 # Action layout:
 #   A = config.NUM_ACTIONS
 #   Two supported layouts are implied by code:
 #     - A <= 17: idle + 8 moves + 8 melee attacks (range 1 only)
 #     - A  = 41: idle + 8 moves + (8 directions × 4 ranges) ranged attack actions
-#
 # Optional LOS rule:
 #   If config.ARCHER_LOS_BLOCKS_WALLS is True:
 #     - ranged attacks are disabled when a wall exists in any intermediate cell
 #       between attacker and target along that direction.
-# ============================================================================
 
 
 # 8 directions (dx, dy): N, NE, E, SE, S, SW, W, NW
-#
 # Coordinate convention implied by usage:
 #   - x increases to the right
 #   - y increases downward
@@ -122,7 +111,6 @@ def _los_blocked_by_walls_grid0(
         return torch.zeros((0, 8, int(RMAX)), dtype=torch.bool, device=device)
 
     # steps 1..(RMAX-1) are the only possible "in-between" cells
-    #
     # Example with RMAX=4:
     #   steps = [1, 2, 3]
     #   For a target at range r=4, intermediate steps are 1..3.
@@ -144,7 +132,6 @@ def _los_blocked_by_walls_grid0(
 
     # Compute intermediate coordinates for each attacker, direction, and step:
     #   ix, iy: (N, 8, RMAX-1)
-    #
     # ix = x0 + dx * step
     # iy = y0 + dy * step
     ix = x0.view(N, 1, 1) + dx * sx
@@ -169,7 +156,6 @@ def _los_blocked_by_walls_grid0(
     is_wall = (occ0[iy_c, ix_c] == 1.0) & inb
 
     # For each range r=1..RMAX, blocked if any wall exists at steps < r.
-    #
     # blocked[:, :, r-1] checks intermediate steps 1..(r-1).
     blocked = torch.zeros((N, 8, int(RMAX)), dtype=torch.bool, device=device)
     for r in range(1, int(RMAX) + 1):
@@ -259,9 +245,7 @@ def build_mask(
     # Initialize all actions as invalid. We will set valid ones to True.
     mask = torch.zeros((N, A), dtype=torch.bool, device=device)
 
-    # ------------------------------------------------------------------------
     # IDLE action (always valid if action space has at least one action).
-    # ------------------------------------------------------------------------
     if A >= 1:
         mask[:, 0] = True
 
@@ -269,17 +253,13 @@ def build_mask(
     if N == 0 or A <= 1:
         return mask
 
-    # ------------------------------------------------------------------------
     # Extract integer positions (x0, y0) for grid indexing.
     # non_blocking=True can help when tensors are on pinned memory and transfers occur.
-    # ------------------------------------------------------------------------
     x0 = pos_xy[:, 0].to(torch.long, non_blocking=True)  # (N,)
     y0 = pos_xy[:, 1].to(torch.long, non_blocking=True)  # (N,)
     dirs = DIRS8.to(device)  # (8, 2)
 
-    # ========================================================================
     # MOVE actions (columns 1..8)
-    # ========================================================================
     # Compute neighbor positions in all 8 directions:
     #   nx, ny: (N, 8)
     nx = x0.view(N, 1) + dirs[:, 0].view(1, 8)
@@ -307,9 +287,7 @@ def build_mask(
     if move_cols > 0:
         mask[:, 1:1 + move_cols] = free[:, :move_cols]
 
-    # ========================================================================
     # ATTACK actions
-    # ========================================================================
     # If action space ends at index 8, there are no attack actions.
     if A <= 9:
         return mask
@@ -317,9 +295,7 @@ def build_mask(
     # Convert teams to integer codes for comparisons.
     teamv = teams.to(torch.long, non_blocking=True)  # (N,)
 
-    # ------------------------------------------------------------------------
     # Legacy 17-action layout: melee only at range 1 per direction
-    # ------------------------------------------------------------------------
     if A <= 17:
         # For melee at range 1, the potential target is the neighbor cell occupancy already computed:
         #   tgt_team: (N, 8) uses occ from move computation.
@@ -338,9 +314,7 @@ def build_mask(
             mask[:, 9:9 + k] = enemy[:, :k]
         return mask
 
-    # ------------------------------------------------------------------------
     # 41-action layout: 8 directions × 4 ranges
-    # ------------------------------------------------------------------------
     RMAX = 4
 
     # Prepare broadcast shapes for direction and range computations.
@@ -369,7 +343,6 @@ def build_mask(
     #   - not empty (!= 0.0)
     #   - not wall (!= 1.0)
     #   - not own team code
-    #
     # Important: The code compares tgt_occ.to(long) to teamv.
     # This implies team values in grid[0] match the team coding (2 or 3).
     enemy_r = (tgt_occ != 0.0) & (tgt_occ != 1.0) & (tgt_occ.to(torch.long) != teamv.view(N, 1, 1))
@@ -378,9 +351,7 @@ def build_mask(
     enemy_r &= inb_r
     enemy_r &= inb_r
 
-    # ------------------------------------------------------------------------
     # Unit gating: determine which ranges are allowed per unit type
-    # ------------------------------------------------------------------------
     if unit is None:
         # Default permissive behavior: treat everyone as an archer.
         units = torch.full((N,), 2, device=device, dtype=torch.long)
@@ -406,12 +377,9 @@ def build_mask(
     # allow_r.view(N, 1, RMAX) broadcasts across directions (8).
     atk_ok = enemy_r & allow_r.view(N, 1, RMAX)  # (N, 8, 4)
 
-    # ------------------------------------------------------------------------
     # Optional LOS wall blocking
-    # ------------------------------------------------------------------------
     # If enabled, ranged attacks are disabled if there is a wall in any intermediate cell
     # between attacker and target along the attack direction.
-    #
     # Important subtlety:
     # - blocked is computed for all agents and directions for ranges 1..4.
     # - For range 1, blocked is always False (no intermediate cells exist).
@@ -425,9 +393,7 @@ def build_mask(
         )
         atk_ok = atk_ok & (~blocked)
 
-    # ------------------------------------------------------------------------
     # Write attack mask into action columns
-    # ------------------------------------------------------------------------
     # Attack columns start at base=9, with contiguous blocks of size RMAX per direction:
     #   direction d block:
     #     columns [9 + d*4, 9 + d*4 + 1, 9 + d*4 + 2, 9 + d*4 + 3]

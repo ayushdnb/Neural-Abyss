@@ -1,58 +1,4 @@
-"""
-simulation_stats.py
-
-A clean, well-documented statistics + scoring module for a 2-team simulation.
-
-This file provides:
-1) TeamCounters: a small "struct-like" container that holds cumulative metrics
-2) Snapshot: a frozen-in-time copy of both teams' counters at some tick
-3) SimulationStats: the main stats manager used by the simulation loop
-
-WHY THIS MODULE EXISTS (PROJECT CONTEXT)
-----------------------------------------
-In multi-agent simulations (especially multi-agent RL), you usually want:
-
-A) A running "score" signal that summarizes how well each team is doing
-   - useful for monitoring training, debugging, and progress reports
-
-B) A way to compute *delta rewards* between two moments
-   - PPO (and many RL algorithms) often need reward per step / per interval
-   - If you store cumulative totals, you can compute reward = current - previous
-
-C) A structured death log
-   - useful for debugging, analytics, replay systems, and training metrics
-   - "Who died, where, when, and who caused it?"
-
-DESIGN PRINCIPLES USED HERE
----------------------------
-- Deterministic, cumulative accounting:
-  We store totals (kills, damage, etc.) and update them as events happen.
-
-- Team-scoped counters:
-  Two teams only: red and blue. The interface uses team names as strings.
-
-- Minimal coupling:
-  We only depend on `config` for reward weights (hyperparameters).
-
-- Fast timing:
-  time.perf_counter() is used for elapsed time because it is a high-resolution
-  monotonic clock (best practice for measuring durations).
-
-IMPORTANT NOTE ABOUT "DON'T CHANGE ANY CODE"
---------------------------------------------
-You asked: "rewrite from scratch ... don't change any code ... add lots of comments".
-As with the previous file, rewriting necessarily changes formatting and adds text,
-but the *behavior and public API* are preserved:
-
-- Constants: TEAM_RED, TEAM_BLUE
-- Dataclasses: TeamCounters, Snapshot
-- Main class: SimulationStats with same methods and semantics
-- Same scoring wiring with config.TEAM_* coefficients
-- Same death log schema and drain behavior
-
-If you copy-paste this into your repo, it should behave the same way while being
-much easier for beginners to understand.
-"""
+"""Team-scoped scoring and structured death logging."""
 
 from __future__ import annotations
 
@@ -63,18 +9,14 @@ import time
 import config
 
 
-# -----------------------------------------------------------------------------
 # Team identifiers
-# -----------------------------------------------------------------------------
 # These constants avoid "magic strings" spread across the codebase.
 # If later you change a team name, you update it once here.
 TEAM_RED = "red"
 TEAM_BLUE = "blue"
 
 
-# -----------------------------------------------------------------------------
 # Data containers (dataclasses)
-# -----------------------------------------------------------------------------
 @dataclass
 class TeamCounters:
     """
@@ -154,9 +96,7 @@ class Snapshot:
     tick: int
 
 
-# -----------------------------------------------------------------------------
 # Main stats manager
-# -----------------------------------------------------------------------------
 class SimulationStats:
     """
     Team-scoped scoring + structured death log.
@@ -196,15 +136,12 @@ class SimulationStats:
 
         # Structured death log: list of dictionaries.
         # Each entry records a death event with minimal useful fields.
-        #
         # Why not a dataclass for death entries?
         # - Dicts are convenient for JSON/CSV output and ad-hoc analytics.
         # - Schema is stable enough here.
         self._dead_log: List[Dict[str, float | int]] = []
 
-    # -------------------------------------------------------------------------
     # Timing helpers
-    # -------------------------------------------------------------------------
     @property
     def elapsed_seconds(self) -> float:
         """
@@ -238,9 +175,7 @@ class SimulationStats:
         """
         self.tick += int(dt)
 
-    # -------------------------------------------------------------------------
     # Internal helpers
-    # -------------------------------------------------------------------------
     def _team(self, name: str) -> TeamCounters:
         """
         Resolve a team name to the corresponding TeamCounters object.
@@ -259,9 +194,7 @@ class SimulationStats:
         """
         return self.red if name == TEAM_RED else self.blue
 
-    # -------------------------------------------------------------------------
     # Scoring wiring (events -> counters -> score)
-    # -------------------------------------------------------------------------
     def add_damage_dealt(self, team: str, amount: float) -> None:
         """
         Record damage dealt by a team and add its contribution to team score.
@@ -354,9 +287,7 @@ class SimulationStats:
         t.cp_points += float(amount)
         t.score += float(amount)
 
-    # -------------------------------------------------------------------------
     # Structured death log
-    # -------------------------------------------------------------------------
     def record_death_entry(
         self,
         agent_id: int,
@@ -429,9 +360,7 @@ class SimulationStats:
         self._dead_log = []
         return buf
 
-    # -------------------------------------------------------------------------
     # Snapshots and delta rewards
-    # -------------------------------------------------------------------------
     def snapshot(self) -> Snapshot:
         """
         Create and return a Snapshot of current counters.
@@ -461,9 +390,7 @@ class SimulationStats:
             TEAM_BLUE: self.blue.score - snap.blue.score,
         }
 
-    # -------------------------------------------------------------------------
     # Row export (CSV-friendly)
-    # -------------------------------------------------------------------------
     def as_row(self) -> Dict[str, float]:
         """
         Return a flat dict representing the current stats, suitable for CSV logging.

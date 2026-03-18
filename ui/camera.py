@@ -1,62 +1,4 @@
-"""
-camera.py
-
-A mathematically clean and beginner-friendly Camera system for
-2D grid-based simulations (like RL worlds, games, or cellular grids).
-
-PROJECT CONTEXT (VERY IMPORTANT)
---------------------------------
-Your simulation appears to be:
-- A grid world (discrete cells)
-- Rendered on a screen (pixels)
-- Possibly large (e.g., 128x128, 512x512, etc.)
-- Viewed through a movable and zoomable camera
-
-This Camera class is responsible for:
-    Converting between:
-        1) WORLD SPACE  (grid coordinates: cells)
-        2) SCREEN SPACE (pixel coordinates: display)
-
-This is a CORE ENGINE COMPONENT in:
-- Game engines
-- Simulators
-- Visualization tools
-- RL environment renderers
-
-If this math is wrong → rendering becomes misaligned, jittery, or broken.
-
-DESIGN PHILOSOPHY
------------------
-1. Integer-friendly rendering (important for crisp grid visuals)
-2. Stable math (no drifting or floating precision artifacts)
-3. Clamped panning (camera never leaves world bounds)
-4. Zoom that scales cell size rather than world coordinates
-5. Simple but mathematically correct transforms
-
-KEY CONCEPTS (FOR ABSOLUTE BEGINNERS)
--------------------------------------
-There are TWO coordinate systems:
-
-1) WORLD COORDINATES (Discrete Grid)
-   Example:
-       Agent at (x=10, y=5)
-       This means:
-           10th column, 5th row in the grid world
-
-2) SCREEN COORDINATES (Pixels)
-   Example:
-       Pixel at (px=320, py=160)
-       This is where things are drawn on the monitor.
-
-Camera = Mathematical mapping:
-    (world_x, world_y)  <->  (screen_px, screen_py)
-
-FORMULA (Core Idea)
--------------------
-screen_position = (world_position - camera_offset) * pixels_per_cell
-
-This is the fundamental equation used in almost ALL 2D engines.
-"""
+"""Coordinate transforms and camera state for the viewer."""
 
 from __future__ import annotations
 
@@ -128,9 +70,7 @@ class Camera:
         self.world_w = int(world_w)
         self.world_h = int(world_h)
 
-    # -------------------------------------------------------------------------
     # DERIVED PROPERTIES (Computed Values)
-    # -------------------------------------------------------------------------
     @property
     def cell_px(self) -> int:
         """
@@ -153,9 +93,7 @@ class Camera:
         """
         return max(1, int(round(self.base_cell * self.zoom)))
 
-    # -------------------------------------------------------------------------
     # CAMERA OPERATIONS (User Interaction / Engine Control)
-    # -------------------------------------------------------------------------
     def pan(self, dx_cells: float, dy_cells: float) -> None:
         """
         Move the camera across the world (panning).
@@ -237,9 +175,7 @@ class Camera:
             )
         )
 
-    # -------------------------------------------------------------------------
     # CORE TRANSFORMATION FUNCTIONS (MOST IMPORTANT PART)
-    # -------------------------------------------------------------------------
     def world_to_screen(self, x_cell: int, y_cell: int) -> tuple[int, int]:
         """
         Convert WORLD grid coordinates → SCREEN pixel coordinates.
@@ -301,8 +237,7 @@ class Camera:
         -------------
         Because we are reversing the multiplication done in world_to_screen.
 
-        CLAMPING (VERY IMPORTANT):
-        --------------------------
+        Clamping:
         After conversion, we clamp the result to valid world bounds:
             [0, world_w - 1]
             [0, world_h - 1]

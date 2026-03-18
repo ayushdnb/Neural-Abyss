@@ -1,23 +1,6 @@
+"""Checkpoint save/load support for Neural Abyss."""
+
 from __future__ import annotations
-
-"""
-Checkpointing module (save/load/resume) for a PyTorch + NumPy simulation.
-
-This file is designed to:
-1) Save the *entire* simulation runtime state to disk in a crash-safe manner.
-2) Restore it later so the run can continue deterministically (as much as possible).
-
-Key ideas used here (high-level):
-- **Atomic writes**: write to a temporary file first, then use `os.replace(...)`
-  which is (typically) atomic on the same filesystem. This prevents partially
-  written/corrupted files if the process crashes mid-write.
-- **Portability**: tensors are moved to **CPU** before writing, so checkpoints can
-  be loaded on machines without the same GPU setup.
-- **Reproducibility**: RNG states from Python, NumPy, and PyTorch (CPU + CUDA) are
-  saved and restored.
-- **Versioning**: `checkpoint_version` supports forward compatibility if you
-  evolve the checkpoint format later.
-"""
 
 import json
 import os
@@ -27,7 +10,7 @@ import subprocess
 from dataclasses import is_dataclass, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, List   # added List (B1 style)
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -35,9 +18,7 @@ import torch
 import config
 
 
-# -----------------------------------------------------------------------------
 # Exceptions
-# -----------------------------------------------------------------------------
 
 class CheckpointError(RuntimeError):
     """
@@ -50,9 +31,7 @@ class CheckpointError(RuntimeError):
     pass
 
 
-# -----------------------------------------------------------------------------
 # Small utilities (timestamps, atomic file operations)
-# -----------------------------------------------------------------------------
 
 def _now_stamp() -> str:
     """
@@ -153,11 +132,9 @@ def _atomic_torch_save(path: Path, obj: Any) -> None:
     os.replace(tmp, path)
 
 
-# -----------------------------------------------------------------------------
 # Tensor/device portability helpers
-# -----------------------------------------------------------------------------
 
-def _cpuize(x: Any) -> Any:
+def _to_cpu_recursive(x: Any) -> Any:
     """
     Recursively move torch tensors to CPU for portable checkpoints.
 
@@ -186,11 +163,11 @@ def _cpuize(x: Any) -> Any:
 
     # If input is a dictionary, recursively process each value
     if isinstance(x, dict):
-        return {k: _cpuize(v) for k, v in x.items()}
+        return {k: _to_cpu_recursive(v) for k, v in x.items()}
 
     # If input is a list or tuple, recursively process each element
     if isinstance(x, (list, tuple)):
-        t = [_cpuize(v) for v in x]
+        t = [_to_cpu_recursive(v) for v in x]
         # Preserve tuple type if input was tuple
         return type(x)(t) if isinstance(x, tuple) else t
 
@@ -198,9 +175,7 @@ def _cpuize(x: Any) -> Any:
     return x
 
 
-# -----------------------------------------------------------------------------
 # Git metadata helper (optional)
-# -----------------------------------------------------------------------------
 
 def _try_git_commit() -> Optional[str]:
     """
@@ -222,9 +197,7 @@ def _try_git_commit() -> Optional[str]:
         return None
 
 
-# -----------------------------------------------------------------------------
 # Brain (model) type inference + reconstruction
-# -----------------------------------------------------------------------------
 
 def _infer_brain_kind(brain: torch.nn.Module) -> str:
     """
@@ -286,9 +259,7 @@ def _make_brain(kind: str, device: torch.device) -> torch.nn.Module:
     raise CheckpointError(f"Unknown brain kind in checkpoint: {kind}")
 
 
-# -----------------------------------------------------------------------------
 # RNG state capture/restore (determinism)
-# -----------------------------------------------------------------------------
 
 def _get_rng_state() -> Dict[str, Any]:
     """
@@ -359,9 +330,7 @@ def _set_rng_state(state: Dict[str, Any]) -> None:
             pass
 
 
-# -----------------------------------------------------------------------------
 # Stats extraction/apply (generic)
-# -----------------------------------------------------------------------------
 
 def _extract_stats(stats: Any) -> Dict[str, Any]:
     """
@@ -414,9 +383,7 @@ def _apply_stats(stats_obj: Any, payload: Dict[str, Any]) -> None:
             pass
 
 
-# -----------------------------------------------------------------------------
 # Path resolution for checkpoint inputs
-# -----------------------------------------------------------------------------
 
 def resolve_checkpoint_path(p: str) -> Tuple[Path, Path]:
     """
@@ -469,9 +436,7 @@ def resolve_checkpoint_path(p: str) -> Tuple[Path, Path]:
     raise CheckpointError(f"Checkpoint path not found: {p}")
 
 
-# -----------------------------------------------------------------------------
 # Main class: CheckpointManager
-# -----------------------------------------------------------------------------
 
 class CheckpointManager:
     """
@@ -573,7 +538,7 @@ class CheckpointManager:
 
             # Get brain type and state dict (moved to CPU)
             kind = _infer_brain_kind(b)
-            sd = _cpuize(b.state_dict())
+            sd = _to_cpu_recursive(b.state_dict())
             brains_payload.append({"kind": kind, "state_dict": sd})
 
         # Main checkpoint dictionary
@@ -588,12 +553,12 @@ class CheckpointManager:
                 "git_commit": _try_git_commit(),
             },
             "world": {
-                "grid": _cpuize(grid),
-                "zones": None if zones is None else _cpuize(zones.to_checkpoint_payload()),
+                "grid": _to_cpu_recursive(grid),
+                "zones": None if zones is None else _to_cpu_recursive(zones.to_checkpoint_payload()),
             },
             "registry": {
-                "agent_data": _cpuize(getattr(registry, "agent_data")),
-                "agent_uids": _cpuize(getattr(registry, "agent_uids", None)),
+                "agent_data": _to_cpu_recursive(getattr(registry, "agent_data")),
+                "agent_uids": _to_cpu_recursive(getattr(registry, "agent_uids", None)),
                 "generations": list(getattr(registry, "generations")),
                 "next_agent_id": int(getattr(registry, "_next_agent_id")),
                 "brains": brains_payload,
@@ -1160,7 +1125,6 @@ class CheckpointManager:
             if hasattr(respawner, k):
                 setattr(respawner, k, int(v))
 
-    # REPLACE THIS FUNCTION (exact name/signature) =================================
     @staticmethod
     def _extract_ppo_state(engine: Any) -> Dict[str, Any]:
         """
@@ -1185,4 +1149,3 @@ class CheckpointManager:
                 pass
 
         return {"enabled": True, "state": state}
-    # =============================================================================

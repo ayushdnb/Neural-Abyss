@@ -1,80 +1,59 @@
 from __future__ import annotations
-# ──────────────────────────────────────────────────────────────────────────────
 # Future annotations
-# ──────────────────────────────────────────────────────────────────────────────
 # This import ensures that *type annotations* are treated as "forward references"
 # by default (i.e., stored as strings rather than evaluated immediately).
-#
 # Why this matters:
 #   • It avoids runtime NameError issues when annotating with classes/types that
 #     are defined later in the file.
 #   • It reduces import-order coupling and can slightly improve import-time
 #     performance.
 #   • It is particularly useful in larger codebases with interdependent modules.
-#
 # Note: This does not change program behavior for the core tensor computations
 # below; it affects only annotation evaluation semantics.
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Typing imports
-# ──────────────────────────────────────────────────────────────────────────────
 # Optional[T] expresses that a value may be of type T or may be None.
 # Here it is used to indicate that `max_steps_each` can be omitted.
 from typing import Dict, Optional, Tuple
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Numerical / ML library imports
-# ──────────────────────────────────────────────────────────────────────────────
 # torch: tensor library used for GPU-accelerated computation and automatic
 #        differentiation. In this function we explicitly disable gradients
 #        because raycasting features are observational and do not require grads.
 import torch
-#
 # numpy: used here solely for generating evenly spaced angles and their
 #        corresponding unit direction vectors. This is done once at import time.
 import numpy as np
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Project configuration
-# ──────────────────────────────────────────────────────────────────────────────
 # A module expected to hold global knobs such as:
 #   • RAYCAST_MAX_STEPS   (int): maximum ray marching length
 #   • MAX_HP              (float or int): maximum hit points
 #   • TORCH_DTYPE         (torch dtype): e.g., torch.float32 / float16 / bfloat16
-#
 # The code uses getattr(...) to avoid hard-failing if these are not defined.
 import config
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Grid format documentation
-# ──────────────────────────────────────────────────────────────────────────────
 # This code assumes the environment is represented as a 3-channel grid tensor:
-#
 #   grid: torch.Tensor of shape (3, H, W)
-#
 # with semantic meaning per channel index:
 #   channel 0: occupancy / tile-type encoding
 #       0 = empty
 #       1 = wall
 #       2 = red team occupancy marker
 #       3 = blue team occupancy marker
-#
 #   channel 1: hp (hit points), typically in [0, MAX_HP]
 #       For empty cells or walls, hp is typically 0 or irrelevant.
-#
 #   channel 2: agent_id, encoded such that:
 #       -1 indicates no agent
 #       >=0 indicates an agent is present (agent id or index)
-#
 # In addition, this function receives:
 #   unit_map: torch.Tensor of shape (H, W), dtype int32 (as documented)
 #       Values are stated as ∈ {-1, 1, 2}. From usage below, it is used to
 #       disambiguate agent subtypes (e.g., soldier vs archer or similar).
-#
 # IMPORTANT:
 #   This function does not validate the correctness of these encodings; it
 #   assumes they are consistent with the simulation.
-# ──────────────────────────────────────────────────────────────────────────────
 
 
 def _generate_32_directions() -> torch.Tensor:
@@ -128,23 +107,18 @@ def _generate_32_directions() -> torch.Tensor:
 # It is computed once on import, preventing repeated numpy computation per call.
 DIRS32 = _generate_32_directions()
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Semantic class encoding for the ray "first hit"
-# ──────────────────────────────────────────────────────────────────────────────
 # For each ray, we want to describe what the ray hits first. The model uses a
 # one-hot encoding over 6 classes:
-#
 #   0 = none           (no hit within max range)
 #   1 = wall           (occupancy channel indicates wall)
 #   2 = red-soldier    (team red + unit subtype 1)
 #   3 = red-archer     (team red + unit subtype 2)
 #   4 = blue-soldier   (team blue + unit subtype 1)
 #   5 = blue-archer    (team blue + unit subtype 2)
-#
 # This mapping is derived from later logic that combines:
 #   • tile-type (grid[0]) indicating red vs blue occupancy marker, and
 #   • unit_map indicating subtype 1 vs subtype 2.
-#
 # The number of classes is therefore 6.
 _TYPE_CLASSES = 6
 _RAY_COUNT = 32
@@ -321,37 +295,28 @@ def raycast32_firsthit(
     integer casting discretization.
     """
 
-    # -------------------------------------------------------------------------
     # Device and dtype policy
-    # -------------------------------------------------------------------------
     # The raycast must occur on the same device as the grid to avoid expensive
     # device transfers and to support GPU execution.
     device = grid.device
-    #
     # The code chooses a floating-point dtype from config (if provided), else
     # defaults to float32. This dtype is used primarily for the final features
     # and the one-hot tensor.
     dtype = getattr(config, "TORCH_DTYPE", torch.float32)
 
-    # -------------------------------------------------------------------------
     # Normalize/validate input tensor placement and types
-    # -------------------------------------------------------------------------
     # pos_xy: expected shape (N, 2), representing per-agent integer position
     # coordinates (x, y). We explicitly cast to long and place on the grid device.
     pos_xy = pos_xy.to(dtype=torch.long, device=device)
-    #
     # N = number of agents.
     N = int(pos_xy.size(0))
     if N == 0:
         return torch.empty((0, _RAY_COUNT * _RAY_FEAT_DIM), device=device, dtype=dtype)
 
-    #
     # H, W from grid shape (3, H, W).
     H, W = int(grid.size(1)), int(grid.size(2))
 
-    # -------------------------------------------------------------------------
     # Determine maximum ray length (global and per-agent)
-    # -------------------------------------------------------------------------
     # Global maximum steps: a hard upper bound on ray-marching distance.
     # This is a configuration knob so you can trade off:
     #   • larger range (more information)
@@ -373,9 +338,7 @@ def raycast32_firsthit(
         max_steps_buf.clamp_(0, R_global)
     max_steps_each = max_steps_buf
 
-    # -------------------------------------------------------------------------
     # Construct ray-marching coordinates for all agents, all rays, all steps
-    # -------------------------------------------------------------------------
     # dirs: (1, 32, 2) direction vectors, cached once on the correct device.
     dirs = scratch.dirs                                                # (1,32,2)
     dirs_x = dirs[..., 0].view(1, _RAY_COUNT, 1)                       # (1,32,1)
@@ -415,9 +378,7 @@ def raycast32_firsthit(
     x.clamp_(0, W - 1)
     y.clamp_(0, H - 1)
 
-    # -------------------------------------------------------------------------
     # Construct the "active" mask for per-agent max steps
-    # -------------------------------------------------------------------------
     # step_ids: (1, 1, S) contains step indices 1..S (as long).
     # We use these to mask out steps beyond each agent's max range.
     step_ids = scratch.step_ids[:, :, :R_global]
@@ -428,12 +389,9 @@ def raycast32_firsthit(
     active = scratch.active[:N, :, :R_global]
     torch.le(step_ids, max_steps_each.view(N, 1, 1), out=active)
 
-    # -------------------------------------------------------------------------
     # Gather occupancy and hp values along the ray paths
-    # -------------------------------------------------------------------------
     # occ: (N, 32, S) occupancy/tile-type along ray cells.
     # hp:  (N, 32, S) hp channel along ray cells.
-    #
     # The indexing grid[0][y, x] leverages advanced indexing:
     #   • y and x are broadcasted index tensors
     #   • the result is a gathered tensor of matching shape.
@@ -441,52 +399,41 @@ def raycast32_firsthit(
     hp = grid[1][y, x]                                                 # (N,32,S)
     agent_id = grid[2][y, x]                                           # (N,32,S)
 
-    # -------------------------------------------------------------------------
     # Identify hits: walls and agents
-    # -------------------------------------------------------------------------
     # is_wall: True wherever occ indicates wall (== 1) AND within active range.
     is_wall = (occ == 1) & active
 
     # has_agent: True wherever the agent_id channel indicates presence (>= 0)
     # AND within active range.
-    #
     # Note: has_agent is computed from grid[2] (agent_id), not from occ.
     # This is important: an "agent tile" might be represented in occ but
     # agent_id channel is the authoritative presence check here.
     has_agent = (agent_id >= 0) & active
 
-    # -------------------------------------------------------------------------
     # Determine the index (step position) of the first wall hit per ray
-    # -------------------------------------------------------------------------
     idx_wall = torch.where(
         is_wall.any(dim=-1),
         is_wall.to(torch.float32).argmax(dim=-1),
         -1,
     )
 
-    # -------------------------------------------------------------------------
     # Determine the index (step position) of the first agent hit per ray
-    # -------------------------------------------------------------------------
     idx_agent = torch.where(
         has_agent.any(dim=-1),
         has_agent.to(torch.float32).argmax(dim=-1),
         -1,
     )
 
-    # -------------------------------------------------------------------------
     # Prepare result holders:
     #   first_kind: which class the first hit belongs to (type code)
     #   first_idx:  step index (0-based along the steps dimension) of first hit
-    # -------------------------------------------------------------------------
     # Reused buffers are explicitly reset over the active slice before use.
     first_kind = scratch.first_kind[:N]
     first_idx = scratch.first_idx[:N]
     first_kind.zero_()
     first_idx.fill_(-1)
 
-    # -------------------------------------------------------------------------
     # Determine which kind of hit occurs first (wall vs agent)
-    # -------------------------------------------------------------------------
     both_hit = (idx_wall >= 0) & (idx_agent >= 0)
     only_wall = (idx_wall >= 0) & ~both_hit
     only_agent = (idx_agent >= 0) & ~both_hit
@@ -515,9 +462,7 @@ def raycast32_firsthit(
         first_idx[only_agent] = idx_agent[only_agent]
         first_kind[only_agent] = -2  # temp code for agent
 
-    # -------------------------------------------------------------------------
     # Resolve agent hits into the correct 2..5 class codes
-    # -------------------------------------------------------------------------
     agent_mask = (first_kind == -2)
 
     # Only do the extra gather work if there is at least one ray whose first hit
@@ -539,26 +484,20 @@ def raycast32_firsthit(
         # Overwrite the temporary -2 agent markers with the resolved codes.
         first_kind[agent_mask] = code[agent_mask]
 
-    # -------------------------------------------------------------------------
     # Compute normalized distance feature
-    # -------------------------------------------------------------------------
     den = max_steps_each.clamp_min(1).to(torch.float32).view(N, 1)
     dist_idx = first_idx.to(torch.float32) + 1.0
     valid = (first_idx >= 0).to(torch.float32)
     dist_norm = (dist_idx / den) * valid
 
-    # -------------------------------------------------------------------------
     # Compute normalized HP feature at the first-hit location
-    # -------------------------------------------------------------------------
     hp_first = torch.gather(
         hp,
         2,
         first_idx.clamp_min(0).unsqueeze(-1),
     ).squeeze(-1) * valid
 
-    # -------------------------------------------------------------------------
     # Assemble per-ray feature tensor in reusable output scratch
-    # -------------------------------------------------------------------------
     # feat: shape (N, 32, 8)
     # ordering is exactly:
     #   [onehot6, dist_norm, hp_norm]

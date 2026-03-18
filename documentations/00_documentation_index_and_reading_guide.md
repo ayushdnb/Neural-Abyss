@@ -2,7 +2,7 @@
 
 ## Purpose of This Index
 
-This file is the entry point for the technical manual set that documents the `Neural-Abyss` codebase. Its job is not to reteach the main volumes. Its job is to help a reader choose the correct starting point, follow a sensible reading order, and keep the manual synchronized with the code as the system evolves. The uploaded source tree shows a Python/PyTorch simulation organized around configuration, world generation, agent registration and spawning, a combat-first tick engine, per-agent brains and PPO runtime, an optional Pygame viewer, and utilities for checkpointing, persistence, profiling, sanitization, and telemetry. The same tree also contains older internal labels such as `Infinite_War_Simulation` and the runtime banner `Neural Siege: Custom`, so maintainers should treat naming consistency as an active documentation concern. fileciteturn0file0
+This file is the entry point for the technical manual set that documents the `Neural Abyss` codebase. Its job is not to reteach the main volumes. Its job is to help a reader choose the correct starting point, follow a sensible reading order, and keep the manual synchronized with the code as the system evolves. The uploaded source tree shows a Python/PyTorch simulation organized around configuration, world generation, agent registration and spawning, a combat-first tick engine, per-agent brains and PPO runtime, an optional Pygame viewer, and utilities for checkpointing, persistence, profiling, sanitization, and telemetry. fileciteturn0file0
 
 This index follows standard large-document guidance: descriptive headings, progressive disclosure, and clear internal navigation reduce reader friction in long technical sets, while GitHub-flavored Markdown supports stable section links, relative links, and readable repository-hosted manuals. citeturn563581search0turn563581search1turn727212search3turn727212search6turn563581search12
 
@@ -192,3 +192,4 @@ The topics are separated into different files because readers do not arrive with
 ## Manual maintenance note
 
 Keep this manual set code-determined. Verify from the source tree, update the owning volume, fix cross-links when headings or file names change, and do not let operational behavior, schema definitions, or naming conventions drift out of sync with the written manual. fileciteturn0file0
+

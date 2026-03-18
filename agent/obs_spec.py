@@ -1,45 +1,35 @@
+"""Observation slicing helpers for the agent input contract."""
+
 from __future__ import annotations
-# ^ Delays evaluation of type hints. This is useful for:
-#   - Forward references
-#   - Cleaner runtime behavior when type-checking is external (mypy/pyright)
 
 from typing import Dict, Tuple
 import torch
 import config
 
-# ---------------------------------------------------------------------------
 # Purpose of this module
-# ---------------------------------------------------------------------------
 # This file provides two closely related utilities that enforce a strict and
 # stable observation schema:
-#
 #   1) split_obs_flat(obs)
 #        Takes a flat observation tensor (B, OBS_DIM) and splits it into:
 #          - rays_flat  : (B, RAYS_FLAT_DIM)
 #          - rich_base  : (B, RICH_BASE_DIM)
 #          - instinct   : (B, INSTINCT_DIM)
-#
 #   2) build_semantic_tokens(rich_base, instinct)
 #        Builds a dictionary of semantic feature groups by selecting specific
 #        index subsets from rich_base, plus an instinct token.
-#
 # Why strict schema enforcement matters:
 # - Reinforcement learning policies are extremely sensitive to feature ordering.
 # - Any silent mismatch (wrong indices, wrong slice boundaries) can ruin training
 #   without causing an immediate exception.
 # - This code chooses "fail loudly" behavior to prevent silent corruption.
-#
 # Performance note:
 # - The semantic feature indices are cached as torch tensors per-device to avoid
 #   allocating a new index tensor on every forward pass / timestep.
-# ---------------------------------------------------------------------------
 
 
 # Cache index tensors per (device, name) to avoid per-step allocations.
-#
 # Key:
 #   (torch.device, token_name) -> LongTensor indices on that device
-#
 # This is important because:
 # - torch.index_select expects an index tensor on the same device as the source.
 # - Re-creating index tensors inside the simulation loop creates avoidable
@@ -289,7 +279,6 @@ def build_semantic_tokens(
 
     # Extract each semantic token from rich_base using configured indices.
     # Each token is a column selection, not a learned projection.
-    #
     # If a token name is not configured, _idx will raise KeyError.
     for name in ("own_context", "world_context", "zone_context", "team_context", "combat_context"):
         idx = _idx(name, device)

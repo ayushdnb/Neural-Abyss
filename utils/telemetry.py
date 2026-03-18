@@ -1,52 +1,4 @@
-# Infinite_War_Simulation/utils/telemetry.py
-"""
-Telemetry module for recording agent life events, lineage, and damage.
-
-This module is deliberately "boring" in a good way:
-- It is **append-friendly** (doesn't destroy previous data when resuming).
-- It is **analysis-friendly** (CSV snapshots + JSONL event logs are easy to parse).
-- It is **safe in long runs** (atomic writes to avoid partial/corrupt files).
-- It is **config-driven** (no new config system; uses existing config knobs).
-
-What this module tracks (high-level)
-------------------------------------
-1) AgentLife snapshot (CSV):
-   - One row per agent_id, including birth tick, death tick, totals like kills/damage.
-   - Written periodically as a snapshot (overwrite) using atomic replace.
-
-2) LineageEdges (CSV append):
-   - Parent-child relationships (parent_id -> child_id) with tick recorded.
-
-3) Events (JSONL chunked, append-ish):
-   - Birth/death/damage/kill/resume events.
-   - Buffered in memory and flushed into chunk files: events_000001.jsonl, etc.
-
-4) Optional "sidecar" files (config gated):
-   - run_meta.json: run metadata useful for analysis / reproducibility
-   - agent_static.csv: static per-agent attributes (max_hp, atk, vision, brain_type, param_count)
-   - tick_summary.csv: low-frequency time series of alive counts, mean HP, kills/deaths/dmg totals
-
-Scientific / engineering rationale
-----------------------------------
-Telemetry for simulations and RL is not optional if you want reproducibility.
-Long runs fail in subtle ways (NaNs, silent corruption, partially-written files).
-This module is designed to:
-- Detect anomalies early (validate())
-- Avoid partial reads (atomic writes)
-- Keep data volume manageable (event chunking)
-- Keep data interoperable (CSV + JSONL)
-
-Important constraints (project-specific)
-----------------------------------------
-- The simulation uses an "agent registry" where `agent_data` is stored as float dtype.
-  That means categorical fields (agent_id, team_id, unit_id, alive flag) are **floats**,
-  so telemetry must carefully convert to integers for stable logging.
-
-- Team encoding is assumed to use IDs {2,3} for Red/Blue (based on other code).
-  This file mostly records what it sees; it does not enforce game rules.
-
-- This module must never mutate simulation state (pure observation).
-"""
+"""Telemetry sinks for lineage, events, and periodic summaries."""
 
 from __future__ import annotations
 
@@ -54,13 +6,11 @@ import csv
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple  # Tuple is used for buffered counter rows.
+from typing import Any, Dict, List, Optional, Tuple
 import config
 
 
-# =============================================================================
 # Utility helpers (pure functions)
-# =============================================================================
 
 def _to_int(x: Any) -> int:
     """
@@ -94,7 +44,6 @@ def _to_int(x: Any) -> int:
         return int(float(x))
 
 
-# REPLACE THIS FUNCTION (exact name/signature) =================================
 def _atomic_write_text(path: Path, text: str) -> None:
     """
     Atomically write text to `path`.
@@ -145,7 +94,6 @@ def _atomic_write_text(path: Path, text: str) -> None:
         if last_exc is not None:
             raise last_exc
         raise
-# =============================================================================
 
 
 def _parse_validate_level(v: Any, default: int = 2) -> int:
@@ -217,9 +165,7 @@ def _parse_schema_version_int(x: Any, default: int = 2) -> int:
         return int(default)
 
 
-# =============================================================================
 # Main session class
-# =============================================================================
 
 class TelemetrySession:
     """
@@ -260,34 +206,26 @@ class TelemetrySession:
             The root directory for this simulation run (e.g., results/sim_YYYY-MM-DD_...).
             Telemetry outputs go under: run_dir/telemetry/
         """
-        # ---------------------------------------------------------------------
         # Core enable switch.
         # If not enabled, most methods become no-ops (return early).
-        # ---------------------------------------------------------------------
         self.enabled: bool = bool(getattr(config, "TELEMETRY_ENABLED", False))
         self.run_dir = Path(run_dir)
 
-        # ---------------------------------------------------------------------
         # Event ordering context (additive metadata for causal replay)
-        # ---------------------------------------------------------------------
         # These fields are optional; if the engine never sets them, events behave as before.
         self._event_ctx_tick: Optional[int] = None
         self._event_ctx_phase: Optional[str] = None
         self._event_ctx_tick_seq: int = 0
         self._event_ctx_phase_seq: int = 0
 
-        # ---------------------------------------------------------------------
         # Schema versioning (important for downstream analysis compatibility)
-        # ---------------------------------------------------------------------
         # NOTE: The original code sets schema_version as int here.
         self.schema_version_int: int = _parse_schema_version_int(
             getattr(config, "TELEMETRY_SCHEMA_VERSION", 2),
             default=2,
         )
 
-        # ---------------------------------------------------------------------
         # Reuse existing knobs (do not invent a second config system).
-        # ---------------------------------------------------------------------
         self.tag: str = str(getattr(config, "TELEMETRY_TAG", ""))
         self.event_chunk_size: int = int(getattr(config, "TELEMETRY_EVENT_CHUNK_SIZE", 50_000))
         self.flush_every: int = int(getattr(config, "TELEMETRY_PERIODIC_FLUSH_EVERY", 250))
@@ -303,9 +241,7 @@ class TelemetrySession:
         self.log_kills: bool = bool(getattr(config, "TELEMETRY_LOG_KILLS", True))
         self.damage_mode: str = str(getattr(config, "TELEMETRY_DAMAGE_MODE", "victim_sum"))
 
-        # ---------------------------------------------------------------------
         # Movement telemetry (aggregates are cheap; per-agent events are optional)
-        # ---------------------------------------------------------------------
         # NOTE: config already defines TELEMETRY_LOG_MOVES (FWS_TELEM_MOVES).
         # We interpret it as enabling movement telemetry in general:
         #   - always write cheap aggregates (move_summary.csv)
@@ -320,18 +256,14 @@ class TelemetrySession:
         self.move_events_max_per_tick: int = int(getattr(config, "TELEMETRY_MOVE_EVENTS_MAX_PER_TICK", 256))
         self.move_events_sample_rate: float = float(getattr(config, "TELEMETRY_MOVE_EVENTS_SAMPLE_RATE", 1.0))
 
-        # ---------------------------------------------------------------------
         # Per-slot movement totals (used to populate AgentLife movement columns)
-        # ---------------------------------------------------------------------
         # Why per-slot?
         # - The engine is vectorized over registry slots.
         # - We can update per-slot counters with torch index_add_ (fast on GPU/CPU).
-        #
         # Correctness with slot reuse:
         # - When an agent dies, we "freeze" its final counters into the AgentLife record
         #   in record_deaths().
         # - When a new agent is born into a slot, we reset slot counters in record_birth().
-        #
         # NOTE: These are lazily allocated tensors (created only if enabled+log_moves).
         #       They are placed on the engine device (CPU/CUDA) so updates are cheap.
         self._move_slot_attempted = None
@@ -343,16 +275,12 @@ class TelemetrySession:
         self._move_slot_cells_l1 = None
         self._move_slot_last_seen = None
 
-        # ---------------------------------------------------------------------
         # Generic "counters" stream for lightweight extensions
-        # ---------------------------------------------------------------------
         # Emits rows to counters.csv in long format: (tick, key, value).
         # This is intentionally schema-stable: adding new keys does not change the file schema.
         self.counters_every: int = int(getattr(config, "TELEMETRY_COUNTERS_EVERY", 0))
 
-        # ---------------------------------------------------------------------
         # Validation knobs (detect internal inconsistencies)
-        # ---------------------------------------------------------------------
         self.validate_level: int = _parse_validate_level(
             getattr(config, "TELEMETRY_VALIDATE_LEVEL", 2),
             default=2,
@@ -360,16 +288,14 @@ class TelemetrySession:
         self.validate_every: int = int(getattr(config, "TELEMETRY_VALIDATE_EVERY", 1000))
         self.abort_on_anomaly: bool = bool(getattr(config, "TELEMETRY_ABORT_ON_ANOMALY", False))
 
-        # ---------------------------------------------------------------------
         # Output layout
-        # ---------------------------------------------------------------------
         self.telemetry_dir = self.run_dir / "telemetry"
         self.events_dir = self.telemetry_dir / "events"
         self.agent_life_path = self.telemetry_dir / "agent_life.csv"
         self.lineage_edges_path = self.telemetry_dir / "lineage_edges.csv"
         self.schema_manifest_path = self.telemetry_dir / "schema_manifest.json"
 
-        # Sidecar files added by patch (config gated)
+        # Optional sidecar outputs.
         self.run_meta_path = self.telemetry_dir / "run_meta.json"
         self.agent_static_path = self.telemetry_dir / "agent_static.csv"
         self.tick_summary_path = self.telemetry_dir / "tick_summary.csv"
@@ -382,9 +308,7 @@ class TelemetrySession:
         self.mutation_events_path = self.telemetry_dir / "mutation_events.csv"
         self.dead_agents_detailed_path = self.telemetry_dir / "dead_agents_log_detailed.csv"
 
-        # ---------------------------------------------------------------------
         # Per-slot PPO reward accumulators
-        # ---------------------------------------------------------------------
         # Why per-slot?
         # - The engine computes rewards on live registry slots.
         # - We want zero per-tick CPU sync overhead.
@@ -407,23 +331,11 @@ class TelemetrySession:
         self.telemetry_dir.mkdir(parents=True, exist_ok=True)
         self.events_dir.mkdir(parents=True, exist_ok=True)
 
-        # ---------------------------------------------------------------------
-        # Additive sidecars (config gated) – note: potential type conflict below.
-        # ---------------------------------------------------------------------
-        # IMPORTANT OBSERVATION (engineering note):
-        # The code below overwrites `self.schema_version` (int) with a string like "v2".
-        # That is a semantic type change.
-        #
-        # It appears intentional due to a "patch" comment, but it causes subtle behavior:
-        # - Some event emitters cast schema_version to int with int(getattr(...,2)),
-        #   which will FAIL for "v2".
-        #
-        # However: YOU asked "do not change any code". So we document, not modify.
+        # Preserve the string schema version for compatibility with existing metadata.
         self.schema_version_str: str = str(getattr(config, "TELEMETRY_SCHEMA_VERSION", "v2"))
         # Backward-compat alias used by existing metadata writers.
         self.schema_version: str = self.schema_version_str
 
-        # FIX comment: Renamed attribute to avoid conflict with write_run_meta method
         # - The method is write_run_meta(...)
         # - The flag is do_write_run_meta (boolean).
         self.do_write_run_meta: bool = bool(getattr(config, "TELEMETRY_WRITE_RUN_META", True))
@@ -431,9 +343,7 @@ class TelemetrySession:
         self.write_agent_static: bool = bool(getattr(config, "TELEMETRY_WRITE_AGENT_STATIC", False))
         self.tick_summary_every: int = int(getattr(config, "TELEMETRY_TICK_SUMMARY_EVERY", 0))
 
-        # ---------------------------------------------------------------------
         # Additive headless live summary sidecar (CSV append, independent of prints)
-        # ---------------------------------------------------------------------
         self.headless_live_summary_enabled: bool = bool(getattr(config, "TELEMETRY_HEADLESS_LIVE_SUMMARY", True))
         self.headless_summary_include_tps: bool = bool(getattr(config, "TELEMETRY_HEADLESS_SUMMARY_INCLUDE_TPS", True))
         self.headless_summary_include_gpu: bool = bool(getattr(config, "TELEMETRY_HEADLESS_SUMMARY_INCLUDE_GPU", False))
@@ -451,16 +361,12 @@ class TelemetrySession:
             getattr(config, "TELEMETRY_APPEND_SCHEMA_STRICT", True)
         )
 
-        # ---------------------------------------------------------------------
         # Context references (never mutates; just pointers for reading data)
-        # ---------------------------------------------------------------------
         self._registry: Any = None
         self._stats: Any = None
         self._ppo_runtime: Any = None
 
-        # ---------------------------------------------------------------------
         # Buffered side-streams (flushed on the same cadence as event chunks)
-        # ---------------------------------------------------------------------
         self._move_agg_buf: List[Dict[str, Any]] = []
         self._counters_buf: List[Tuple[int, str, float]] = []
         self._ppo_rich_buf: List[Dict[str, Any]] = []
@@ -502,9 +408,7 @@ class TelemetrySession:
             "move_conflict_tie",
         ]
 
-        # ---------------------------------------------------------------------
         # AgentStatic deduplication: track which agent_ids already written
-        # ---------------------------------------------------------------------
         self._static_written: set[int] = set()
         if self.write_agent_static and self.agent_static_path.exists():
             # If agent_static.csv exists (e.g., resume), rehydrate `_static_written`
@@ -521,9 +425,7 @@ class TelemetrySession:
                 # Worst-case: may re-emit some static rows; still usable for analysis.
                 self._static_written = set()
 
-        # ---------------------------------------------------------------------
         # Main AgentLife state
-        # ---------------------------------------------------------------------
         # `_life` stores per-agent evolving stats and timestamps.
         # Key: agent_id (int)
         # Value: dict of fields (born_tick, death_tick, totals, etc.)
@@ -533,15 +435,11 @@ class TelemetrySession:
         self._offspring_count: Dict[int, int] = {}
         self._lineage_edge_count: Dict[int, int] = {}
 
-        # ---------------------------------------------------------------------
         # Event buffering and chunking
-        # ---------------------------------------------------------------------
         self._events_buf: List[Dict[str, Any]] = []
         self._chunk_idx: int = self._discover_next_chunk_idx()
 
-        # ---------------------------------------------------------------------
         # Resume support: rehydrate agent life snapshot
-        # ---------------------------------------------------------------------
         if self.enabled:
             self._rehydrate_agent_life()
 
@@ -647,9 +545,7 @@ class TelemetrySession:
                 rows=[],
             )
 
-    # -------------------------------------------------------------------------
     # Internal helpers
-    # -------------------------------------------------------------------------
 
     def _discover_next_chunk_idx(self) -> int:
         """
@@ -995,9 +891,7 @@ class TelemetrySession:
             return int(getattr(self, "schema_version_int"))
         return _parse_schema_version_int(getattr(self, "schema_version", 2), default=2)
 
-    # =============================================================================
     # Event ordering context (optional, additive)
-    # =============================================================================
     def begin_tick_event_context(self, tick: int) -> None:
         """
         Begin/reset per-tick event ordering counters.
@@ -1163,12 +1057,9 @@ class TelemetrySession:
 
         rows: List[Dict[str, Any]] = []
 
-        # -----------------------------------------------------------------
         # Movement totals integration (AgentLife snapshot)
-        # -----------------------------------------------------------------
         # We maintain per-slot movement counters (attempted/success/blocked/etc.)
         # via vectorized updates (see record_move_totals_by_slot()).
-        #
         # IMPORTANT PERFORMANCE NOTE:
         # - If the simulation runs on CUDA, reading per-agent counters via .item()
         #   inside the loop would cause *thousands of device synchronizations*.
@@ -1307,9 +1198,7 @@ class TelemetrySession:
         self._append_csv_rows(self.counters_path, fieldnames=["tick", "key", "value"], rows=rows)
         self._counters_buf.clear()
 
-    # =============================================================================
     # Movement telemetry (aggregates + optional per-agent events)
-    # =============================================================================
 
     def record_move_summary(
         self,
@@ -1617,9 +1506,7 @@ class TelemetrySession:
                 "outcome": _outcome_str(outcome_code[i]),
             })
 
-    # =============================================================================
     # Generic counters stream (lightweight extension point)
-    # =============================================================================
 
     def emit_counters(self, tick: int, counters: Dict[str, float]) -> None:
         """
@@ -1695,9 +1582,7 @@ class TelemetrySession:
                     f"parent_id={parent_id}: offspring_count mismatch life={self._offspring_count.get(int(parent_id), 0)} edges={cnt}"
                 )
 
-    # =============================================================================
     # Public API called from main/tick
-    # =============================================================================
 
     def attach_context(self, registry: Any, stats: Any, ppo_runtime: Any = None) -> None:
         """
@@ -2933,9 +2818,7 @@ class TelemetrySession:
         except Exception as e:
             self._anomaly(f"agent_static write failed: {e}")
 
-    # =============================================================================
     # Damage, kills, deaths (core event types)
-    # =============================================================================
 
     def record_damage_victim_sum(
         self,
@@ -3273,9 +3156,7 @@ class TelemetrySession:
                 strict_schema=True,
             )
 
-    # =============================================================================
     # Tick lifecycle hooks
-    # =============================================================================
 
     def on_tick_end(self, tick: int) -> None:
         """
@@ -3386,11 +3267,8 @@ class TelemetrySession:
         except Exception as e:
             self._anomaly(f"tick_summary write failed: {e}")
 
-    # =============================================================================
     # Shutdown
-    # =============================================================================
 
-    # REPLACE THIS METHOD BODY INSIDE class TelemetrySession =======================
     def close(self) -> None:
         """
         Clean shutdown: flush buffers and write final snapshots.
@@ -3422,4 +3300,3 @@ class TelemetrySession:
 
         if errors:
             print("[telemetry] Close encountered errors:\n  - " + "\n  - ".join(errors))
-    # =============================================================================
