@@ -2,7 +2,7 @@ from pathlib import Path
 from datetime import datetime
 
 # --- Config ---
-BASE_DIR = Path(r"C:\Kishan\RL_Project\rich_feature")
+BASE_DIR = Path(r"C:\Kishan\RL_Project\war_sim")
 OUT_FILE = BASE_DIR / "codes" / "code_dump.txt"
 
 # Set to True if you want to APPEND on every run (instead of recreating fresh)
