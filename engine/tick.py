@@ -75,6 +75,7 @@ from engine.ray_engine.raycast_32 import raycast32_firsthit
 from engine.game.move_mask import build_mask, DIRS8
 from engine.respawn import RespawnController, RespawnCfg
 from engine.mapgen import Zones
+from engine.catastrophe import CatastropheRuntimeSignal, HealZoneCatastropheController
 
 from agent.ensemble import ensemble_forward
 
@@ -230,7 +231,12 @@ class TickEngine:
         self.zones: Optional[Zones] = zones
         self._z_heal: Optional[torch.Tensor] = None
         self._z_cp_masks: List[torch.Tensor] = []
+        self._zone_runtime_revision: Optional[int] = None
         self._ensure_zone_tensors()
+
+        # Catastrophe runtime owner. It only controls the Zones catastrophe slot
+        # and never touches PPO / reward / observation semantics.
+        self.catastrophe_controller = HealZoneCatastropheController(self.zones)
 
         # DIRS8 is a standard 8-neighborhood direction table:
         # N, NE, E, SE, S, SW, W, NW
@@ -411,6 +417,7 @@ class TickEngine:
         - cp_masks: list of boolean grids marking capture point regions
         """
         self._z_heal, self._z_cp_masks = None, []
+        self._zone_runtime_revision = None
         if self.zones is None:
             return
 
@@ -423,9 +430,56 @@ class TickEngine:
                 m.to(self.device, non_blocking=True).bool()
                 for m in getattr(self.zones, "cp_masks", [])
             ]
+            self._zone_runtime_revision = self._current_zone_runtime_revision()
         except Exception as e:
             # Safety: if zones fail, disable them rather than crash the simulation.
             print(f"[tick] WARN: zone tensor setup failed ({e}); zones disabled.")
+
+
+    def refresh_zone_runtime_cache(self) -> None:
+        """
+        Rebuild cached device-side zone tensors after runtime zone-state changes.
+
+        This is the single engine hook used by catastrophe scheduling so the
+        effective heal mask consumed by gameplay stays aligned with the Zones
+        source of truth.
+        """
+        self._ensure_zone_tensors()
+
+    def _current_zone_runtime_revision(self) -> Optional[int]:
+        if self.zones is None:
+            return None
+        revision = getattr(self.zones, "runtime_heal_revision", None)
+        return None if revision is None else int(revision)
+
+    def _refresh_zone_runtime_cache_if_needed(self) -> None:
+        """
+        Detect out-of-band heal-zone changes (for example viewer/manual actions)
+        and refresh cached device masks before gameplay consumes them.
+        """
+        current_revision = self._current_zone_runtime_revision()
+        if current_revision is None:
+            return
+        if self._zone_runtime_revision != current_revision:
+            self.refresh_zone_runtime_cache()
+
+    def _build_catastrophe_runtime_signal(self, alive_idx: torch.Tensor) -> CatastropheRuntimeSignal:
+        """
+        Build a small interpretable signal bundle for optional dynamic triggering.
+        """
+        alive_count = int(alive_idx.numel())
+        on_heal_count = 0
+
+        if alive_count > 0 and self._z_heal is not None:
+            pos_xy = self.registry.positions_xy(alive_idx)
+            on_heal = self._z_heal[pos_xy[:, 1], pos_xy[:, 0]]
+            on_heal_count = int(on_heal.to(torch.int64).sum().item())
+
+        return CatastropheRuntimeSignal(
+            tick=int(self.stats.tick),
+            alive_count=alive_count,
+            on_heal_count=on_heal_count,
+        )
 
     # -------------------------------------------------------------------------
     # Indexing helper
@@ -1151,6 +1205,20 @@ class TickEngine:
 
         metrics = TickMetrics()
         alive_idx = self._recompute_alive_idx()
+
+        # Manual/viewer zone edits can happen between ticks, so detect any
+        # out-of-band heal-mask mutation before the scheduler/runtime reads it.
+        self._refresh_zone_runtime_cache_if_needed()
+
+        # Catastrophe runtime update happens at the start of the tick so any
+        # newly applied or expired suppression affects the same tick's
+        # environment phase cleanly.
+        catastrophe_signal = self._build_catastrophe_runtime_signal(alive_idx)
+        if self.catastrophe_controller.update(
+            tick_now=tick_now,
+            runtime_signal=catastrophe_signal,
+        ):
+            self.refresh_zone_runtime_cache()
 
         # If absolutely everyone is dead, fast-forward time and respawn.
         if alive_idx.numel() == 0:
@@ -2158,5 +2226,6 @@ class TickEngine:
 
         # Return metrics as a dict
         return vars(metrics)
+
 
 

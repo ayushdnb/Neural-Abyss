@@ -589,10 +589,7 @@ class CheckpointManager:
             },
             "world": {
                 "grid": _cpuize(grid),
-                "zones": None if zones is None else {
-                    "heal_mask": _cpuize(getattr(zones, "heal_mask")),
-                    "cp_masks": _cpuize(getattr(zones, "cp_masks")),
-                },
+                "zones": None if zones is None else _cpuize(zones.to_checkpoint_payload()),
             },
             "registry": {
                 "agent_data": _cpuize(getattr(registry, "agent_data")),
@@ -604,6 +601,9 @@ class CheckpointManager:
             "engine": {
                 "agent_scores": dict(getattr(engine, "agent_scores", {})),
                 "respawn_controller": self._extract_respawn_state(getattr(engine, "respawner", None)),
+                "catastrophe_controller": self._extract_catastrophe_controller_state(
+                    getattr(engine, "catastrophe_controller", None)
+                ),
             },
             "ppo": self._extract_ppo_state(engine),
             "stats": _extract_stats(stats),
@@ -1006,8 +1006,19 @@ class CheckpointManager:
             eng.get("respawn_controller")
         )
 
-        # Restore statistics
+        # Restore statistics before catastrophe runtime state so any restored
+        # expiry / cooldown timestamps reconcile against the correct current tick.
         _apply_stats(stats, ckpt.get("stats", {}))
+
+        # Restore catastrophe runtime/controller state.
+        CheckpointManager._apply_catastrophe_controller_state(
+            getattr(engine, "catastrophe_controller", None),
+            eng.get("catastrophe_controller"),
+            zones=getattr(engine, "zones", None),
+            current_tick=int(getattr(stats, "tick", 0)),
+        )
+        if hasattr(engine, "refresh_zone_runtime_cache"):
+            engine.refresh_zone_runtime_cache()
 
         # Restore PPO runtime state if present
         ppo = ckpt.get("ppo", {"enabled": False})
@@ -1042,12 +1053,60 @@ class CheckpointManager:
         # Import lazily to avoid import cycles
         from engine.mapgen import Zones
 
-        # Move zone tensors to specified device
+        # Rich Prompt-1+ payloads preserve explicit per-zone state, manual
+        # overrides, and the catastrophe slot. Fall back to the old merged-mask
+        # format for older checkpoints.
+        if isinstance(z, dict) and (
+            "heal_zones" in z
+            or "manual_zone_enabled" in z
+            or "catastrophe_state" in z
+        ):
+            return Zones.from_checkpoint_payload(z, device=device)
+
+        # Legacy checkpoint format: merged heal mask + cp masks only.
         heal_mask = z["heal_mask"].to(device)
         cp_masks = [t.to(device) for t in z["cp_masks"]]
-
-        # Create new Zones object
         return Zones(heal_mask=heal_mask, cp_masks=cp_masks)
+
+    @staticmethod
+    def _extract_catastrophe_controller_state(controller: Any) -> Dict[str, Any]:
+        """
+        Extract serializable catastrophe runtime state from the engine.
+
+        The zone geometry / suppression slot itself lives in the world payload.
+        This method stores only the scheduler/controller state needed to resume
+        without desyncing against that world state.
+        """
+        if controller is None or not hasattr(controller, "to_checkpoint_payload"):
+            return {}
+        return dict(controller.to_checkpoint_payload())
+
+    @staticmethod
+    def _apply_catastrophe_controller_state(
+        controller: Any,
+        payload: Optional[Dict[str, Any]],
+        *,
+        zones: Any,
+        current_tick: int,
+    ) -> None:
+        """
+        Restore catastrophe scheduler/controller state.
+
+        Missing payload is tolerated for backward compatibility. The controller
+        is expected to reconcile against the already-restored Zones object.
+        """
+        if controller is None:
+            return
+        if hasattr(controller, "load_checkpoint_payload"):
+            controller.load_checkpoint_payload(
+                payload,
+                zones=zones,
+                current_tick=int(current_tick),
+            )
+            return
+        # Best-effort fallback for older controller implementations.
+        if hasattr(controller, "zones"):
+            controller.zones = zones
 
     @staticmethod
     def _extract_respawn_state(respawner: Any) -> Dict[str, Any]:
