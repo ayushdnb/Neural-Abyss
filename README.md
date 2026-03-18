@@ -197,4 +197,3 @@ Operational notes:
 
 Intended license: MIT.
 
-From the provided source dump, a repository-root `LICENSE` file is not verifiable. Add the standard MIT `LICENSE` file at repository root if it is not already present.
