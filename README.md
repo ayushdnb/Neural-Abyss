@@ -1,199 +1,96 @@
 # Neural-Abyss
 
-Neural-Abyss is a Python/PyTorch grid simulation with per-agent neural policies, a vectorized tick engine, an interactive Pygame viewer, and built-in persistence for long runs. The codebase combines world simulation, policy inference, per-agent PPO training, checkpoint/resume, telemetry, and optional video recording in one repository. Runtime configuration is environment-driven through `FWS_*` variables, and runs are written into timestamped directories under `results/`.
+Neural-Abyss is a PyTorch-based two-team grid combat simulation with per-agent PPO training. `main.py` starts a fresh world or resumes from a checkpoint, runs the simulation loop via `engine.tick.TickEngine`, and can operate with the Pygame viewer or headless.
 
-## System snapshot
+All configuration is environment-driven through `config.py`; there is no CLI argument parser and no dependency manifest. The runtime requires `torch`, `numpy`, and `pygame`; `cv2` is optional (video recording only). `pygame` is required even in headless mode because `main.py` imports `ui.viewer.Viewer` at startup.
 
-| Item | Verified from code |
+## Important Files And Folders
+
+| Path | Purpose |
 | --- | --- |
-| Language | Python |
-| Core runtime | PyTorch |
-| UI | Pygame viewer in `ui/viewer.py` |
-| Entry point | `main.py` |
-| Default grid | `100x100` |
-| Default initial population | `150` agents per team |
-| Observation width | `283` |
-| Action count | `41` |
-| Output root | `results/` |
+| `main.py` | Startup, fresh vs. resume flow, headless loop, viewer launch, shutdown, final summary. |
+| `config.py` | Environment-variable configuration, profiles, runtime defaults, and validation. |
+| `agent/` | Observation splitting, MLP brain variants, and bucketed inference helpers. |
+| `engine/` | Grid state, spawning, map generation, catastrophe control, respawn, and tick execution. |
+| `rl/` | Per-agent PPO runtime. |
+| `simulation/` | Run statistics and death-log buffering. |
+| `ui/` | Pygame viewer and camera. |
+| `utils/` | Checkpointing, telemetry, persistence, profiling, and sanitization utilities. |
+| `documentations/` | Focused technical documents for the engine, RL runtime, viewer, telemetry, and operations. |
 
-## Key technical points
+## Quick Start
 
-- **Combat-first tick loop.** `engine/tick.py` resolves observation, action selection, combat, deaths, movement, environment effects, PPO logging, and respawn in discrete ticks.
-- **Tensor-first simulation state.** `engine/agent_registry.py` stores agent state in a dense struct-of-arrays tensor and keeps one brain per registry slot.
-- **Per-agent actor-critic brains.** `agent/mlp_brain.py` defines five MLP variants behind one shared observation contract and shared actor/critic interface.
-- **Grouped inference path.** `agent/ensemble.py` batches inference by architecture bucket and can switch to a `torch.func`/`vmap` path when enabled.
-- **Per-slot PPO runtime.** `rl/ppo_runtime.py` maintains rollout buffers, optimizers, schedulers, and training payloads per slot rather than using a shared policy.
-- **Environment-driven operation.** `config.py` resolves most settings from `FWS_*` environment variables and supports profiles such as `default`, `debug`, `train_fast`, and `train_quality`.
-- **Operational durability.** `utils/checkpointing.py`, `utils/persistence.py`, and `utils/telemetry.py` implement atomic checkpoint saves, background CSV writing, telemetry sidecars, and resume-in-place workflows.
-
-## Repository structure
-
-```text
-.
-├── main.py                    # runtime entry point and orchestration
-├── config.py                  # environment-driven configuration surface
-├── agent/
-│   ├── mlp_brain.py           # actor-critic brain family
-│   ├── ensemble.py            # grouped inference and optional vmap path
-│   └── obs_spec.py            # observation schema and tokenization helpers
-├── engine/
-│   ├── tick.py                # core simulation loop
-│   ├── agent_registry.py      # slot registry and agent tensor layout
-│   ├── spawn.py / respawn.py  # initial spawn and respawn logic
-│   ├── mapgen.py              # walls, zones, map features
-│   ├── ray_engine/            # raycasting backends
-│   └── catastrophe.py         # heal-zone catastrophe controller
-├── rl/
-│   └── ppo_runtime.py         # per-agent PPO runtime
-├── ui/
-│   ├── viewer.py              # interactive viewer
-│   └── camera.py              # camera and viewport handling
-├── simulation/
-│   └── stats.py               # run statistics
-└── utils/
-    ├── checkpointing.py       # save/load/resume utilities
-    ├── persistence.py         # background results writer
-    ├── telemetry.py           # telemetry and event logs
-    ├── profiler.py            # optional profiling hooks
-    └── sanitize.py            # runtime sanity checks
-```
-
-## Start here
-
-- Read `main.py` first for runtime orchestration and the end-to-end control flow.
-- Read `engine/tick.py` next for the simulation semantics.
-- Read `config.py` before changing behavior; most operational knobs live there.
-
-## Quick start
-
-### Prerequisites
-
-The provided source dump does not include a lockfile or dependency manifest. The imports show these direct runtime dependencies:
-
-- `torch`
-- `numpy`
-- `pygame`
-- `opencv-python` only if you want video recording via `cv2`
-
-A minimal setup is therefore:
+Install `torch`, `numpy`, and `pygame` into a Python environment, then run:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install torch numpy pygame opencv-python
+python main.py                          # viewer + PPO training (default)
+FWS_UI=0 FWS_PROFILE=train_fast python main.py   # headless training
+FWS_PROFILE=debug python main.py                  # small grid, viewer at 30 FPS
 ```
 
-### Run the viewer
+All runtime control is through `FWS_*` environment variables resolved in `config.py`.
 
-From the repository root:
+## Common Configuration
 
-```bash
-python main.py
-```
+**Profiles and basics**
 
-The default configuration enables the UI. The viewer is implemented in `ui/viewer.py` and drives the simulation by calling `engine.run_tick()`.
+- `FWS_PROFILE` — preset bundle: `default`, `debug`, `train_fast`, or `train_quality`.
+- `FWS_SEED` — master random seed (default `32`).
+- `FWS_UI` — `1` enables the viewer (default), `0` runs headless.
+- `FWS_TICK_LIMIT` — maximum tick count; `0` = unlimited (default).
+- `FWS_SPAWN_MODE` — initial layout: `uniform` (default) or `symmetric`.
 
-Useful built-in viewer controls:
+**Training**
 
-- `Space` pause or resume
-- `.` single-step while paused
-- mouse wheel zoom
-- `F9` save a manual checkpoint
-- `F11` toggle fullscreen
+- `FWS_PPO_ENABLED` — enable per-agent PPO training (default `1`). Instantiated by `TickEngine`.
+- `FWS_TELEMETRY` — structured telemetry output (default `1`).
+- `FWS_RECORD_VIDEO` — raw occupancy video recording; requires `cv2` (default `0`).
 
-### Run headless
+**Checkpointing and resume**
 
-```bash
-FWS_UI=0 python main.py
-```
+- `FWS_CHECKPOINT_PATH` — resume source. Accepts a checkpoint directory, a direct `checkpoint.pt` path, or a `checkpoints/` directory with `latest.txt`.
+- `FWS_CHECKPOINT_EVERY_TICKS` — periodic save interval in ticks (default `50000`).
+- `FWS_CHECKPOINT_ON_EXIT` — save on clean shutdown (default `1`).
+- `FWS_CHECKPOINT_KEEP_LAST_N` — retention count (default `1`).
+- `FWS_RESUME_OUTPUT_CONTINUITY` — resume appends into the original run directory (default `1`).
+- `FWS_RESUME_FORCE_NEW_RUN` — force a new output tree on resume (default `0`).
 
-This routes execution through the headless loop in `main.py`, keeps the writer process active, and supports periodic status printing, telemetry, and checkpoint triggers.
+## Runtime Outputs
 
-### Resume from a checkpoint
+Fresh runs are created under `results/sim_YYYY-MM-DD_HH-MM-SS/`. Normal runs write `config.json` at startup and `summary.json` at shutdown.
 
-```bash
-FWS_CHECKPOINT_PATH="results/sim_YYYY-MM-DD_HH-MM-SS/checkpoints/ckpt_t..." python main.py
-```
+Headless mode populates `stats.csv` and `dead_agents_log.csv` via `utils.persistence.ResultsWriter`. When `FWS_RECORD_VIDEO=1` and `cv2` is available, `simulation_raw.avi` is also written.
 
-`utils/checkpointing.py` accepts any of the following as `FWS_CHECKPOINT_PATH`:
+When telemetry is enabled, a `telemetry/` subdirectory is created containing:
 
-- a checkpoint directory
-- a direct `checkpoint.pt` path
-- a `checkpoints/` directory that contains `latest.txt`
+- `schema_manifest.json`, `run_meta.json` — schema and run metadata.
+- `events/events_*.jsonl` — chunked event log (births, deaths, damage, kills).
+- `agent_life.csv`, `agent_static.csv` — per-agent snapshots and static attributes.
+- `tick_summary.csv`, `move_summary.csv`, `counters.csv` — time-series summaries.
+- `telemetry_summary.csv` — headless sidecar with windowed metrics.
+- `ppo_training_telemetry.csv` — per-agent PPO metrics (when PPO is enabled).
+- `lineage_edges.csv`, `mutation_events.csv` — respawn lineage and mutation records.
+- `dead_agents_log_detailed.csv` — detailed death information.
 
-By default, resume continues writing into the original run directory when possible.
+## Checkpoints And Resume
 
-```bash
-FWS_CHECKPOINT_PATH="results/sim_YYYY-MM-DD_HH-MM-SS/checkpoints/ckpt_t..." \
-FWS_RESUME_OUTPUT_CONTINUITY=1 \
-FWS_RESUME_FORCE_NEW_RUN=0 \
-python main.py
-```
+Checkpoints are written under `run_dir/checkpoints/ckpt_t{tick}_{timestamp}/`. Each completed checkpoint directory contains `checkpoint.pt`, `manifest.json`, and `DONE`; manual or pinned saves also add `PINNED`. `run_dir/checkpoints/latest.txt` points to the latest completed checkpoint.
 
-### Inspect a checkpoint without creating outputs
+Periodic checkpointing is driven by `FWS_CHECKPOINT_EVERY_TICKS`. A clean shutdown saves an additional checkpoint when `FWS_CHECKPOINT_ON_EXIT=1`. Manual saves can be triggered by creating the configured trigger file in the run directory (`checkpoint.now` by default), and the viewer also exposes a manual checkpoint hotkey in normal UI mode.
 
-```bash
-FWS_CHECKPOINT_PATH="results/sim_YYYY-MM-DD_HH-MM-SS/checkpoints/ckpt_t..." \
-FWS_INSPECTOR_MODE=ui_no_output \
-python main.py
-```
+Resume-in-place is enabled by default through `FWS_RESUME_OUTPUT_CONTINUITY=1`. When it is active, `main.py` infers the original run directory from the checkpoint path and appends compatible outputs there. `FWS_RESUME_FORCE_NEW_RUN=1` disables that behavior.
 
-This enables the viewer while disabling results creation, telemetry, and checkpoint writes for the inspection session.
+## Viewer
 
-## Configuration
+The viewer is enabled by default through `FWS_UI=1`. Verified controls in `ui/viewer.py` include:
 
-`config.py` is the authoritative configuration surface. Most settings are resolved from environment variables prefixed with `FWS_`.
+- `Space`: pause or resume.
+- `.`: single-step while paused.
+- `W`, `A`, `S`, `D` or arrow keys: pan the camera.
+- Mouse wheel or `+` / `-`: zoom.
+- Left click: select an agent or heal zone.
+- Right click or `Shift` + left click: toggle the heal zone under the cursor through the catastrophe controller.
+- `F9`: manual checkpoint save request in normal UI mode.
+- `F11`: fullscreen toggle.
 
-Common workflow-critical variables:
-
-- `FWS_PROFILE` — profile preset such as `debug`, `train_fast`, or `train_quality`
-- `FWS_UI` — enable or disable the Pygame viewer
-- `FWS_SEED` — deterministic seed used at startup
-- `FWS_CUDA` and `FWS_AMP` — device and mixed-precision controls
-- `FWS_CHECKPOINT_PATH` — checkpoint to resume from
-- `FWS_RESUME_OUTPUT_CONTINUITY` and `FWS_RESUME_FORCE_NEW_RUN` — resume output policy
-- `FWS_INSPECTOR_MODE` / `FWS_INSPECTOR_UI_NO_OUTPUT` — no-output inspection mode
-- `FWS_CHECKPOINT_EVERY_TICKS` and `FWS_CHECKPOINT_ON_EXIT` — checkpoint cadence and exit behavior
-- `FWS_TELEMETRY` — enable or disable telemetry output
-
-## Checkpoints and outputs
-
-A normal run creates `results/sim_YYYY-MM-DD_HH-MM-SS/`. From the provided code, the main output layout is:
-
-```text
-results/sim_YYYY-MM-DD_HH-MM-SS/
-├── config.json
-├── stats.csv
-├── dead_agents_log.csv
-├── summary.json
-├── simulation_raw.avi              # only when recording is enabled and OpenCV is available
-├── checkpoints/
-│   ├── latest.txt
-│   └── ckpt_t.../
-│       ├── checkpoint.pt
-│       ├── manifest.json
-│       ├── DONE
-│       └── PINNED                 # optional
-└── telemetry/
-    ├── run_meta.json
-    ├── schema_manifest.json
-    ├── agent_life.csv
-    ├── lineage_edges.csv
-    ├── tick_summary.csv
-    ├── move_summary.csv
-    ├── ppo_training_telemetry.csv
-    └── events/
-```
-
-Operational notes:
-
-- Checkpoints are written atomically into `run_dir/checkpoints/`.
-- `latest.txt` points to the latest complete checkpoint directory.
-- Headless runs can trigger a manual checkpoint by creating the configured trigger file (default: `checkpoint.now`) in the run directory.
-- The viewer can request a manual checkpoint with `F9`.
-- On normal exit, `main.py` writes `summary.json` and, by default, an on-exit checkpoint.
-
-## License
-
-Intended license: MIT.
-
+`FWS_INSPECTOR_MODE=ui_no_output` or `FWS_INSPECTOR_UI_NO_OUTPUT=1` launches the viewer without creating results, telemetry, checkpoints, or other output files.
