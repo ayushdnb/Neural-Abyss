@@ -1,9 +1,8 @@
-# ui/__init__.py
-# Make UI optional: project can run headless even if viewer.py is missing.
+"""Optional UI surface."""
 
 try:
     from .viewer import Viewer  # type: ignore
 except Exception:
-    Viewer = None  # Viewer unavailable (missing file or missing deps)
+    Viewer = None
 
 __all__ = ["Viewer"]

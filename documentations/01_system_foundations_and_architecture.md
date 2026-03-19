@@ -2,7 +2,7 @@
 
 ## Document Purpose
 
-This document is the opening architecture volume for the `Neural Abyss` repository. Its purpose is not to teach every mechanic, neural-network detail, or PPO equation in full. Its purpose is to establish the correct system model before the reader studies those deeper subjects. In other words, this volume explains what the system is, where its main responsibilities live, how the runtime is assembled, what persists across ticks and across resumes, and how the repository is divided into operational layers. The discussion is anchored to the uploaded codebase, not to assumed intent outside the repository. fileciteturn0file0L12021-L13176 fileciteturn0file0L1720-L3288
+This document is the opening architecture volume for the `Neural-Abyss` repository. Its purpose is not to teach every mechanic, neural-network detail, or PPO equation in full. Its purpose is to establish the correct system model before the reader studies those deeper subjects. In other words, this volume explains what the system is, where its main responsibilities live, how the runtime is assembled, what persists across ticks and across resumes, and how the repository is divided into operational layers. The discussion is anchored to the uploaded codebase, not to assumed intent outside the repository. fileciteturn0file0L12021-L13176 fileciteturn0file0L1720-L3288
 
 Editorially, this volume follows a discipline that is appropriate for long-form technical explanation rather than tutorial or marketing copy: explicit scope, hierarchical headings, progressive disclosure, and an audience model that fills the gap between what readers need and what they already know. That approach is consistent with established documentation guidance from Diátaxis, GitHub Docs, Google’s technical writing courses, and Write the Docs. citeturn998813search0turn232117search14turn232117search4turn439726search1turn439726search3
 
@@ -24,9 +24,9 @@ One design choice is important to state explicitly: this document is an **explan
 
 At repository level, this is a **grid-based, multi-agent simulation system** implemented in Python and PyTorch, with optional GPU execution, optional interactive visualization through Pygame, optional video capture through OpenCV, integrated per-agent PPO training, structured telemetry, and checkpoint/resume support. The system advances in discrete ticks. On each tick, alive agents observe the world, choose masked discrete actions through their own policy modules, interact through combat and movement rules, receive reward signals, and may later be respawned into reused registry slots. fileciteturn0file0L12021-L13176 fileciteturn0file0L9785-L12018 fileciteturn0file0L13191-L15075
 
-### 1.2 Repository naming
+### 1.2 The naming situation is not singular
 
-This repository uses **`Neural Abyss`** as its project name. The working directory may still use a hyphenated folder name, but the code, runtime banner, viewer title, and documentation now use one public-facing name. fileciteturn0file0L1720-L3288 fileciteturn0file0L12021-L13176
+A newcomer should notice a naming fact immediately, because it affects search and interpretation. The uploaded source is organized under the directory `Neural-Abyss`. However, internal file docstrings also use the names `Infinite_War_Simulation` and `Infinite War Simulation`, while the runtime summary banner printed by `config.summary_str()` is `[Neural Siege: Custom]`. These names coexist in the code. This volume therefore uses **`Neural-Abyss`** as the repository name, because that is the concrete directory/package identity in the uploaded source, while treating the other names as internal labels rather than collapsing them into an unverified single branding claim. fileciteturn0file0L1720-L3288 fileciteturn0file0L12021-L13176
 
 ### 1.3 The shortest correct mental description
 
@@ -57,9 +57,9 @@ The following snapshot is directly supported by the uploaded code.
 
 | Item | Verified description |
 |---|---|
-| Repository identity used in this volume | `Neural Abyss` |
+| Repository identity used in this volume | `Neural-Abyss` |
 | Primary entry point | `main.py` |
-| Runtime summary banner | `[Neural Abyss]` |
+| Runtime summary banner | `[Neural Siege: Custom]` |
 | Core simulation stepper | `engine.tick.TickEngine` |
 | World representation | `grid` tensor shaped `(3, H, W)` |
 | Registry representation | `AgentsRegistry.agent_data` shaped `(capacity, 10)` plus side structures |
@@ -753,4 +753,3 @@ config -> main -> {fresh world | checkpoint restore}
 ```
 
 If that model is clear, the reader is ready for later volumes on mechanics, observation semantics, brain architecture, PPO learning behavior, and operations. fileciteturn0file0L1720-L3288 fileciteturn0file0L9785-L13176 fileciteturn0file0L13191-L23985
-

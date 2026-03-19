@@ -1,6 +1,6 @@
-# Neural Abyss
+# Neural-Abyss
 
-Neural Abyss is a Python/PyTorch grid simulation with per-agent neural policies, a vectorized tick engine, an interactive Pygame viewer, and built-in persistence for long runs. The codebase combines world simulation, policy inference, per-agent PPO training, checkpoint/resume, telemetry, and optional video recording in one repository. Runtime configuration is environment-driven through `FWS_*` variables, and runs are written into timestamped directories under `results/`.
+Neural-Abyss is a Python/PyTorch grid simulation with per-agent neural policies, a vectorized tick engine, an interactive Pygame viewer, and built-in persistence for long runs. The codebase combines world simulation, policy inference, per-agent PPO training, checkpoint/resume, telemetry, and optional video recording in one repository. Runtime configuration is environment-driven through `FWS_*` variables, and runs are written into timestamped directories under `results/`.
 
 ## System snapshot
 

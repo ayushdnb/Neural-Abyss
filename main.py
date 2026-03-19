@@ -33,7 +33,14 @@ except ModuleNotFoundError:
         _sys.path.insert(0, str(_repo_root))
     import config
 from simulation.stats import SimulationStats
-from engine.agent_registry import AgentsRegistry
+from engine.agent_registry import (
+    AgentsRegistry,
+    COL_ALIVE,
+    COL_HP,
+    COL_TEAM,
+    TEAM_BLUE_ID,
+    TEAM_RED_ID,
+)
 from engine.tick import TickEngine
 from engine.grid import make_grid
 from engine.spawn import spawn_symmetric, spawn_uniform_random
@@ -156,59 +163,13 @@ def _telemetry_schema_manifest(grid: torch.Tensor, zones) -> dict:
 
 # Small helpers
 
-def _seed_all_from_env() -> Optional[int]:
-    """
-    Read the environment variable `FWS_SEED`.
-
-    If set and valid:
-    - seed torch (CPU + CUDA)
-    - seed numpy
-
-    Returns:
-        The integer seed if successfully applied, else None.
-
-    Why environment variable?
-    -------------------------
-    Environment variables allow reproducible runs without modifying code.
-    Example (Windows PowerShell):
-        $env:FWS_SEED=123
-        python main.py
-
-    Example (Linux/macOS):
-        FWS_SEED=123 python main.py
-    """
-    raw = os.getenv("FWS_SEED", "").strip()
-    if not raw:
-        return None
-
-    try:
-        seed = int(raw)
-
-        # Seed torch
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-
-        # Seed numpy
-        np.random.seed(seed)
-
-        return seed
-    except (ValueError, TypeError):
-        # If the env var is not a valid integer, ignore it.
-        return None
-
-
 def _mkdir_p(p: Path) -> None:
     """
-    Create directory and parents, like `mkdir -p`.
+    Create a directory tree when it does not already exist.
 
     This is used to ensure run directories exist even after crashes.
 
-    Beginner note:
-    --------------
-    `mkdir(parents=True, exist_ok=True)` means:
-    - parents=True  → also create missing parent folders
-    - exist_ok=True → do NOT error if folder already exists
+    Uses ``parents=True`` and ``exist_ok=True``.
     """
     p.mkdir(parents=True, exist_ok=True)
 
@@ -270,8 +231,6 @@ class _SimpleRecorder:
         if not getattr(config, "RECORD_VIDEO", False) or cv2 is None:
             return
 
-        # grid shape convention in this project appears to be: (C, H, W)
-        # where C includes an occupancy channel.
         h, w = int(grid.size(1)), int(grid.size(2))
 
         # Output video frame size after scaling
@@ -286,16 +245,16 @@ class _SimpleRecorder:
         # Confirm writer is usable
         if self.writer is not None and self.writer.isOpened():
             self.enabled = True
-            print(f"[video] recording → {self.path}")
+            print(f"[video] recording -> {self.path}")
 
             # Palette maps occupancy IDs -> RGB colors
             # You can extend this palette if occupancy encoding changes.
             self.palette = np.array(
                 [
-                    [30, 30, 30],    # 0 – wall
-                    [80, 80, 80],    # 1 – empty
-                    [220, 80, 80],   # 2 – red team
-                    [80, 120, 240],  # 3 – blue team
+                    [30, 30, 30],    # 0 = empty
+                    [80, 80, 80],    # 1 = wall
+                    [220, 80, 80],   # 2 = red team
+                    [80, 120, 240],  # 3 = blue team
                 ],
                 dtype=np.uint8,
             )
@@ -343,7 +302,7 @@ class _SimpleRecorder:
         """Release the video writer cleanly."""
         if self.enabled and self.writer is not None:
             self.writer.release()
-            print(f"[video] saved → {self.path}")
+            print(f"[video] saved -> {self.path}")
 
 
 class _NoopRecorder:
@@ -380,7 +339,7 @@ def _infer_resume_run_dir_from_checkpoint_path(checkpoint_path: str) -> Path:
     return run_dir
 
 
-# Headless loop (no UI) – optimized for long runs
+# Headless loop (no UI)
 
 def _headless_loop(
     engine: TickEngine,
@@ -392,7 +351,6 @@ def _headless_loop(
     checkpoint_manager: Optional[CheckpointManager] = None,
 ) -> None:
     """Run the simulation loop without the UI."""
-    from utils.profiler import torch_profiler_ctx, nvidia_smi_summary
     from utils.profiler import torch_profiler_ctx, nvidia_smi_summary
     from utils.sanitize import runtime_sanity_check
 
@@ -498,34 +456,25 @@ def _headless_loop(
                     )
 
                     if lvl >= 1:
-                        # Access agent_data tensor (vectorized state store)
-                        d = registry.agent_data
-
-                        # NOTE: This code assumes:
-                        # - column 0: some "alive indicator" (or hp proxy)
-                        # - column 1: team id (2=red, 3=blue)
-                        # Important: if your registry columns differ, adjust these indices.
-                        alive = (d[:, 0] > 0.5)
-                        red_alive = int((alive & (d[:, 1] == 2.0)).sum().item())
-                        blue_alive = int((alive & (d[:, 1] == 3.0)).sum().item())
+                        agent_data = registry.agent_data
+                        alive = agent_data[:, COL_ALIVE] > 0.5
+                        red_alive = int((alive & (agent_data[:, COL_TEAM] == TEAM_RED_ID)).sum().item())
+                        blue_alive = int((alive & (agent_data[:, COL_TEAM] == TEAM_BLUE_ID)).sum().item())
 
                         msg += f" | Alive R {red_alive:4d} B {blue_alive:4d}"
                         msg += f" | K/D R {stats.red.kills}/{stats.red.deaths} B {stats.blue.kills}/{stats.blue.deaths}"
                         msg += f" | CP R {stats.red.cp_points:.1f} B {stats.blue.cp_points:.1f}"
 
                     if lvl >= 2:
-                        # Average HP among alive agents
-                        d = registry.agent_data
-                        alive = (d[:, 0] > 0.5)
+                        agent_data = registry.agent_data
+                        alive = agent_data[:, COL_ALIVE] > 0.5
+                        red_hp = agent_data[:, COL_HP][alive & (agent_data[:, COL_TEAM] == TEAM_RED_ID)]
+                        blue_hp = agent_data[:, COL_HP][alive & (agent_data[:, COL_TEAM] == TEAM_BLUE_ID)]
 
-                        # column 4 assumed to be health (HP)
-                        rh = d[:, 4][alive & (d[:, 1] == 2.0)]
-                        bh = d[:, 4][alive & (d[:, 1] == 3.0)]
+                        rmean = float(red_hp.mean().item()) if red_hp.numel() else 0.0
+                        bmean = float(blue_hp.mean().item()) if blue_hp.numel() else 0.0
 
-                        rmean = float(rh.mean().item()) if rh.numel() else 0.0
-                        bmean = float(bh.mean().item()) if bh.numel() else 0.0
-
-                        msg += f" | HPμ R {rmean:5.1f} B {bmean:5.1f}"
+                        msg += f" | AvgHP R {rmean:5.1f} B {bmean:5.1f}"
                         msg += f" | DMG+ R {stats.red.dmg_dealt:.1f} B {stats.blue.dmg_dealt:.1f}"
 
                     if show_gpu:
@@ -582,7 +531,7 @@ def main() -> None:
         registry = AgentsRegistry(grid)
         stats = SimulationStats()
 
-        print("[main] Checkpoint loaded – world restored, will restore runtime next.")
+        print("[main] Checkpoint loaded - world restored, will restore runtime next.")
 
     else:
         # Fresh start mode
@@ -654,13 +603,13 @@ def main() -> None:
                     strict_csv_schema=bool(getattr(config, "RESUME_APPEND_STRICT_CSV_SCHEMA", True)),
                 )
             )
-            print(f"[main] Results → {run_dir} (resume-in-place append)")
+            print(f"[main] Results -> {run_dir} (resume-in-place append)")
         else:
             # start() creates a fresh run directory and writes config.json there
             run_dir = Path(results_writer.start(config_obj=_config_snapshot()))
             # Defensive: ensure directory exists (should already, but safe)
             _mkdir_p(run_dir)
-            print(f"[main] Results → {run_dir}")
+            print(f"[main] Results -> {run_dir}")
 
         # 5) Checkpoint manager (saves into run_dir/checkpoints/)
         checkpoint_manager = CheckpointManager(run_dir)
@@ -734,7 +683,7 @@ def main() -> None:
 
     shutdown_requested = {"flag": False}
 
-    def _signal_handler(signum, frame) -> None:
+    def _signal_handler(signum, _frame) -> None:
         """Request shutdown after the current tick completes."""
         shutdown_requested["flag"] = True
         print(f"\n[main] Signal {signum} received; finishing current tick before shutdown.")

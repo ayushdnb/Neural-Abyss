@@ -57,16 +57,7 @@ class TeamCounters:
 
     def clone(self) -> "TeamCounters":
         """
-        Return a deep-ish copy of this counters object.
-
-        Why we need clone():
-        --------------------
-        Snapshots should be immune to future updates.
-        If we returned the same object reference, snapshots would "change under us"
-        as the simulation continues (a classic bug for beginners).
-
-        Since all fields are primitive numeric values, constructing a new instance
-        is sufficient (no nested mutable structures here).
+        Return a value copy of this counters object.
         """
         return TeamCounters(
             self.score,
@@ -310,8 +301,8 @@ class SimulationStats:
               - team_id == 2.0 -> red
               - otherwise      -> blue
 
-            This mapping is domain-specific. It likely comes from your engine's
-            representation where teams are encoded as numeric IDs in tensors.
+            This mapping follows the engine registry and grid encoding, where
+            red is `2.0` and blue is `3.0`.
 
         x, y:
             Grid coordinates where the agent died.

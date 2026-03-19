@@ -1591,7 +1591,7 @@ class Viewer:
         self.fullscreen = False
         self.speed_multiplier = 1.0
 
-        # Per-agent cumulative scores from PPO rewards (tracked via monkey patch)
+        # Per-agent cumulative scores from PPO rewards.
         self.agent_scores: Dict[int, float] = collections.defaultdict(float)
 
         # Checkpointing
@@ -1920,24 +1920,13 @@ class Viewer:
                 "agent_map": self._cached_agent_map,
             }
 
-    # PPO score hook (accumulate per-agent rewards)
+    # PPO score hook
     def _install_score_hook(self, engine, registry):
         """
-        Monkey-patch the PPO trainer's record_step() method to collect rewards.
+        Wrap the PPO runtime's ``record_step`` method to accumulate UI scores.
 
-        Why monkey patch?
-        - We want per-agent score display in UI.
-        - We don't want to modify the PPO trainer internals.
-        - This lets us "wrap" the original method.
-
-        Safety requirements:
-        - Must always call original_record_step(*args, **kwargs).
-        - Must not change return value or side effects of PPO trainer.
-
-        Data flow:
-        - PPO passes `agent_ids` (slot indices) and `rewards` to record_step.
-        - We map slots -> unique agent IDs using registry.agent_data[COL_AGENT_ID].
-        - Accumulate into self.agent_scores[uid] += reward.
+        The wrapper preserves the original call and adds a read-only score view
+        keyed by persistent agent id.
         """
         if not hasattr(engine, "_ppo") or engine._ppo is None:
             return

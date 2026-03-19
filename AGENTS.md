@@ -1,29 +1,14 @@
-# Project documentation instructions
+## Working rules
 
-## Core rules
-- Verify every factual claim from the codebase before writing it.
-- Do not invent commands, dependencies, features, benchmarks, or architecture claims.
-- Do not use bragging, hype, or marketing language.
-- Do not use vague phrases such as "seems", "appears", or "likely" when the code can be checked.
-- Prefer short, dense, technical writing.
-- Use simple words with correct technical terms.
-- Keep README concise and scan-friendly.
-- Keep long-form docs structured, formal, and pedagogical.
-
-## README rules
-- Produce a clean, compact, production-grade README.md.
-- Include only verified run steps.
-- Include only verified configuration details.
-- Mention checkpoints, viewer, telemetry, or resume only when confirmed from code.
-- Keep the README short enough for GitHub readers.
-
-## Long documentation rules
-- Write documentation as if teaching a serious beginner into an advanced project reader.
-- Explain architecture, data flow, simulation loop, viewer, checkpointing, RL/training pipeline, and design tradeoffs.
-- Tie every major explanation back to actual files and code structure.
-- Separate verified facts from interpretation.
-- Prefer multiple focused documents over one giant dump.
-
-## Output discipline
-- Make files directly instead of dumping huge text in chat when possible.
-- Before finalizing, re-check claims against the repository.
+- Treat this repository as a serious public technical codebase.
+- Maintain formal, strict, professional language in code and documentation.
+- Preserve behavior unless a change is required for correctness, reliability, consistency, or maintainability.
+- Inspect all relevant `.py` and `.md` files before making broad changes.
+- Minimize comments; keep only non-obvious technical comments.
+- Remove informal, redundant, patch-style, or conversational comments.
+- Keep naming, typing, docstrings, and structure consistent across files.
+- Verify documentation against implementation before editing claims.
+- Prefer precise, compact code over verbose code.
+- Avoid speculative refactors and decorative abstractions.
+- Run available validation after edits.
+- End with a concise summary of changes, validations, and any residual risks.

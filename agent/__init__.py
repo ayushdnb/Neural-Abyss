@@ -1,4 +1,3 @@
-# war_simulation/agent/__init__.py
 from .mlp_brain import (
     WhisperingAbyssBrain,
     VeilOfEchoesBrain,

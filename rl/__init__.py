@@ -1,7 +1,2 @@
 
-"""
-RL utilities.
-
-Note: the live simulation can run without RL components.
-Keep this package lightweight to avoid import-side effects.
-"""
+"""RL utilities exposed by the repository."""

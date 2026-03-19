@@ -213,7 +213,7 @@ def build_mask(
 
     Returns:
         mask:
-            (N, A) boolean mask where A = config.NUM_ACTIONS (default 17 in this code).
+            (N, A) boolean mask where A = config.NUM_ACTIONS.
             True indicates an action is legal/available.
 
     Action layouts:
@@ -347,8 +347,6 @@ def build_mask(
     # This implies team values in grid[0] match the team coding (2 or 3).
     enemy_r = (tgt_occ != 0.0) & (tgt_occ != 1.0) & (tgt_occ.to(torch.long) != teamv.view(N, 1, 1))
 
-    # Enforce bounds. (Note: this line appears twice in the original code.)
-    enemy_r &= inb_r
     enemy_r &= inb_r
 
     # Unit gating: determine which ranges are allowed per unit type
@@ -385,11 +383,11 @@ def build_mask(
     # - For range 1, blocked is always False (no intermediate cells exist).
     if bool(getattr(config, "ARCHER_LOS_BLOCKS_WALLS", False)):
         blocked = _los_blocked_by_walls_grid0(
-            occ,                          # Note: occ here is neighbor occupancy (N, 8), not the full (H, W) grid.
+            grid[0],
             x0,
             y0,
             DIRS8.to(device=device),
-            RMAX
+            RMAX,
         )
         atk_ok = atk_ok & (~blocked)
 
