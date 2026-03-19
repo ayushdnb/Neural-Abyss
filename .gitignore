@@ -121,6 +121,7 @@ recorder/
 # Dump files
 codes/
 *.txt
+!requirements-viewer.txt
 
 # OS files
 .DS_Store

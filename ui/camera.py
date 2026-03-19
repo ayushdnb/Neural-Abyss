@@ -175,6 +175,17 @@ class Camera:
             )
         )
 
+    def set_view(self, offset_x: float, offset_y: float, zoom: float) -> None:
+        """
+        Restore or apply a complete camera view in a single validated operation.
+
+        This is used by checkpoint/viewer-state restore paths so zoom and offsets
+        are always clamped under the same rules as interactive camera updates.
+        """
+        self.zoom = float(min(max(float(zoom), 0.25), 8.0))
+        self.offset_x = float(min(max(float(offset_x), 0.0), max(0.0, self.world_w - 1)))
+        self.offset_y = float(min(max(float(offset_y), 0.0), max(0.0, self.world_h - 1)))
+
     # CORE TRANSFORMATION FUNCTIONS (MOST IMPORTANT PART)
     def world_to_screen(self, x_cell: int, y_cell: int) -> tuple[int, int]:
         """

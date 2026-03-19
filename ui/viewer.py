@@ -8,12 +8,19 @@ from typing import List, Tuple, Optional, Dict, Any
 import math
 from pathlib import Path  # Used for robust checkpoint file path operations
 
-import pygame
 import torch
 import torch.nn as nn
 import numpy as np
 
 import config
+from .pygame_compat import (
+    pygame,
+    ensure_supported_runtime,
+    primary_desktop_size,
+    resize_from_event,
+    wheel_steps_from_event,
+)
+from .viewer_state import normalize_viewer_checkpoint_state
 from agent.mlp_brain import (
     brain_kind_from_module,
     brain_kind_display_name,
@@ -29,7 +36,7 @@ from engine.agent_registry import (
 )
 
 # Constants & colour palette
-FONT_NAME = "consolas"
+FONT_NAME = str(getattr(config, "UI_FONT_NAME", "consolas")).strip() or "consolas"
 
 # Colors stored as (R, G, B). Some overlays use (R, G, B, A) for alpha blending.
 # In Pygame:
@@ -155,12 +162,10 @@ def _rgb(col) -> tuple[int, int, int]:
 # Utility functions
 def _center_window():
     """
-    Hint to SDL (the backend library used by Pygame) to center the window.
-
-    This uses an environment variable read by SDL at window creation time.
-    We set it only if it hasn't already been set externally.
+    Hint to SDL to center the window when the corresponding config knob is on.
     """
-    os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
+    if bool(getattr(config, "VIEWER_CENTER_WINDOW", True)):
+        os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
 
 
 def _get_model_summary(model: nn.Module) -> str:
@@ -194,75 +199,56 @@ def _param_count(model: nn.Module) -> int:
 # Text caching
 class TextCache:
     """
-    Caches both pygame.Font objects (per size) and rendered text Surfaces.
+    Cache pygame Font objects and a bounded LRU of rendered text surfaces.
 
-    PERFORMANCE PROBLEM:
-    - Creating fonts frequently is slow.
-    - Rendering text is also slow (rasterization).
-    - In a real-time UI, we may render the same label every frame.
-
-    SOLUTION:
-    - Keep a dictionary of Font objects keyed by size.
-    - Keep a dictionary of rendered text surfaces keyed by:
-        (text, size, color, antialias)
-
-    This avoids repeated work, improving FPS and reducing CPU usage.
+    The surface cache is intentionally bounded because HUD text contains dynamic
+    counters that would otherwise grow the cache without limit during long runs.
     """
 
     def __init__(self):
-        # Pre-create a few common sizes to reduce first-frame latency.
         self.fonts = {
             13: self._mk_font(13),
             16: self._mk_font(16),
             18: self._mk_font(18),
         }
-
-        # Cache for rendered surfaces
-        # key: (text, size, color, antialias) -> pygame.Surface
-        self.cache = {}
+        self.cache = collections.OrderedDict()
+        self.max_surfaces = max(64, int(getattr(config, "VIEWER_TEXT_CACHE_MAX_SURFACES", 2048)))
 
     def _mk_font(self, sz: int):
         """
         Create a pygame Font of a given size.
-
-        We attempt to use a system font. If unavailable, we fall back to default.
-
-        Notes:
-        - SysFont uses system-installed fonts by name.
-        - Font(None, size) uses a default built-in font.
         """
         try:
             return pygame.font.SysFont(FONT_NAME, sz)
         except Exception:
             return pygame.font.Font(None, sz)
 
+    def clear(self) -> None:
+        """Drop all cached rendered text surfaces."""
+        self.cache.clear()
+
     def render(self, text: str, size: int, color, aa: bool = True):
         """
         Return a cached Surface with the text rendered.
-
-        Key behavior:
-        - Normalizes text to string.
-        - Ensures size is a positive int.
-        - Creates missing font sizes on demand (fixes KeyError crashes).
-        - Caches rendered surfaces for repeated use.
         """
-        # Normalize inputs to stabilize cache keys
         if not isinstance(text, str):
             text = str(text)
 
-        size = int(size)
-        if size < 1:
-            size = 1
-
-        # Create font on-demand if missing (prevents crashes)
+        size = max(1, int(size))
         if size not in self.fonts:
             self.fonts[size] = self._mk_font(size)
 
-        key = (text, size, color, aa)
-        if key not in self.cache:
-            self.cache[key] = self.fonts[size].render(text, aa, color)
+        key = (text, size, tuple(color), bool(aa))
+        cached = self.cache.get(key)
+        if cached is not None:
+            self.cache.move_to_end(key)
+            return cached
 
-        return self.cache[key]
+        surf = self.fonts[size].render(text, aa, color)
+        self.cache[key] = surf
+        if len(self.cache) > self.max_surfaces:
+            self.cache.popitem(last=False)
+        return surf
 
 
 # Layout management
@@ -1356,15 +1342,10 @@ class InputHandler:
             if ev.type == pygame.QUIT:
                 running = False
 
-            elif ev.type == pygame.VIDEORESIZE:
-                # Only allow resizable mode when not fullscreen
+            elif (resize_size := resize_from_event(ev)) is not None:
                 if not self.viewer.fullscreen:
-                    self.viewer.Wpix, self.viewer.Hpix = max(800, ev.w), max(520, ev.h)
-                    self.viewer.screen = pygame.display.set_mode(
-                        (self.viewer.Wpix, self.viewer.Hpix),
-                        pygame.RESIZABLE
-                    )
-                    self.viewer.world_renderer.invalidate_static_background()
+                    self.viewer.resize_windowed(*resize_size)
+                continue
 
             elif ev.type == pygame.KEYDOWN:
                 if ev.key == pygame.K_ESCAPE:
@@ -1411,8 +1392,8 @@ class InputHandler:
                 elif ev.key == pygame.K_5:
                     self.viewer.manual_trigger_catastrophe("cluster_survives")
 
-                # Save selected agent brain weights
-                elif ev.key == pygame.K_s:
+                # Save selected agent brain weights without colliding with camera pan.
+                elif ev.key == pygame.K_s and (getattr(ev, "mod", pygame.key.get_mods()) & pygame.KMOD_CTRL):
                     self.viewer.save_selected_brain()
 
                 # Manual checkpoint save request (actual save happens in Viewer.run loop)
@@ -1421,21 +1402,23 @@ class InputHandler:
 
                 # Fullscreen toggle
                 elif ev.key == pygame.K_F11:
-                    self.viewer.fullscreen = not self.viewer.fullscreen
-                    if self.viewer.fullscreen:
-                        self.viewer.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-                    else:
-                        self.viewer.screen = pygame.display.set_mode(
-                            (self.viewer.Wpix, self.viewer.Hpix),
-                            pygame.RESIZABLE
-                        )
-                    self.viewer.world_renderer.invalidate_static_background()
+                    self.viewer.toggle_fullscreen()
 
                 # Speed multiplier adjustments
                 elif ev.key in (pygame.K_EQUALS, pygame.K_PLUS):
                     self.viewer.speed_multiplier = min(16, self.viewer.speed_multiplier * 2)
                 elif ev.key == pygame.K_MINUS:
                     self.viewer.speed_multiplier = max(0.25, self.viewer.speed_multiplier / 2)
+
+            elif (wheel_steps := wheel_steps_from_event(ev)):
+                if wheel_steps > 0:
+                    for _ in range(int(wheel_steps)):
+                        self.viewer.cam.zoom_at(1.12)
+                else:
+                    for _ in range(abs(int(wheel_steps))):
+                        self.viewer.cam.zoom_at(1 / 1.12)
+                self.viewer.world_renderer.invalidate_static_background()
+                continue
 
             elif ev.type == pygame.MOUSEBUTTONDOWN:
                 if ev.button == 1:
@@ -1465,14 +1448,6 @@ class InputHandler:
                     else:
                         self.viewer.selected_slot_id = None
                         self.viewer.clear_selected_zone()
-
-                # Mouse wheel zoom
-                elif ev.button == 4:
-                    self.viewer.cam.zoom_at(1.12)
-                    self.viewer.world_renderer.invalidate_static_background()
-                elif ev.button == 5:
-                    self.viewer.cam.zoom_at(1 / 1.12)
-                    self.viewer.world_renderer.invalidate_static_background()
 
         return running, advance_tick
 
@@ -1533,14 +1508,15 @@ class Viewer:
 
     def __init__(self, grid: torch.Tensor, cell_size: Optional[int] = None, show_grid: bool = True):
         _center_window()
+        ensure_supported_runtime(strict=bool(getattr(config, "PYGAME_CE_STRICT_RUNTIME", True)))
 
-        # Pygame init sets up SDL + subsystems
         pygame.init()
         pygame.display.set_caption("Neural Abyss")
 
         self.grid = grid
         self.margin = 8
         self.show_grid = show_grid
+        self.run_dir: Optional[Path] = None
 
         # Camera uses cell size in pixels plus world dimensions (W,H in cells)
         self.cam = Camera(int(cell_size or config.CELL_SIZE), grid.shape[2], grid.shape[1])
@@ -1548,13 +1524,12 @@ class Viewer:
         H, W = grid.shape[1], grid.shape[2]
         side_min_w, hud_h = 280, 126
 
-        # Determine initial window size while respecting display constraints
+        # Determine initial window size while respecting display constraints.
         try:
-            display_info = pygame.display.Info()
-            max_w = display_info.current_w - 80
-            max_h = display_info.current_h - 120
+            desktop_w, desktop_h = primary_desktop_size()
+            max_w = desktop_w - 80
+            max_h = desktop_h - 120
         except pygame.error:
-            # Safe fallback when display info is unavailable
             max_w, max_h = 1280, 720
 
         world_px_w, world_px_h = W * self.cam.cell_px, H * self.cam.cell_px
@@ -1562,9 +1537,9 @@ class Viewer:
         init_h = min(max_h, max(720, world_px_h + hud_h + 2 * self.margin))
 
         self.Wpix, self.Hpix = int(init_w), int(init_h)
+        self.windowed_size: tuple[int, int] = (self.Wpix, self.Hpix)
 
-        # Resizable window mode by default
-        self.screen = pygame.display.set_mode((self.Wpix, self.Hpix), pygame.RESIZABLE)
+        self.screen = pygame.display.set_mode(self.windowed_size, pygame.RESIZABLE)
 
         self.text_cache = TextCache()
         self.clock = pygame.time.Clock()
@@ -1591,7 +1566,7 @@ class Viewer:
         self.fullscreen = False
         self.speed_multiplier = 1.0
 
-        # Per-agent cumulative scores from PPO rewards.
+        # Per-agent cumulative scores from PPO rewards (tracked via hook).
         self.agent_scores: Dict[int, float] = collections.defaultdict(float)
 
         # Checkpointing
@@ -1611,31 +1586,109 @@ class Viewer:
 
         self._last_state_refresh_frame = -10
         self._last_pick_refresh_frame = -10
+        self._score_hook_original = None
+
+    def _invalidate_after_display_change(self) -> None:
+        if hasattr(self, "text_cache") and self.text_cache is not None:
+            self.text_cache.clear()
+        if hasattr(self, "world_renderer") and self.world_renderer is not None:
+            self.world_renderer.invalidate_static_background()
+
+    def resize_windowed(self, width: int, height: int) -> None:
+        width = max(800, int(width))
+        height = max(520, int(height))
+        self.Wpix, self.Hpix = width, height
+        self.windowed_size = (width, height)
+        if not self.fullscreen:
+            self.screen = pygame.display.set_mode(self.windowed_size, pygame.RESIZABLE)
+            self._invalidate_after_display_change()
+
+    def toggle_fullscreen(self) -> None:
+        self.fullscreen = not self.fullscreen
+        if self.fullscreen:
+            try:
+                self.windowed_size = tuple(int(v) for v in pygame.display.get_window_size())
+            except Exception:
+                self.windowed_size = (int(self.Wpix), int(self.Hpix))
+            self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+            self.Wpix, self.Hpix = map(int, self.screen.get_size())
+        else:
+            self.screen = pygame.display.set_mode(self.windowed_size, pygame.RESIZABLE)
+            self.Wpix, self.Hpix = self.windowed_size
+        self._invalidate_after_display_change()
+
+    def capture_state(self) -> Dict[str, Any]:
+        """
+        Capture viewer-only runtime state for checkpoint persistence.
+        """
+        return {
+            "paused": bool(self.paused),
+            "speed_multiplier": float(self.speed_multiplier),
+            "show_rays": bool(self.show_rays),
+            "threat_vision_mode": bool(self.threat_vision_mode),
+            "battle_view_enabled": bool(self.battle_view_enabled),
+            "show_brain_types": bool(self.show_brain_types),
+            "marked": list(self.marked[:10]),
+            "camera": {
+                "offset_x": float(getattr(self.cam, "offset_x", 0.0)),
+                "offset_y": float(getattr(self.cam, "offset_y", 0.0)),
+                "zoom": float(getattr(self.cam, "zoom", 1.0)),
+            },
+            "agent_scores": dict(self.agent_scores),
+        }
+
+    def apply_checkpoint_state(self, raw_state: Any) -> None:
+        """
+        Apply persisted viewer state with backward-compatible normalization.
+        """
+        state = normalize_viewer_checkpoint_state(raw_state)
+        self.paused = bool(state["paused"])
+        self.speed_multiplier = float(state["speed_multiplier"])
+        self.show_rays = bool(state["show_rays"])
+        self.threat_vision_mode = bool(state["threat_vision_mode"])
+        self.battle_view_enabled = bool(state["battle_view_enabled"])
+        self.show_brain_types = bool(state["show_brain_types"])
+        self.marked = list(state["marked"])
+        cam_state = state["camera"]
+        self.cam.set_view(
+            float(cam_state["offset_x"]),
+            float(cam_state["offset_y"]),
+            float(cam_state["zoom"]),
+        )
+        self.agent_scores = collections.defaultdict(float, state["agent_scores"])
+
+    def _brain_export_dir(self) -> Optional[Path]:
+        if self.run_dir is None:
+            return None
+        export_dir = self.run_dir / str(getattr(config, "VIEWER_BRAIN_EXPORT_DIRNAME", "exports/brains"))
+        export_dir.mkdir(parents=True, exist_ok=True)
+        return export_dir
 
     def save_selected_brain(self):
         """
-        Save the PyTorch `state_dict` of the selected agent's brain to disk.
-
-        Notes:
-        - `state_dict()` is the standard PyTorch method returning model weights.
-        - Saved as .pth file.
-        - If no selection or registry not set, returns safely.
+        Save the selected agent's brain weights to a deterministic export path.
         """
-        if self.selected_slot_id is None or not hasattr(self, "registry"):
+        if self.selected_slot_id is None or self.registry is None:
             return
 
         brain = self.registry.brains[self.selected_slot_id]
-        if brain:
-            tick = self.stats.tick if hasattr(self, "stats") else 0
-            uid = self.last_selected_uid if self.last_selected_uid is not None else self.selected_slot_id
-            filename = f"brain_agent_{uid}_t_{tick}.pth"
-            try:
-                torch.save(brain.state_dict(), filename)
-                kind = brain_kind_from_module(brain)
-                label = brain_kind_display_name(kind) if kind else brain.__class__.__name__
-                print(f"[Viewer] Saved {label} brain for agent {uid} to '{filename}'")
-            except Exception as e:
-                print(f"[Viewer] Error saving brain: {e}")
+        if brain is None:
+            return
+
+        tick = int(self.stats.tick) if self.stats is not None else 0
+        uid = self.last_selected_uid if self.last_selected_uid is not None else int(self.selected_slot_id)
+        filename = f"brain_agent_{uid}_t_{tick}.pth"
+
+        export_dir = self._brain_export_dir()
+        path = (export_dir / filename) if export_dir is not None else Path(filename)
+
+        try:
+            torch.save(brain.state_dict(), path)
+            kind = brain_kind_from_module(brain)
+            label = brain_kind_display_name(kind) if kind else brain.__class__.__name__
+            print(f"[Viewer] Saved {label} brain for agent {uid} to '{path}'")
+        except Exception as e:
+            print(f"[Viewer] Error saving brain: {e}")
 
     def current_tick(self) -> int:
         return int(getattr(self.stats, "tick", 0)) if self.stats is not None else 0
@@ -1923,15 +1976,16 @@ class Viewer:
     # PPO score hook
     def _install_score_hook(self, engine, registry):
         """
-        Wrap the PPO runtime's ``record_step`` method to accumulate UI scores.
-
-        The wrapper preserves the original call and adds a read-only score view
-        keyed by persistent agent id.
+        Install a temporary PPO hook that accumulates viewer-side reward totals.
         """
         if not hasattr(engine, "_ppo") or engine._ppo is None:
             return
 
+        if self._score_hook_original is not None:
+            return
+
         original_record_step = engine._ppo.record_step
+        self._score_hook_original = original_record_step
 
         def record_step_with_score_tracking(*args, **kwargs):
             agent_ids = kwargs.get("agent_ids")
@@ -1941,19 +1995,27 @@ class Viewer:
                 with torch.no_grad():
                     slot_ids = agent_ids.detach()
 
-                    # Bulk lookup unique ids (GPU->CPU copy). Prefer int64 side-tensor.
                     if hasattr(registry, "agent_uids"):
                         uids = registry.agent_uids.index_select(0, slot_ids).detach().cpu().numpy()
                     else:
                         uids = registry.agent_data.index_select(0, slot_ids)[:, COL_AGENT_ID].detach().cpu().numpy()
-                    r = rewards.detach().cpu().numpy()
+                    reward_values = rewards.detach().cpu().numpy()
 
-                for uid, rv in zip(uids, r):
-                    self.agent_scores[int(uid)] += float(rv)
+                for uid, reward_value in zip(uids, reward_values):
+                    self.agent_scores[int(uid)] += float(reward_value)
 
             return original_record_step(*args, **kwargs)
 
         engine._ppo.record_step = record_step_with_score_tracking
+
+    def _remove_score_hook(self, engine) -> None:
+        if (
+            self._score_hook_original is not None
+            and hasattr(engine, "_ppo")
+            and engine._ppo is not None
+        ):
+            engine._ppo.record_step = self._score_hook_original
+        self._score_hook_original = None
 
     # Main run loop
     def run(
@@ -1979,14 +2041,13 @@ class Viewer:
         self.engine = engine
         self.registry = registry
         self.stats = stats
+        self.run_dir = Path(run_dir) if run_dir is not None else None
 
-        # Lazy import checkpointing only if run_dir provided
         ckpt_mgr = None
-        if run_dir is not None:
+        if self.run_dir is not None:
             from utils.checkpointing import CheckpointManager
-            ckpt_mgr = CheckpointManager(Path(run_dir))
+            ckpt_mgr = CheckpointManager(self.run_dir)
 
-        # Initialize components that depend on Viewer existing
         self.layout = LayoutManager(self)
         self.world_renderer = WorldRenderer(self, self.grid, registry)
         self.hud_panel = HudPanel(self, stats)
@@ -1995,138 +2056,107 @@ class Viewer:
         self.anim_manager = AnimationManager()
         self.minimap = Minimap(self)
 
-        # Build cached zone info for background
         self.world_renderer.build_static_cache(engine)
-
-        # Install PPO hook if PPO exists
         self._install_score_hook(engine, registry)
 
         running = True
         frame_count = 0
 
-        # Prime CPU caches once before loop
         self._refresh_state_cpu()
         self._last_state_refresh_frame = frame_count
         self._last_pick_refresh_frame = frame_count
 
-        while running:
-            # 1) Input phase (selection, toggles, camera)
-            running, advance_tick = self.input_handler.handle()
+        try:
+            while running:
+                running, advance_tick = self.input_handler.handle()
 
-            # 2) Manual checkpoint save (safe between ticks)
-            if self.save_requested:
-                self.save_requested = False
+                if self.save_requested:
+                    self.save_requested = False
 
-                if ckpt_mgr is None:
-                    self._ckpt_last_status = "Checkpoint save requested but run_dir is not set."
-                    print("[checkpoint]", self._ckpt_last_status)
-                else:
-                    try:
-                        # Capture viewer state for restore (camera, pause, speed, scores)
-                        viewer_state = {
-                            "paused": bool(self.paused),
-                            "speed_mult": float(self.speed_multiplier),  # attribute name mismatch noted
-                            "camera": {
-                                "offset_x": float(getattr(self.cam, "offset_x", 0.0)),
-                                "offset_y": float(getattr(self.cam, "offset_y", 0.0)),
-                                "zoom": float(getattr(self.cam, "zoom", 1.0)),
-                            },
-                            "agent_scores": dict(self.agent_scores),
-                        }
+                    if ckpt_mgr is None:
+                        self._ckpt_last_status = "Checkpoint save requested but run_dir is not set."
+                        print("[checkpoint]", self._ckpt_last_status)
+                    else:
+                        try:
+                            out_dir = ckpt_mgr.save_atomic(
+                                engine=engine,
+                                registry=registry,
+                                stats=stats,
+                                viewer_state=self.capture_state(),
+                                notes="manual_hotkey_F9",
+                                pinned=bool(getattr(config, "CHECKPOINT_PIN_ON_MANUAL", True)),
+                                pin_tag=str(getattr(config, "CHECKPOINT_PIN_TAG", "manual")),
+                            )
+                            ckpt_mgr.prune_keep_last_n(int(getattr(config, "CHECKPOINT_KEEP_LAST_N", 1)))
 
-                        out_dir = ckpt_mgr.save_atomic(
+                            self._ckpt_last_status = f"Checkpoint saved: {out_dir.name}"
+                            print("[checkpoint]", self._ckpt_last_status)
+                        except Exception as ex:
+                            self._ckpt_last_status = f"Checkpoint FAILED: {type(ex).__name__}: {ex}"
+                            print("[checkpoint]", self._ckpt_last_status)
+
+                num_ticks_this_frame = 0
+
+                if not self.paused:
+                    if self.speed_multiplier >= 1:
+                        num_ticks_this_frame = int(self.speed_multiplier)
+                    elif self.speed_multiplier > 0:
+                        denom = int(1 / self.speed_multiplier)
+                        if denom <= 1 or (frame_count % denom) == 0:
+                            num_ticks_this_frame = 1
+                elif advance_tick:
+                    num_ticks_this_frame = 1
+
+                for _ in range(num_ticks_this_frame):
+                    engine.run_tick()
+                    self.hud_panel.update()
+
+                    if ckpt_mgr is not None:
+                        trig = self.run_dir / str(getattr(config, "CHECKPOINT_TRIGGER_FILE", "checkpoint.now"))
+
+                        ckpt_mgr.maybe_save_trigger_file(
+                            trigger_path=trig,
                             engine=engine,
                             registry=registry,
                             stats=stats,
-                            viewer_state=viewer_state,
-                            notes="manual_hotkey_F9",
-                            pinned=bool(getattr(config, "CHECKPOINT_PIN_ON_MANUAL", True)),
+                            default_pin=bool(getattr(config, "CHECKPOINT_PIN_ON_MANUAL", True)),
                             pin_tag=str(getattr(config, "CHECKPOINT_PIN_TAG", "manual")),
+                            keep_last_n=int(getattr(config, "CHECKPOINT_KEEP_LAST_N", 1)),
                         )
 
-                        # Prune old checkpoints to keep last N
-                        ckpt_mgr.prune_keep_last_n(int(getattr(config, "CHECKPOINT_KEEP_LAST_N", 1)))
+                        ckpt_mgr.maybe_save_periodic(
+                            engine=engine,
+                            registry=registry,
+                            stats=stats,
+                            every_ticks=int(getattr(config, "CHECKPOINT_EVERY_TICKS", 0)),
+                            keep_last_n=int(getattr(config, "CHECKPOINT_KEEP_LAST_N", 1)),
+                        )
 
-                        self._ckpt_last_status = f"Checkpoint saved: {out_dir.name}"
-                        print("[checkpoint]", self._ckpt_last_status)
-                    except Exception as ex:
-                        self._ckpt_last_status = f"Checkpoint FAILED: {type(ex).__name__}: {ex}"
-                        print("[checkpoint]", self._ckpt_last_status)
+                if (frame_count - self._last_state_refresh_frame) >= self.STATE_REFRESH_EVERY_FRAMES:
+                    self._refresh_state_cpu()
+                    self._last_state_refresh_frame = frame_count
 
-            # 3) Decide how many simulation ticks to run this frame
-            num_ticks_this_frame = 0
+                if (frame_count - self._last_pick_refresh_frame) >= self.PICK_REFRESH_EVERY_FRAMES:
+                    self._last_pick_refresh_frame = frame_count
 
-            if not self.paused:
-                if self.speed_multiplier >= 1:
-                    # Run multiple ticks per frame (fast-forward)
-                    num_ticks_this_frame = int(self.speed_multiplier)
-                elif self.speed_multiplier > 0:
-                    # Run less than 1 tick per frame (slow motion)
-                    denom = int(1 / self.speed_multiplier)
-                    if denom <= 1 or (frame_count % denom) == 0:
-                        num_ticks_this_frame = 1
-            elif advance_tick:
-                # Single step when paused
-                num_ticks_this_frame = 1
-
-            # 4) Run simulation ticks
-            for _ in range(num_ticks_this_frame):
-                engine.run_tick()
-                self.hud_panel.update()
-
-                # 4a) Automatic checkpointing (trigger file + periodic)
-                if ckpt_mgr is not None:
-                    trig = Path(run_dir) / str(getattr(config, "CHECKPOINT_TRIGGER_FILE", "checkpoint.now"))
-
-                    ckpt_mgr.maybe_save_trigger_file(
-                        trigger_path=trig,
-                        engine=engine,
-                        registry=registry,
-                        stats=stats,
-                        default_pin=bool(getattr(config, "CHECKPOINT_PIN_ON_MANUAL", True)),
-                        pin_tag=str(getattr(config, "CHECKPOINT_PIN_TAG", "manual")),
-                        keep_last_n=int(getattr(config, "CHECKPOINT_KEEP_LAST_N", 1)),
-                    )
-
-                    ckpt_mgr.maybe_save_periodic(
-                        engine=engine,
-                        registry=registry,
-                        stats=stats,
-                        every_ticks=int(getattr(config, "CHECKPOINT_EVERY_TICKS", 0)),
-                        keep_last_n=int(getattr(config, "CHECKPOINT_KEEP_LAST_N", 1)),
-                    )
-
-            # 5) Refresh CPU state caches if needed (performance-critical)
-            if (frame_count - self._last_state_refresh_frame) >= self.STATE_REFRESH_EVERY_FRAMES:
-                self._refresh_state_cpu()
-                self._last_state_refresh_frame = frame_count
-
-            # Pick refresh is currently tied to full refresh, but kept separate for future tuning
-            if (frame_count - self._last_pick_refresh_frame) >= self.PICK_REFRESH_EVERY_FRAMES:
-                self._last_pick_refresh_frame = frame_count
-
-            state_data = self._cached_state_data
-            if state_data is None:
-                # Extremely unlikely fallback
-                self._refresh_state_cpu()
                 state_data = self._cached_state_data
+                if state_data is None:
+                    self._refresh_state_cpu()
+                    state_data = self._cached_state_data
 
-            # 6) Render phase
-            self.world_renderer.maybe_refresh_zone_cache(engine)
-            self.screen.fill(COLORS["bg"])
-            self.world_renderer.draw(self.screen, state_data)
-            self.hud_panel.draw(self.screen, state_data)
-            self.side_panel.draw(self.screen, state_data)
+                self.world_renderer.maybe_refresh_zone_cache(engine)
+                self.screen.fill(COLORS["bg"])
+                self.world_renderer.draw(self.screen, state_data)
+                self.hud_panel.draw(self.screen, state_data)
+                self.side_panel.draw(self.screen, state_data)
 
-            pygame.display.flip()
+                pygame.display.flip()
+                self.clock.tick(int(target_fps or config.TARGET_FPS))
 
-            # Cap render FPS
-            self.clock.tick(int(target_fps or config.TARGET_FPS))
+                frame_count += 1
 
-            frame_count += 1
-
-            # Stop condition by tick limit
-            if tick_limit > 0 and stats.tick >= tick_limit:
-                running = False
-
-        pygame.quit()
+                if tick_limit > 0 and stats.tick >= tick_limit:
+                    running = False
+        finally:
+            self._remove_score_hook(engine)
+            pygame.quit()

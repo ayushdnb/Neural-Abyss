@@ -1214,6 +1214,15 @@ UI_FONT_NAME: str = _env_str("FWS_UI_FONT", "consolas")
 # Center the window on startup.
 VIEWER_CENTER_WINDOW: bool = _env_bool("FWS_VIEWER_CENTER_WINDOW", True)
 
+# Require the pygame-ce distribution when the UI is used.
+PYGAME_CE_STRICT_RUNTIME: bool = _env_bool("FWS_PYGAME_CE_STRICT_RUNTIME", True)
+
+# Bound the number of rendered text surfaces cached by the viewer.
+VIEWER_TEXT_CACHE_MAX_SURFACES: int = _env_int("FWS_VIEWER_TEXT_CACHE_MAX_SURFACES", 2048)
+
+# Relative export directory (inside run_dir) for saved agent brains.
+VIEWER_BRAIN_EXPORT_DIRNAME: str = _env_str("FWS_VIEWER_BRAIN_EXPORT_DIRNAME", "exports/brains").strip()
+
 # Renderer dimensions.
 # Increase CELL_SIZE for a larger visual map.
 # Increase HUD_WIDTH for more side-panel room.
@@ -1447,6 +1456,7 @@ def _validate_config_invariants() -> None:
         ("CELL_SIZE", CELL_SIZE),
         ("HUD_WIDTH", HUD_WIDTH),
         ("TARGET_FPS", TARGET_FPS),
+        ("VIEWER_TEXT_CACHE_MAX_SURFACES", VIEWER_TEXT_CACHE_MAX_SURFACES),
         ("VIDEO_FPS", VIDEO_FPS),
         ("VIDEO_SCALE", VIDEO_SCALE),
         ("VIDEO_EVERY_TICKS", VIDEO_EVERY_TICKS),

@@ -47,7 +47,6 @@ from engine.spawn import spawn_symmetric, spawn_uniform_random
 from engine.mapgen import add_random_walls, make_zones
 from utils.persistence import ResultsWriter
 from utils.telemetry import TelemetrySession
-from ui.viewer import Viewer
 from utils.checkpointing import CheckpointManager, resolve_checkpoint_path
 
 
@@ -710,11 +709,17 @@ def main() -> None:
     status = "ok"
     error_msg = None
     crash_trace = None
+    viewer = None
 
     try:
         if config.ENABLE_UI or inspector_no_output_mode:
-            # UI mode: viewer handles rendering and stepping at target FPS
+            # Import the viewer lazily so pure headless runs do not require the
+            # optional pygame-ce dependency at module import time.
+            from ui.viewer import Viewer
+
             viewer = Viewer(grid, cell_size=config.CELL_SIZE)
+            if checkpoint_data is not None:
+                viewer.apply_checkpoint_state(checkpoint_data.get("viewer", {}))
 
             # Pass run_dir so UI can trigger manual checkpoints inside the run folder
             viewer.run(
@@ -779,7 +784,14 @@ def main() -> None:
         # 12) On-exit checkpoint
         if checkpoint_manager is not None and bool(getattr(config, "CHECKPOINT_ON_EXIT", True)):
             try:
-                out = checkpoint_manager.save_atomic(engine=engine, registry=registry, stats=stats, notes="on_exit")
+                viewer_state = viewer.capture_state() if viewer is not None else None
+                out = checkpoint_manager.save_atomic(
+                    engine=engine,
+                    registry=registry,
+                    stats=stats,
+                    viewer_state=viewer_state,
+                    notes="on_exit",
+                )
                 checkpoint_manager.prune_keep_last_n(int(getattr(config, "CHECKPOINT_KEEP_LAST_N", 1)))
                 print("[checkpoint] on-exit saved:", out.name)
             except Exception as ex:
