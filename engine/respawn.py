@@ -10,12 +10,13 @@ from dataclasses import dataclass, field
 #   - Ensures a new default is computed at instantiation time, not at import time.
 #   - Crucial when defaults depend on config values that may differ per run.
 
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Any
 # Optional[T] means T or None
 # Tuple[A, B] indicates fixed-size tuple with (A, B)
 # List[T] and Dict[K, V] for container typing (readability + static checking)
 
 import copy
+import math
 import random
 
 import torch
@@ -66,6 +67,20 @@ from agent.mlp_brain import (
 #   - scripted_transformer_brain (TorchScript-ready version for non-PPO mode)
 #   - TronBrain, MirrorBrain (likely lighter MLP-based / heuristic / special policies)
 # The policy selection logic is team-aware when TEAM_BRAIN_ASSIGNMENT is enabled.
+
+_BIRTH_DOCTRINES = frozenset({
+    "overall",
+    "killer",
+    "cp",
+    "health",
+    "kill_health",
+    "health_cp",
+    "kill_cp",
+    "trinity",
+    "highest_spike",
+    "personal_points",
+    "random_per_birth",
+})
 
 
 # Respawn configuration dataclass (extended with new parameters)
@@ -203,6 +218,21 @@ class RespawnCfg:
     parent_selection_mode: str = field(default_factory=lambda: str(getattr(config, "RESPAWN_PARENT_SELECTION_MODE", "topk_weighted")).strip().lower())
     parent_selection_topk_frac: float = field(default_factory=lambda: float(getattr(config, "RESPAWN_PARENT_SELECTION_TOPK_FRAC", 0.25)))
     parent_selection_score_power: float = field(default_factory=lambda: float(getattr(config, "RESPAWN_PARENT_SELECTION_SCORE_POWER", 1.0)))
+    require_parent_for_birth: bool = field(default_factory=lambda: bool(getattr(config, "RESPAWN_REQUIRE_PARENT_FOR_BIRTH", True)))
+    birth_doctrine_mode: str = field(default_factory=lambda: str(getattr(config, "RESPAWN_BIRTH_DOCTRINE_MODE", "overall")).strip().lower())
+    birth_random_doctrine_pool: Tuple[str, ...] = field(default_factory=lambda: tuple(
+        str(x).strip().lower()
+        for x in getattr(config, "RESPAWN_BIRTH_RANDOM_DOCTRINE_POOL", ("overall",))
+        if str(x).strip()
+    ))
+    birth_topk_size: int = field(default_factory=lambda: int(getattr(config, "RESPAWN_BIRTH_TOPK_SIZE", 0)))
+    birth_zero_score_fallback: str = field(default_factory=lambda: str(
+        getattr(config, "RESPAWN_BIRTH_ZERO_SCORE_FALLBACK", "uniform_candidates")
+    ).strip().lower())
+    birth_blend_weight_kill: float = field(default_factory=lambda: float(getattr(config, "RESPAWN_BIRTH_BLEND_WEIGHT_KILL", 1.0)))
+    birth_blend_weight_cp: float = field(default_factory=lambda: float(getattr(config, "RESPAWN_BIRTH_BLEND_WEIGHT_CP", 1.0)))
+    birth_blend_weight_health: float = field(default_factory=lambda: float(getattr(config, "RESPAWN_BIRTH_BLEND_WEIGHT_HEALTH", 1.0)))
+    birth_blend_weight_personal: float = field(default_factory=lambda: float(getattr(config, "RESPAWN_BIRTH_BLEND_WEIGHT_PERSONAL", 1.0)))
 
     spawn_location_mode: str = field(default_factory=lambda: str(getattr(config, "RESPAWN_SPAWN_LOCATION_MODE", "uniform")))
     spawn_near_parent_radius: int = field(default_factory=lambda: int(getattr(config, "RESPAWN_SPAWN_NEAR_PARENT_RADIUS", max(1, int(getattr(config, "RESPAWN_JITTER_RADIUS", 1))))))
@@ -395,6 +425,145 @@ def _resolve_team_brain_kind_from_team(team_id: float) -> str:
 
 def _infer_kind_from_parent(parent: torch.nn.Module) -> Optional[str]:
     return brain_kind_from_module(parent)
+
+
+def _slot_uid(reg: AgentsRegistry, data: torch.Tensor, slot: int) -> int:
+    """Resolve the persistent UID for one registry slot."""
+    if hasattr(reg, "agent_uids"):
+        return int(reg.agent_uids[int(slot)].item())
+    return int(data[int(slot), COL_AGENT_ID].item())
+
+
+def _non_negative_finite(value: object) -> float:
+    """Return a finite non-negative float, or 0.0 for invalid input."""
+    try:
+        x = float(value)
+    except Exception:
+        return 0.0
+    if not math.isfinite(x):
+        return 0.0
+    return max(x, 0.0)
+
+
+def _normalize_non_negative(values: List[float]) -> List[float]:
+    """Normalize non-negative values by their positive max; all-zero stays all-zero."""
+    clean = [_non_negative_finite(v) for v in values]
+    top = max(clean) if clean else 0.0
+    if top <= 0.0:
+        return [0.0] * len(clean)
+    return [v / top for v in clean]
+
+
+def _resolve_birth_random_pool(cfg: RespawnCfg) -> Tuple[str, ...]:
+    """Return a sanitized non-recursive doctrine pool for random_per_birth."""
+    raw = tuple(
+        str(x).strip().lower()
+        for x in getattr(cfg, "birth_random_doctrine_pool", ("overall",))
+        if str(x).strip()
+    )
+    cleaned = tuple(x for x in raw if x in _BIRTH_DOCTRINES and x != "random_per_birth")
+    return cleaned or ("overall",)
+
+
+def _resolve_birth_doctrine(cfg: RespawnCfg) -> str:
+    """Resolve the active doctrine for one birth event."""
+    doctrine = str(getattr(cfg, "birth_doctrine_mode", "overall")).strip().lower()
+    if doctrine == "random_per_birth":
+        return str(random.choice(_resolve_birth_random_pool(cfg)))
+    if doctrine in _BIRTH_DOCTRINES:
+        return doctrine
+    return "overall"
+
+
+def _resolve_parent_topk_size(n: int, cfg: RespawnCfg) -> int:
+    """Resolve explicit top-k size first, then fall back to legacy fraction mode."""
+    explicit = int(getattr(cfg, "birth_topk_size", 0))
+    if explicit > 0:
+        return max(1, min(n, explicit))
+
+    frac = float(getattr(cfg, "parent_selection_topk_frac", 0.25))
+    frac = min(max(frac, 0.0), 1.0)
+    if frac <= 0.0:
+        return 1
+    return max(1, min(n, int(round(n * frac))))
+
+
+def _build_doctrine_scores(
+    parents: torch.Tensor,
+    reg: AgentsRegistry,
+    data: torch.Tensor,
+    cfg: RespawnCfg,
+    *,
+    doctrine: str,
+    engine: Optional[Any],
+) -> List[float]:
+    """Compute one doctrine score per candidate parent."""
+    parent_slots = [int(x) for x in parents.detach().cpu().tolist()]
+    if not parent_slots:
+        return []
+
+    kill_store = getattr(engine, "agent_kill_counts", {}) if engine is not None else {}
+    cp_store = getattr(engine, "agent_cp_points", {}) if engine is not None else {}
+    personal_store = getattr(engine, "agent_scores", {}) if engine is not None else {}
+
+    health_raw: List[float] = []
+    kill_raw: List[float] = []
+    cp_raw: List[float] = []
+    personal_raw: List[float] = []
+
+    for slot in parent_slots:
+        hp = _non_negative_finite(data[slot, COL_HP].item())
+        hp_max = max(_non_negative_finite(data[slot, COL_HP_MAX].item()), 1e-8)
+        health_raw.append(min(max(hp / hp_max, 0.0), 1.0))
+
+        uid = _slot_uid(reg, data, slot)
+        kill_raw.append(_non_negative_finite(kill_store.get(uid, 0.0) if hasattr(kill_store, "get") else 0.0))
+        cp_raw.append(_non_negative_finite(cp_store.get(uid, 0.0) if hasattr(cp_store, "get") else 0.0))
+        personal_raw.append(_non_negative_finite(personal_store.get(uid, 0.0) if hasattr(personal_store, "get") else 0.0))
+
+    kill_norm = _normalize_non_negative(kill_raw)
+    cp_norm = _normalize_non_negative(cp_raw)
+    personal_norm = _normalize_non_negative(personal_raw)
+    health_norm = [min(max(v, 0.0), 1.0) for v in health_raw]
+
+    w_kill = _non_negative_finite(getattr(cfg, "birth_blend_weight_kill", 1.0))
+    w_cp = _non_negative_finite(getattr(cfg, "birth_blend_weight_cp", 1.0))
+    w_health = _non_negative_finite(getattr(cfg, "birth_blend_weight_health", 1.0))
+    w_personal = _non_negative_finite(getattr(cfg, "birth_blend_weight_personal", 1.0))
+
+    if (w_kill + w_cp + w_health + w_personal) <= 0.0:
+        w_kill = w_cp = w_health = w_personal = 1.0
+
+    n = len(parent_slots)
+    if doctrine == "killer":
+        return kill_norm
+    if doctrine == "cp":
+        return cp_norm
+    if doctrine == "health":
+        return health_norm
+    if doctrine == "personal_points":
+        return personal_norm
+    if doctrine == "kill_health":
+        return [(w_kill * kill_norm[i]) + (w_health * health_norm[i]) for i in range(n)]
+    if doctrine == "health_cp":
+        return [(w_health * health_norm[i]) + (w_cp * cp_norm[i]) for i in range(n)]
+    if doctrine == "kill_cp":
+        return [(w_kill * kill_norm[i]) + (w_cp * cp_norm[i]) for i in range(n)]
+    if doctrine == "trinity":
+        return [
+            (w_kill * kill_norm[i]) + (w_cp * cp_norm[i]) + (w_health * health_norm[i])
+            for i in range(n)
+        ]
+    if doctrine == "highest_spike":
+        return [max(kill_norm[i], cp_norm[i], health_norm[i]) for i in range(n)]
+
+    return [
+        (w_personal * personal_norm[i])
+        + (w_kill * kill_norm[i])
+        + (w_cp * cp_norm[i])
+        + (w_health * health_norm[i])
+        for i in range(n)
+    ]
 
 
 # Brain creation and cloning (preserves team-specific assignment)
@@ -805,38 +974,49 @@ def _write_agent_to_registry(
 
 
 # Parent selection + anomaly helpers
-def _pick_parent_slot(parents: torch.Tensor, data: torch.Tensor, cfg: RespawnCfg) -> int:
-    """Choose a parent slot according to configured policy (defaults to uniform random)."""
+def _pick_parent_slot(
+    parents: torch.Tensor,
+    reg: AgentsRegistry,
+    data: torch.Tensor,
+    cfg: RespawnCfg,
+    *,
+    engine: Optional[Any] = None,
+) -> Tuple[int, Optional[str], float]:
+    """Choose a parent slot and report the doctrine and merit score used."""
     n = int(parents.numel())
     if n <= 0:
         raise RuntimeError("_pick_parent_slot called with empty parents")
 
     mode = str(getattr(cfg, "parent_selection_mode", "random")).strip().lower()
     if mode in ("random", "uniform", "baseline"):
-        return int(parents[random.randrange(n)].item())
-
-    # Use cheap, local scalar score from current registry state.
-    hp = data[parents, COL_HP].detach().float().cpu()
-    atk = data[parents, COL_ATK].detach().float().cpu()
-    scores = (hp + atk).tolist()
-    if not scores:
-        return int(parents[random.randrange(n)].item())
-
-    # Clamp negatives and avoid all-zero weights.
-    scores = [max(float(s), 0.0) for s in scores]
+        return int(parents[random.randrange(n)].item()), None, 0.0
 
     if mode in ("topk_weighted", "stronger_biased", "elite_weighted"):
-        frac = float(getattr(cfg, "parent_selection_topk_frac", 0.25))
-        frac = min(max(frac, 0.0), 1.0)
-        k = max(1, int(round(n * frac))) if frac > 0.0 else 1
+        doctrine = _resolve_birth_doctrine(cfg)
+        scores = _build_doctrine_scores(parents, reg, data, cfg, doctrine=doctrine, engine=engine)
+        if len(scores) != n:
+            raise RuntimeError(
+                f"[respawn] doctrine score count mismatch: got {len(scores)} expected {n} for doctrine={doctrine!r}"
+            )
+
+        if not any(float(s) > 0.0 for s in scores):
+            fallback = str(getattr(cfg, "birth_zero_score_fallback", "uniform_candidates")).strip().lower()
+            if fallback == "abort_birth":
+                return -1, doctrine, 0.0
+            return int(parents[random.randrange(n)].item()), doctrine, 0.0
+
+        k = _resolve_parent_topk_size(n, cfg)
         order = sorted(range(n), key=lambda i: scores[i], reverse=True)
         cand_idx = order[:k]
         power = max(float(getattr(cfg, "parent_selection_score_power", 1.0)), 0.0)
-        weights = [(scores[i] if scores[i] > 0.0 else 1e-12) ** power for i in cand_idx]
+        weights = [max(float(scores[i]), 1e-12) ** power for i in cand_idx]
         if not any(w > 0.0 for w in weights):
-            return int(parents[cand_idx[random.randrange(len(cand_idx))]].item())
+            fallback = str(getattr(cfg, "birth_zero_score_fallback", "uniform_candidates")).strip().lower()
+            if fallback == "abort_birth":
+                return -1, doctrine, 0.0
+            return int(parents[random.randrange(n)].item()), doctrine, 0.0
         chosen_local = random.choices(cand_idx, weights=weights, k=1)[0]
-        return int(parents[chosen_local].item())
+        return int(parents[chosen_local].item()), doctrine, float(scores[chosen_local])
 
     raise RuntimeError(f"[respawn] unsupported parent_selection_mode={mode!r}")
 
@@ -875,6 +1055,7 @@ def _respawn_some(
     meta_out: Optional[List[Dict[str, object]]] = None,
     controller: Optional["RespawnController"] = None,
     spawn_reason: str = "respawn",
+    engine: Optional[Any] = None,
 ) -> int:
     """
     Attempt to spawn up to `count` agents of the given team.
@@ -919,6 +1100,10 @@ def _respawn_some(
     # Gather potential parents (alive agents of the same team).
     # This produces indices into reg.brains / reg.agent_data.
     parents = (alive & (data[:, COL_TEAM] == team_id)).nonzero(as_tuple=False).squeeze(1)
+    require_parent_for_birth = bool(getattr(cfg, "require_parent_for_birth", False))
+
+    if require_parent_for_birth and parents.numel() == 0:
+        return 0
 
     spawned = 0
 
@@ -927,17 +1112,23 @@ def _respawn_some(
     for k in range(min(count, dead_slots.numel())):
         slot = int(dead_slots[k].item())
 
-        # Decide whether to clone an existing parent or create a fresh brain.
-        # use_clone is True only if:
-        #   - there exists at least one alive parent in this team (parents.numel() > 0)
-        #   - random coin flip < clone_prob
+        # Decide whether the child inherits the parent's exact brain weights.
         use_clone = (parents.numel() > 0) and (random.random() < cfg.clone_prob)
 
-        # Optional near-parent spawn placement is only meaningful on clone path.
-        pj = None  # Parent slot index (only defined if cloning).
+        pj = None
+        selected_doctrine: Optional[str] = None
+        parent_merit_score = 0.0
         parent_xy: Optional[Tuple[int, int]] = None
-        if use_clone:
-            pj = _pick_parent_slot(parents, data, cfg)
+        if parents.numel() > 0 and (require_parent_for_birth or use_clone):
+            pj, selected_doctrine, parent_merit_score = _pick_parent_slot(
+                parents,
+                reg,
+                data,
+                cfg,
+                engine=engine,
+            )
+            if pj < 0:
+                continue
             if str(getattr(cfg, "spawn_location_mode", "uniform")).strip().lower() in ("near_parent", "parent_near"):
                 try:
                     px = int(round(float(data[pj, COL_X].item())))
@@ -956,9 +1147,7 @@ def _respawn_some(
         parent_unit_id: Optional[int] = None
         parent_team_id: Optional[int] = None
         parent_generation: Optional[int] = None
-        if use_clone:
-            if pj is None:
-                raise RuntimeError("[respawn] clone path entered without parent slot")
+        if pj is not None:
             if int(pj) < 0 or int(pj) >= int(data.shape[0]):
                 raise RuntimeError(f"[respawn] picked parent slot out of range: {pj}")
             if float(data[pj, COL_ALIVE].item()) <= 0.5:
@@ -1022,6 +1211,8 @@ def _respawn_some(
             )
 
         if use_clone:
+            if pj is None:
+                raise RuntimeError("[respawn] clone path entered without parent slot")
             # Clone the parent's brain, preserving architecture rules.
             brain = _clone_brain(reg.brains[pj], reg.device, team_id=team_id)
 
@@ -1049,7 +1240,7 @@ def _respawn_some(
             or abs(mutation_delta_atk) > 0.0
             or int(mutation_delta_vis) != 0
         )
-        child_generation = int(parent_generation + 1) if (use_clone and parent_generation is not None) else 0
+        child_generation = int(parent_generation + 1) if (pj is not None and parent_generation is not None) else 0
 
         # Commit agent state into registry tensors and brain storage.
         _write_agent_to_registry(
@@ -1074,11 +1265,11 @@ def _respawn_some(
             # Read true UID from int64 side-tensor if present.
             if hasattr(reg, "agent_uids"):
                 child_aid = int(reg.agent_uids[slot].item())
-                parent_aid = int(reg.agent_uids[pj].item()) if use_clone else None
+                parent_aid = int(reg.agent_uids[pj].item()) if pj is not None else None
             else:
                 # Fallback for older registries (may be unsafe under float16).
                 child_aid = int(reg.agent_data[slot, COL_AGENT_ID].item())
-                parent_aid = int(reg.agent_data[pj, COL_AGENT_ID].item()) if use_clone else None
+                parent_aid = int(reg.agent_data[pj, COL_AGENT_ID].item()) if pj is not None else None
 
             meta_out.append({
                 "tick": int(tick),
@@ -1087,17 +1278,20 @@ def _respawn_some(
                 "team_id": float(team_id),
                 "unit_id": int(unit_id),
                 "spawn_reason": str(spawn_reason),
-                "spawn_origin": ("clone" if use_clone else "fresh"),
+                "spawn_origin": ("clone" if use_clone else ("fresh_parented" if pj is not None else "fresh")),
                 "x": int(x),
                 "y": int(y),
                 "cloned": bool(use_clone),
-                "parent_slot": int(pj) if use_clone else None,
+                "parent_slot": int(pj) if pj is not None else None,
                 "parent_agent_id": int(parent_aid) if parent_aid is not None else None,
                 "parent_unit_id": int(parent_unit_id) if parent_unit_id is not None else None,
                 "parent_team_id": int(parent_team_id) if parent_team_id is not None else None,
                 "parent_generation": int(parent_generation) if parent_generation is not None else None,
                 "child_generation": int(child_generation),
                 "unit_inherited_from_parent": bool(use_clone and parent_unit_id is not None and int(parent_unit_id) == int(unit_id)),
+                "birth_doctrine": (str(selected_doctrine) if selected_doctrine is not None else None),
+                "birth_merit_score": (float(parent_merit_score) if pj is not None else None),
+                "closed_cradle_enforced": bool(require_parent_for_birth),
                 "mutation_std": float(cfg.mutation_std),
                 "mutation_flag": bool(mutation_flag),
                 # Additive observability fields (no behavior impact)
@@ -1205,7 +1399,13 @@ class RespawnController:
             return True
         return False
 
-    def step(self, tick: int, reg: AgentsRegistry, grid: torch.Tensor) -> Tuple[int, int]:
+    def step(
+        self,
+        tick: int,
+        reg: AgentsRegistry,
+        grid: torch.Tensor,
+        engine: Optional[Any] = None,
+    ) -> Tuple[int, int]:
         """
         Execute one step of the respawn logic.
 
@@ -1258,6 +1458,7 @@ class RespawnController:
                 self.last_spawn_meta,
                 controller=self,
                 spawn_reason="floor",
+                engine=engine,
             )
             spawned_r += spawned
             if counts.red + spawned >= self.cfg.floor_per_team:
@@ -1273,6 +1474,7 @@ class RespawnController:
                 self.last_spawn_meta,
                 controller=self,
                 spawn_reason="floor",
+                engine=engine,
             )
             spawned_b += spawned
             if counts.blue + spawned >= self.cfg.floor_per_team:
@@ -1295,6 +1497,7 @@ class RespawnController:
                     self.last_spawn_meta,
                     controller=self,
                     spawn_reason="periodic",
+                    engine=engine,
                 )
                 spawned_b += _respawn_some(
                     reg, grid, TEAM_BLUE_ID,
@@ -1304,6 +1507,7 @@ class RespawnController:
                     self.last_spawn_meta,
                     controller=self,
                     spawn_reason="periodic",
+                    engine=engine,
                 )
 
         return spawned_r, spawned_b
@@ -1344,5 +1548,5 @@ def respawn_tick(reg: AgentsRegistry, grid: torch.Tensor, cfg: RespawnCfg) -> No
     None. step() returns counts, but they are ignored to match the old API.
     """
     controller = RespawnController(cfg)
-    controller.step(0, reg, grid)  # tick number is not critical for one-off calls
+    controller.step(0, reg, grid, engine=None)  # tick number is not critical for one-off calls
     # Note: step returns counts, but we ignore them to match the old API.

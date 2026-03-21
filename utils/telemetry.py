@@ -10,59 +10,22 @@ from typing import Any, Dict, List, Optional, Tuple
 import config
 
 
-# Utility helpers (pure functions)
-
 def _to_int(x: Any) -> int:
-    """
-    Convert an arbitrary value into an int in a robust way.
-
-    Why this exists
-    ---------------
-    In this project, the agent registry stores agent attributes in a float tensor
-    (likely for GPU/vectorization convenience).
-    That means identifiers that are conceptually integers (agent_id, team_id, etc.)
-    may appear as:
-        2.0, 3.0, 117.0
-    Additionally, when reading from CSV/JSON, values might be strings.
-
-    Strategy
-    --------
-    1) First try `int(x)` directly.
-    2) If that fails, try `int(float(x))`.
-       - Handles strings like "12", "12.0", and numeric-like values.
-
-    Note:
-    -----
-    `int(float("12.9"))` becomes 12 (floor toward zero). That is fine here because
-    IDs should be integral already; if they are not, it is a sign of corruption
-    upstream, and validation/anomaly paths should catch it.
-    """
+    """Convert a numeric-like value to ``int``."""
     try:
         return int(x)
     except Exception:
-        # Fallback: convert via float to handle strings/other numeric types.
         return int(float(x))
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """
-    Atomically write text to `path`.
-
-    Windows note
-    ------------
-    On Windows, `os.replace(tmp, path)` can fail transiently if:
-      - antivirus/indexer is scanning the destination
-      - another process has the destination open (sharing violations)
-    We retry briefly and (as a last resort) fall back to a direct overwrite.
-    """
-    import time  # local import to keep module import surface unchanged
+    """Write text atomically with a small Windows retry budget."""
+    import time
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")
 
-    # Retry a bit on Windows to survive transient locks (AV/indexer/reader).
-    # Keep deterministic behavior: fixed retry count + fixed backoff schedule.
     max_tries = 20 if os.name == "nt" else 3
     last_exc: Optional[BaseException] = None
 
@@ -74,16 +37,11 @@ def _atomic_write_text(path: Path, text: str) -> None:
             last_exc = e
             winerr = getattr(e, "winerror", None)
 
-            # Windows transient lock patterns:
-            # - 5  = Access is denied
-            # - 32 = The process cannot access the file because it is being used by another process
             if os.name == "nt" and winerr in (5, 32):
                 time.sleep(0.01 * (attempt + 1))
                 continue
             raise
 
-    # Last resort: try non-atomic overwrite (better than losing the snapshot entirely).
-    # If this fails too, re-raise the last exception so callers can surface it.
     try:
         path.write_text(text, encoding="utf-8")
         try:
@@ -97,35 +55,13 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 
 def _parse_validate_level(v: Any, default: int = 2) -> int:
-    """
-    Parse and validate TELEMETRY_VALIDATE_LEVEL.
-
-    Intended config behavior
-    ------------------------
-    TELEMETRY_VALIDATE_LEVEL can be specified as:
-    - number: 0, 1, 2
-    - string aliases:
-        "off" or "0"     -> 0 (no validation)
-        "basic" or "1"   -> 1
-        "strict" or "2"  -> 2 (default)
-
-    Returns
-    -------
-    An integer in {0,1,2}. If parsing fails, returns `default`.
-
-    Why this is useful
-    ------------------
-    Config values may arrive as strings from env vars or config files.
-    This makes the system tolerant and reduces "config gotcha" bugs.
-    """
-    # If it's already a number, try to convert to int.
+    """Parse ``TELEMETRY_VALIDATE_LEVEL`` into ``0``, ``1``, or ``2``."""
     if isinstance(v, (int, float)):
         try:
             return int(v)
         except Exception:
             return int(default)
 
-    # If it's a string, handle common aliases.
     if isinstance(v, str):
         s = v.strip().lower()
         m = {"off": 0, "0": 0, "basic": 1, "1": 1, "strict": 2, "2": 2}
@@ -136,7 +72,6 @@ def _parse_validate_level(v: Any, default: int = 2) -> int:
         except Exception:
             return int(default)
 
-    # Fallback to default.
     return int(default)
 
 
@@ -164,55 +99,14 @@ def _parse_schema_version_int(x: Any, default: int = 2) -> int:
     except Exception:
         return int(default)
 
-
-# Main session class
-
 class TelemetrySession:
-    """
-    TelemetrySession is a stateful recorder object used across simulation ticks.
-
-    It stores:
-    - In-memory state (`_life`, `_offspring_count`, `_events_buf`)
-    - Output file paths (CSV/JSONL)
-    - Config-driven behavior flags
-
-    It provides a small "public API" that the engine calls:
-    - attach_context(...)
-    - write_run_meta(...)
-    - record_resume(...)
-    - bootstrap_from_registry(...)
-    - ingest_spawn_meta(...)
-    - record_birth(...)
-    - record_damage_*(...)
-    - record_kills(...)
-    - record_deaths(...)
-    - on_tick_end(...)
-    - close()
-
-    Design philosophy
-    -----------------
-    - The simulation engine does not need to know telemetry internals.
-    - Telemetry does not control the simulation; it only observes and logs.
-    - Output formats are simple and robust.
-    """
+    """Stateful telemetry recorder for one simulation run."""
 
     def __init__(self, run_dir: Path) -> None:
-        """
-        Initialize telemetry and prepare output structure.
-
-        Parameters
-        ----------
-        run_dir:
-            The root directory for this simulation run (e.g., results/sim_YYYY-MM-DD_...).
-            Telemetry outputs go under: run_dir/telemetry/
-        """
-        # Core enable switch.
-        # If not enabled, most methods become no-ops (return early).
+        """Initialize telemetry under ``run_dir/telemetry``."""
         self.enabled: bool = bool(getattr(config, "TELEMETRY_ENABLED", False))
         self.run_dir = Path(run_dir)
 
-        # Event ordering context (additive metadata for causal replay)
-        # These fields are optional; if the engine never sets them, events behave as before.
         self._event_ctx_tick: Optional[int] = None
         self._event_ctx_phase: Optional[str] = None
         self._event_ctx_tick_seq: int = 0
@@ -327,9 +221,10 @@ class TelemetrySession:
         self._reward_slot_team_cp = None
         self._reward_slot_healing_recovered = None
 
-        # Create directories (safe even if they already exist).
-        self.telemetry_dir.mkdir(parents=True, exist_ok=True)
-        self.events_dir.mkdir(parents=True, exist_ok=True)
+        # Create directories only when telemetry is enabled.
+        if self.enabled:
+            self.telemetry_dir.mkdir(parents=True, exist_ok=True)
+            self.events_dir.mkdir(parents=True, exist_ok=True)
 
         # Preserve the string schema version for compatibility with existing metadata.
         self.schema_version_str: str = str(getattr(config, "TELEMETRY_SCHEMA_VERSION", "v2"))
@@ -446,8 +341,8 @@ class TelemetrySession:
         # Track last tick seen for graceful shutdown final summary.
         self._last_tick_seen: Optional[int] = None
 
-        # Ensure lineage edges header exists if file is new.
-        if not self.lineage_edges_path.exists():
+        # Ensure telemetry headers exist only for active telemetry sessions.
+        if self.enabled and (not self.lineage_edges_path.exists()):
             self._append_csv_rows(
                 self.lineage_edges_path,
                 fieldnames=[
@@ -471,7 +366,7 @@ class TelemetrySession:
             )
 
         # Create headers for agent_static and tick_summary if enabled and new.
-        if self.write_agent_static and (not self.agent_static_path.exists()):
+        if self.enabled and self.write_agent_static and (not self.agent_static_path.exists()):
             self._append_csv_rows(
                 self.agent_static_path,
                 fieldnames=[
@@ -482,7 +377,7 @@ class TelemetrySession:
                 rows=[],
             )
 
-        if self.tick_summary_every > 0 and (not self.tick_summary_path.exists()):
+        if self.enabled and self.tick_summary_every > 0 and (not self.tick_summary_path.exists()):
             self._append_csv_rows(
                 self.tick_summary_path,
                 fieldnames=[
@@ -738,38 +633,13 @@ class TelemetrySession:
             self._anomaly(f"rehydrate agent_life failed: {e}")
 
     def _anomaly(self, msg: str) -> None:
-        """
-        Handle a detected anomaly.
-
-        Policy
-        ------
-        - If `abort_on_anomaly` is True: raise AssertionError immediately.
-          This is useful for debugging; it makes the simulation fail fast.
-        - Otherwise: suppress output (silent) and continue.
-          This is useful for production runs where you prefer not to spam logs.
-
-        Note
-        ----
-        Silent anomaly handling can hide issues. A common compromise is:
-        - keep silent during run
-        - write anomaly events into telemetry (not implemented here)
-        """
+        """Handle an internal telemetry anomaly."""
         if self.abort_on_anomaly:
             raise AssertionError(msg)
-
-        # FIX: Silence console output as requested.
-        # print(f"[telemetry] ANOMALY: {msg}")
-        pass
+        return
 
     def _require_birth(self, agent_id: int, context: str) -> None:
-        """
-        Ensure that `agent_id` exists in `_life`.
-
-        This is a consistency check: damage/kill/death events should only happen
-        for agents that were born (record_birth) at some point.
-
-        If missing, we treat it as an anomaly.
-        """
+        """Require that ``agent_id`` already exists in the life ledger."""
         if agent_id not in self._life:
             self._anomaly(f"{context}: missing birth for agent_id={agent_id}")
 
@@ -861,10 +731,12 @@ class TelemetrySession:
             if existing.get(k) != incoming.get(k):
                 mismatches.append(k)
         if mismatches:
+            existing_subset = {k: existing.get(k) for k in mismatches}
+            incoming_subset = {k: incoming.get(k) for k in mismatches}
             raise RuntimeError(
                 f"[telemetry] append-in-place manifest mismatch: keys={mismatches} "
-                f"existing={{{k: existing.get(k) for k in mismatches}}} "
-                f"incoming={{{k: incoming.get(k) for k in mismatches}}}"
+                f"existing={existing_subset} "
+                f"incoming={incoming_subset}"
             )
 
     def flush(self, reason: str = "manual") -> None:

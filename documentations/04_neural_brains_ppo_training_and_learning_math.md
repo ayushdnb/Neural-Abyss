@@ -446,16 +446,16 @@ At the same time, the critic head produces `V(s_t)` for the same observation. Th
 
 ## 3.10 Important design consequences
 
-1. **The action mask is part of the policy semantics.**  
+1. **The action mask is part of the policy semantics.**
    If rollout uses one masking rule and PPO training uses another, log-prob ratios become invalid.
 
-2. **The logits are not probabilities.**  
+2. **The logits are not probabilities.**
    Any code that treats raw logits as action probabilities is wrong.
 
-3. **Sampling is intentional.**  
+3. **Sampling is intentional.**
    The runtime depends on stochastic action selection for exploration and for PPO’s on-policy data collection.
 
-4. **The critic is evaluated on the same observation that produced the action.**  
+4. **The critic is evaluated on the same observation that produced the action.**
    This is a standard actor-critic pattern, but it matters because bootstrap timing later depends on these values.
 
 ## 3.11 Common failure modes in this section
@@ -495,7 +495,7 @@ The policy head answers:
 
 It does **not** answer:
 
-> “What reward will happen next?”  
+> “What reward will happen next?”
 That is the critic’s job.
 
 ## 4.2 What the value output means
@@ -1029,7 +1029,7 @@ This is computed in both the sequential and grouped training paths.
 
 ## 7.2 Why the ratio matters
 
-If `r_t > 1`, the new policy makes the chosen action more likely than before.  
+If `r_t > 1`, the new policy makes the chosen action more likely than before.
 If `r_t < 1`, it makes it less likely than before.
 
 Advantage then determines whether that direction is good:
@@ -1194,16 +1194,16 @@ total PPO loss
 
 ## 7.11 Failure modes in loss construction
 
-1. **Using unmasked logits during training.**  
+1. **Using unmasked logits during training.**
    This would make `logp_new` belong to a different policy than the one used during rollout.
 
-2. **Changing action indexing without changing stored actions.**  
+2. **Changing action indexing without changing stored actions.**
    The log-prob lookup would point to the wrong action dimension.
 
-3. **Reusing stale `logp_old`.**  
+3. **Reusing stale `logp_old`.**
    PPO assumes `logp_old` came from the behavior policy that generated the trajectory.
 
-4. **Using a different observation schema for training than for rollout.**  
+4. **Using a different observation schema for training than for rollout.**
    The ratio would still compute, but it would no longer represent a valid on-policy update.
 
 ---

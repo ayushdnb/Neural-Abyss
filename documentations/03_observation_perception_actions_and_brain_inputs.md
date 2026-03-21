@@ -2,9 +2,9 @@
 
 ## Document Purpose
 
-This volume defines the interface between the simulation world and the policy network. In this repository, that interface is not an informal idea. It is a concrete contract with fixed widths, fixed ordering, fixed action indices, and multiple layers of runtime validation. The code treats it as a schema, not as an incidental implementation detail. `config.py` fixes the top-level observation and action dimensions; `engine/tick.py` constructs the live observation tensor each tick; `agent/obs_spec.py` re-splits that tensor under strict checks; and the MLP brain family validates the same layout again before producing logits and values. fileciteturn0file0L2485-L2530 fileciteturn0file0L10791-L10906 fileciteturn0file0L1506-L1628 fileciteturn0file0L917-L1000
+This volume defines the interface between the simulation world and the policy network. In this repository, that interface is not an informal idea. It is a concrete contract with fixed widths, fixed ordering, fixed action indices, and multiple layers of runtime validation. The code treats it as a schema, not as an incidental implementation detail. `config.py` fixes the top-level observation and action dimensions; `engine/tick.py` constructs the live observation tensor each tick; `agent/obs_spec.py` re-splits that tensor under strict checks; and the MLP brain family validates the same layout again before producing logits and values.
 
-This document is written cumulatively on purpose. Good long-form engineering documentation benefits from context-first ordering, clear section hierarchy, and short, idea-focused paragraphs; Write the Docs and GitHub’s documentation guidance both recommend that kind of progressive structure for technical manuals. citeturn161058search2turn161058search17turn161058search1
+This document is written cumulatively on purpose. Good long-form engineering documentation benefits from context-first ordering, clear section hierarchy, and short, idea-focused paragraphs; Write the Docs and GitHub’s documentation guidance both recommend that kind of progressive structure for technical manuals.
 
 ## Audience and How to Read This Volume
 
@@ -20,9 +20,9 @@ Read Sections 1 through 5 if the goal is conceptual understanding. Read Sections
 
 ## 1. Why the Observation–Action Interface Exists
 
-The policy cannot consume the raw world directly. The world state is stored as multiple tensors with simulation-specific meanings: a three-channel grid, a registry of per-agent attributes, runtime statistics, zone masks, and other engine-side state. The neural model, by contrast, expects a fixed-width numeric tensor per agent. The observation system exists to compress and organize the relevant subset of world state into that fixed-width per-agent vector. On the output side, the action system exists to turn one discrete sampled index back into an engine-understood intention such as idle, move in one of eight directions, or attack along a direction/range combination. fileciteturn0file0L6480-L6505 fileciteturn0file0L10793-L10906 fileciteturn0file0L1172-L1207 fileciteturn0file0L5221-L5238
+The policy cannot consume the raw world directly. The world state is stored as multiple tensors with simulation-specific meanings: a three-channel grid, a registry of per-agent attributes, runtime statistics, zone masks, and other engine-side state. The neural model, by contrast, expects a fixed-width numeric tensor per agent. The observation system exists to compress and organize the relevant subset of world state into that fixed-width per-agent vector. On the output side, the action system exists to turn one discrete sampled index back into an engine-understood intention such as idle, move in one of eight directions, or attack along a direction/range combination.
 
-This layer is one of the highest-risk contracts in the repository because it carries both semantics and shape. Changing observation width changes more than one file. It changes model construction, checkpoint compatibility, PPO rollout storage, and any code that assumes a specific split between rays and non-ray features. `config.py` says this explicitly for both `OBS_DIM` and `NUM_ACTIONS`. fileciteturn0file0L2485-L2530
+This layer is one of the highest-risk contracts in the repository because it carries both semantics and shape. Changing observation width changes more than one file. It changes model construction, checkpoint compatibility, PPO rollout storage, and any code that assumes a specific split between rays and non-ray features. `config.py` says this explicitly for both `OBS_DIM` and `NUM_ACTIONS`.
 
 A useful beginner mental model is this:
 
@@ -44,7 +44,7 @@ That diagram is small, but each arrow hides a separate correctness condition. Th
 
 ### 2.1 Where observation construction starts
 
-Observation construction happens inside `TickEngine._build_transformer_obs()`. Despite the historical function name, the live code builds the flat observation consumed by the current MLP brain family. The function receives the alive slot indices and their `(x, y)` positions, then builds one observation row per alive agent. The final shape must be `(N_alive, OBS_DIM)`, and the code raises immediately if that shape does not match. fileciteturn0file0L10791-L10906 fileciteturn0file0L11035-L11043
+Observation construction happens inside `TickEngine._build_transformer_obs()`. Despite the historical function name, the live code builds the flat observation consumed by the current MLP brain family. The function receives the alive slot indices and their `(x, y)` positions, then builds one observation row per alive agent. The final shape must be `(N_alive, OBS_DIM)`, and the code raises immediately if that shape does not match.
 
 ### 2.2 When observations are computed during runtime
 
@@ -57,7 +57,7 @@ Observation construction happens inside `TickEngine._build_transformer_obs()`. D
 5. sample actions,
 6. execute combat,
 7. execute movement,
-8. continue with environment effects and bookkeeping. fileciteturn0file0L10971-L11068 fileciteturn0file0L11164-L11780
+8. continue with environment effects and bookkeeping.
 
 This matters. The policy chooses using the state at the start of the tick, not after combat resolution or post-move updates. That is the decision-time interface.
 
@@ -69,11 +69,11 @@ The builder reads from:
 - `self.registry.agent_data`, the per-slot attribute table,
 - zone masks such as heal/control-point masks,
 - global statistics in `self.stats`,
-- and a derived `unit_map` built from the registry plus grid occupancy. fileciteturn0file0L6480-L6505 fileciteturn0file0L7281-L7365 fileciteturn0file0L10815-L10906
+- and a derived `unit_map` built from the registry plus grid occupancy.
 
 ### 2.4 Per-agent or batched?
 
-The implementation is batched and heavily vectorized. `_build_transformer_obs()` produces one tensor for all alive agents at once. Raycasting computes all rays for all alive agents in one call. Instinct features are also computed in batch using broadcasted offset grids. This is not a Python loop that builds one observation object at a time. fileciteturn0file0L6709-L6743 fileciteturn0file0L6806-L6870 fileciteturn0file0L10496-L10518
+The implementation is batched and heavily vectorized. `_build_transformer_obs()` produces one tensor for all alive agents at once. Raycasting computes all rays for all alive agents in one call. Instinct features are also computed in batch using broadcasted offset grids. This is not a Python loop that builds one observation object at a time.
 
 ### 2.5 High-level observation layout
 
@@ -90,7 +90,7 @@ with:
 - `RAYS_FLAT_DIM = 32 * 8 = 256`
 - `RICH_BASE_DIM = 23`
 - `INSTINCT_DIM = 4`
-- `OBS_DIM = 256 + 23 + 4 = 283` fileciteturn0file0L2490-L2506 fileciteturn0file0L1506-L1581
+- `OBS_DIM = 256 + 23 + 4 = 283`
 
 That 283-wide flat vector is the canonical contract for the current codebase.
 
@@ -102,19 +102,19 @@ The observation has three major families, but one of them is itself internally s
 
 ### 3.1 Family 1 — Ray features (`256` floats)
 
-The first `256` columns are the spatial perception block. They come from `raycast32_firsthit()` and represent `32` rays with `8` features each. The function returns shape `(N, 256)`, then the engine concatenates that block directly into the front of the observation. fileciteturn0file0L6710-L6735 fileciteturn0file0L6991-L7011 fileciteturn0file0L10835-L10900
+The first `256` columns are the spatial perception block. They come from `raycast32_firsthit()` and represent `32` rays with `8` features each. The function returns shape `(N, 256)`, then the engine concatenates that block directly into the front of the observation.
 
 ### 3.2 Family 2 — Rich base features (`23` floats)
 
-The next `23` columns are scalar, flag, and global-context features. They include self-state, normalized position, team/unit indicators, zone occupancy flags, global tick/score/combat counters, and padding at the tail. These values are written explicitly column by column in `_build_transformer_obs()`. fileciteturn0file0L10849-L10881
+The next `23` columns are scalar, flag, and global-context features. They include self-state, normalized position, team/unit indicators, zone occupancy flags, global tick/score/combat counters, and padding at the tail. These values are written explicitly column by column in `_build_transformer_obs()`.
 
 ### 3.3 Family 3 — Instinct features (`4` floats)
 
-The final `4` columns are a local neighborhood summary produced by `_compute_instinct_context()`. They are not learned memory. They are engine-computed density-style features describing nearby allied archers, nearby allied soldiers, noisy enemy density, and a threat ratio derived from those counts. fileciteturn0file0L10451-L10575 fileciteturn0file0L10883-L10890
+The final `4` columns are a local neighborhood summary produced by `_compute_instinct_context()`. They are not learned memory. They are engine-computed density-style features describing nearby allied archers, nearby allied soldiers, noisy enemy density, and a threat ratio derived from those counts.
 
 ### 3.4 Why the split matters
 
-This split is not only conceptual. `obs_spec.split_obs_flat()` and `obs_spec.split_obs_for_mlp()` depend on it exactly. The brain then relies on the same split when it reshapes the first `256` floats into `(B, 32, 8)` and treats the remaining `27` floats as the rich vector. fileciteturn0file0L1506-L1628 fileciteturn0file0L1122-L1170
+This split is not only conceptual. `obs_spec.split_obs_flat()` and `obs_spec.split_obs_for_mlp()` depend on it exactly. The brain then relies on the same split when it reshapes the first `256` floats into `(B, 32, 8)` and treats the remaining `27` floats as the rich vector.
 
 ---
 
@@ -122,11 +122,11 @@ This split is not only conceptual. `obs_spec.split_obs_flat()` and `obs_spec.spl
 
 ### 4.1 What “ray-based perception” means here
 
-In this codebase, ray-based perception means the engine sends out a fixed set of sensor directions from the agent’s current position and records only the **first meaningful hit** per direction. It does not return a full occupancy strip. It does not build an image-like crop. It compresses each direction down to one categorical hit description plus two normalized scalars. fileciteturn0file0L6709-L6743
+In this codebase, ray-based perception means the engine sends out a fixed set of sensor directions from the agent’s current position and records only the **first meaningful hit** per direction. It does not return a full occupancy strip. It does not build an image-like crop. It compresses each direction down to one categorical hit description plus two normalized scalars.
 
 ### 4.2 Number of directions
 
-The 32-ray system uses `32` directions evenly spaced around the unit circle, generated from evenly spaced angles in `[0, 2π)`. These are continuous `(cos θ, sin θ)` directions computed once at import time, then reused. fileciteturn0file0L6509-L6558
+The 32-ray system uses `32` directions evenly spaced around the unit circle, generated from evenly spaced angles in `[0, 2π)`. These are continuous `(cos θ, sin θ)` directions computed once at import time, then reused.
 
 This is an important detail for beginners: the sensor is not limited to only eight compass directions. The **action space** uses eight compass directions, but the **observation space** uses 32 sensing directions.
 
@@ -140,7 +140,7 @@ Each ray emits exactly eight features in this order:
   hp_norm ]
 ```
 
-That is why `RAY_FEAT_DIM = 8`: six categorical slots plus two scalar slots. The class coding is explicit in `raycast_32.py`, and the assembly logic writes the one-hot block first, then normalized distance, then normalized HP. fileciteturn0file0L6561-L6581 fileciteturn0file0L6712-L6726 fileciteturn0file0L6991-L7008
+That is why `RAY_FEAT_DIM = 8`: six categorical slots plus two scalar slots. The class coding is explicit in `raycast_32.py`, and the assembly logic writes the one-hot block first, then normalized distance, then normalized HP.
 
 ### 4.4 What is considered a “hit”
 
@@ -148,27 +148,27 @@ The ray marcher gathers, along every ray path:
 
 - occupancy (`grid[0]`),
 - HP (`grid[1]`),
-- agent id (`grid[2]`). fileciteturn0file0L6861-L6871
+- agent id (`grid[2]`).
 
-A wall hit is any cell where `grid[0] == 1`. An agent hit is any cell where `grid[2] >= 0`. The function computes the first wall index and first agent index separately, then chooses the earlier one. If both occur at the same step, wall wins because the comparison is `<=`. After that, agent hits are refined into one of four team-plus-unit classes using `grid[0]` for team color and `unit_map` for subtype. fileciteturn0file0L6873-L6904 fileciteturn0file0L6917-L6969
+A wall hit is any cell where `grid[0] == 1`. An agent hit is any cell where `grid[2] >= 0`. The function computes the first wall index and first agent index separately, then chooses the earlier one. If both occur at the same step, wall wins because the comparison is `<=`. After that, agent hits are refined into one of four team-plus-unit classes using `grid[0]` for team color and `unit_map` for subtype.
 
 ### 4.5 Distance and HP normalization
 
-For a valid hit, `dist_norm` is `(first_hit_step / max_steps_each_agent)`. If no hit exists within the agent’s vision range, the value is zeroed by multiplying with the validity mask. `hp_norm` is the HP stored at the hit location divided by `MAX_HP`, clamped into `[0, 1]` before output. fileciteturn0file0L6971-L7008
+For a valid hit, `dist_norm` is `(first_hit_step / max_steps_each_agent)`. If no hit exists within the agent’s vision range, the value is zeroed by multiplying with the validity mask. `hp_norm` is the HP stored at the hit location divided by `MAX_HP`, clamped into `[0, 1]` before output.
 
 ### 4.6 Per-agent vision range
 
-The raycast does not blindly use a single global depth for everyone. `_build_transformer_obs()` passes `alive_data[:, COL_VISION]` into `raycast32_firsthit()` as `max_steps_each`, so each agent’s observation depth is clipped by its own current vision stat. The config derives the maximum possible raycast depth from the largest class-specific vision range. fileciteturn0file0L2460-L2469 fileciteturn0file0L10835-L10839 fileciteturn0file0L6854-L6859
+The raycast does not blindly use a single global depth for everyone. `_build_transformer_obs()` passes `alive_data[:, COL_VISION]` into `raycast32_firsthit()` as `max_steps_each`, so each agent’s observation depth is clipped by its own current vision stat. The config derives the maximum possible raycast depth from the largest class-specific vision range.
 
 ### 4.7 Limitations of the ray system
 
 There are several important limits.
 
-First, the ray feature is **first-hit only**. If a wall or unit blocks the ray, farther structure on that direction is not represented. fileciteturn0file0L6710-L6726
+First, the ray feature is **first-hit only**. If a wall or unit blocks the ray, farther structure on that direction is not represented.
 
-Second, the directions are continuous but cell coordinates are obtained by truncating to integer indices. The code explicitly notes that shallow angles can revisit the same cell across multiple steps because of integer casting. That is a discretization artifact of this implementation. fileciteturn0file0L6745-L6750 fileciteturn0file0L6823-L6845
+Second, the directions are continuous but cell coordinates are obtained by truncating to integer indices. The code explicitly notes that shallow angles can revisit the same cell across multiple steps because of integer casting. That is a discretization artifact of this implementation.
 
-Third, the ray block is not team-relative. It encodes absolute team colors (`red-*`, `blue-*`), not “ally” and “enemy”. That means the policy must combine ray classes with the later team indicators in `rich_base` to interpret a seen unit as friend or foe from the acting agent’s perspective. fileciteturn0file0L6563-L6578 fileciteturn0file0L10863-L10866
+Third, the ray block is not team-relative. It encodes absolute team colors (`red-*`, `blue-*`), not “ally” and “enemy”. That means the policy must combine ray classes with the later team indicators in `rich_base` to interpret a seen unit as friend or foe from the acting agent’s perspective.
 
 That last point is easy to miss and matters a great deal.
 
@@ -204,9 +204,9 @@ The code writes the `rich_base` block directly and in fixed order. The verified 
 | 19 | `blue.deaths / 500` | normalized blue deaths |
 | 20 | padding | hard zero |
 | 21 | padding | hard zero |
-| 22 | padding | hard zero | fileciteturn0file0L10849-L10881
+| 22 | padding | hard zero |
 
-The padding at indices `20:23` is deliberate. The comments say those slots exist to keep the layout exactly matched to required dimensions. They carry no active feature content in the current build. fileciteturn0file0L10880-L10881
+The padding at indices `20:23` is deliberate. The comments say those slots exist to keep the layout exactly matched to required dimensions. They carry no active feature content in the current build.
 
 ### 5.2 How to think about `rich_base`
 
@@ -217,7 +217,7 @@ For a beginner, it helps to group this block conceptually:
 - **Identity flags**: red/blue, soldier/archer.
 - **Zone state**: heal and control-point occupancy.
 - **Global world summary**: tick, scores, capture totals, kills, deaths.
-- **Reserved slots**: trailing zeros. fileciteturn0file0L10849-L10881
+- **Reserved slots**: trailing zeros.
 
 This is why the block is called “rich”: it is not one feature family. It is a compact mixture of self-local, world-global, and game-progress information.
 
@@ -228,9 +228,9 @@ The instinct block is computed under `@torch.no_grad()` and is explicitly define
 1. ally archer density,
 2. ally soldier density,
 3. noisy enemy density,
-4. threat ratio = enemy density / (ally total density + epsilon). fileciteturn0file0L10451-L10575
+4. threat ratio = enemy density / (ally total density + epsilon).
 
-The engine constructs a discrete circle of offsets using `dx^2 + dy^2 <= R^2`, where `R = INSTINCT_RADIUS`, samples the grid at those offsets, counts unit types, subtracts self from allied counts, adds Gaussian noise to enemy count, and divides by the number of offsets to turn counts into densities. fileciteturn0file0L10403-L10445 fileciteturn0file0L10496-L10574
+The engine constructs a discrete circle of offsets using `dx^2 + dy^2 <= R^2`, where `R = INSTINCT_RADIUS`, samples the grid at those offsets, counts unit types, subtracts self from allied counts, adds Gaussian noise to enemy count, and divides by the number of offsets to turn counts into densities.
 
 A beginner should not think of “instinct” as hidden neural memory. It is a deterministic engine-computed neighborhood summary with one deliberately noisy channel.
 
@@ -243,9 +243,9 @@ A beginner should not think of “instinct” as hidden neural memory. It is a d
 - `zone_context`
 - `team_context`
 - `combat_context`
-- `instinct_context` (by convention, the separate 4-wide instinct block) fileciteturn0file0L2508-L2525 fileciteturn0file0L1631-L1715
+- `instinct_context` (by convention, the separate 4-wide instinct block)
 
-`obs_spec.build_semantic_tokens()` can materialize these groups using `torch.index_select()`. However, the current MLP path does **not** consume those semantic tokens directly. The current brain path uses `split_obs_for_mlp()`, which returns only `rays_raw` and one concatenated `rich_vec`. That distinction matters: semantic grouping exists in the schema utilities, but the active model input path does not presently process `own_context`, `world_context`, and the rest as separate learned tokens. fileciteturn0file0L1584-L1628 fileciteturn0file0L1631-L1715 fileciteturn0file0L1151-L1160
+`obs_spec.build_semantic_tokens()` can materialize these groups using `torch.index_select()`. However, the current MLP path does **not** consume those semantic tokens directly. The current brain path uses `split_obs_for_mlp()`, which returns only `rays_raw` and one concatenated `rich_vec`. That distinction matters: semantic grouping exists in the schema utilities, but the active model input path does not presently process `own_context`, `world_context`, and the rest as separate learned tokens.
 
 That is a subtle but important implementation fact.
 
@@ -267,13 +267,11 @@ or more formally:
 ```text
 obs ∈ R^(283)
 obs = concat(rays_flat ∈ R^(256), rich_base ∈ R^(23), instinct ∈ R^(4))
-``` 
-
-fileciteturn0file0L2490-L2506 fileciteturn0file0L1506-L1581
+```
 
 ### 6.2 Ray flattening order
 
-`raycast32_firsthit()` assembles `feat` with shape `(N, 32, 8)` and returns `feat.reshape(N, 32 * 8)`. That means the flat ordering is contiguous by ray, then by feature within ray. In other words, the first eight columns belong to ray 0, the next eight to ray 1, and so on through ray 31. fileciteturn0file0L6991-L7011
+`raycast32_firsthit()` assembles `feat` with shape `(N, 32, 8)` and returns `feat.reshape(N, 32 * 8)`. That means the flat ordering is contiguous by ray, then by feature within ray. In other words, the first eight columns belong to ray 0, the next eight to ray 1, and so on through ray 31.
 
 So the flat indices for ray `r` are:
 
@@ -286,13 +284,11 @@ and inside each eight-column block the order is:
 
 ```text
 [class_none, class_wall, class_red_sold, class_red_arch, class_blue_sold, class_blue_arch, dist_norm, hp_norm]
-``` 
-
-fileciteturn0file0L6712-L6726 fileciteturn0file0L6991-L7008
+```
 
 ### 6.3 `obs_spec` as schema enforcer
 
-`split_obs_flat()` checks rank, checks `F == OBS_DIM`, checks `RAYS_FLAT_DIM + RICH_TOTAL_DIM == F`, and only then slices the tensor. `split_obs_for_mlp()` then checks that the ray block width equals `RAY_TOKEN_COUNT * RAY_FEAT_DIM`, reshapes it to `(B, 32, 8)`, and concatenates `rich_base` with `instinct` into a `27`-wide vector. fileciteturn0file0L1506-L1628
+`split_obs_flat()` checks rank, checks `F == OBS_DIM`, checks `RAYS_FLAT_DIM + RICH_TOTAL_DIM == F`, and only then slices the tensor. `split_obs_for_mlp()` then checks that the ray block width equals `RAY_TOKEN_COUNT * RAY_FEAT_DIM`, reshapes it to `(B, 32, 8)`, and concatenates `rich_base` with `instinct` into a `27`-wide vector.
 
 That means there are two independent ordering contracts:
 
@@ -308,7 +304,7 @@ The MLP brain family validates:
 - `obs_dim == 32*8 + 27`,
 - `config.OBS_DIM` matches that expectation,
 - the input tensor rank is `(B, F)`,
-- and the feature width is exactly `self.obs_dim`. fileciteturn0file0L917-L952 fileciteturn0file0L1122-L1149
+- and the feature width is exactly `self.obs_dim`.
 
 Then it builds:
 
@@ -316,7 +312,7 @@ Then it builds:
 - `rich_vec`: `(B, 27)`
 - `ray_token`: `(B, D)`
 - `rich_token`: `(B, D)`
-- concatenated flat trunk input: `(B, 2D)` where `D = BRAIN_MLP_D_MODEL`, default `32`, so final trunk input is `(B, 64)`. fileciteturn0file0L1584-L1628 fileciteturn0file0L925-L999 fileciteturn0file0L2810-L2816
+- concatenated flat trunk input: `(B, 2D)` where `D = BRAIN_MLP_D_MODEL`, default `32`, so final trunk input is `(B, 64)`.
 
 This means the model does **not** process all 283 raw features at once in the trunk. It first compresses the ray block into one learned summary token and the full non-ray block into one learned rich token.
 
@@ -327,9 +323,9 @@ If you reorder columns inside `rich_base`, at least four things become unsafe:
 1. `SEMANTIC_RICH_BASE_INDICES` may point to wrong content.
 2. Any future code using `build_semantic_tokens()` will silently receive wrong groups.
 3. The current brain will still run, but its learned interpretation of the 27-wide rich vector becomes invalid relative to old checkpoints.
-4. Any previously trained model weights become semantically stale even if tensor shapes still match. fileciteturn0file0L2508-L2525 fileciteturn0file0L1631-L1715 fileciteturn0file0L2805-L2816
+4. Any previously trained model weights become semantically stale even if tensor shapes still match.
 
-If you change `RAY_TOKEN_COUNT`, `RAY_FEAT_DIM`, `RICH_BASE_DIM`, or `INSTINCT_DIM`, the breakage is more direct: `OBS_DIM`, the brain’s constructor checks, `split_obs_for_mlp()`, and checkpoint compatibility all change together. The code comments explicitly describe these values as schema contracts rather than ordinary tuning knobs. fileciteturn0file0L2477-L2506 fileciteturn0file0L917-L952
+If you change `RAY_TOKEN_COUNT`, `RAY_FEAT_DIM`, `RICH_BASE_DIM`, or `INSTINCT_DIM`, the breakage is more direct: `OBS_DIM`, the brain’s constructor checks, `split_obs_for_mlp()`, and checkpoint compatibility all change together. The code comments explicitly describe these values as schema contracts rather than ordinary tuning knobs.
 
 ---
 
@@ -340,9 +336,9 @@ If you change `RAY_TOKEN_COUNT`, `RAY_FEAT_DIM`, `RICH_BASE_DIM`, or `INSTINCT_D
 `config.NUM_ACTIONS` defaults to `41`. The move-mask module documents two layouts:
 
 - legacy `17`-action layout,
-- current `41`-action layout. fileciteturn0file0L2528-L2530 fileciteturn0file0L5221-L5238
+- current `41`-action layout.
 
-The default, active configuration is `41`, and the live engine decode path is clearly aligned with that layout. This is the end-to-end verified schema for the current repository state. fileciteturn0file0L2528-L2530 fileciteturn0file0L11165-L11185
+The default, active configuration is `41`, and the live engine decode path is clearly aligned with that layout. This is the end-to-end verified schema for the current repository state.
 
 ### 7.2 High-level action families
 
@@ -350,7 +346,7 @@ Under the 41-action schema:
 
 - `0` = idle,
 - `1..8` = movement in eight compass directions,
-- `9..40` = attacks in eight direction blocks, each with four range choices. fileciteturn0file0L5227-L5238
+- `9..40` = attacks in eight direction blocks, each with four range choices.
 
 The eight directions are ordered as:
 
@@ -358,7 +354,7 @@ The eight directions are ordered as:
 0 N, 1 NE, 2 E, 3 SE, 4 S, 5 SW, 6 W, 7 NW
 ```
 
-and this direction table is reused consistently for move masking, movement decode, and attack decode. fileciteturn0file0L5043-L5057 fileciteturn0file0L10026-L10029
+and this direction table is reused consistently for move masking, movement decode, and attack decode.
 
 ### 7.3 Flat indexing scheme for attacks
 
@@ -368,11 +364,11 @@ Attack columns begin at `9`. For direction `d` and range `r ∈ {1,2,3,4}`, the 
 column = 9 + d*4 + (r-1)
 ```
 
-That is the same quotient/remainder structure later used by `run_tick()` to recover direction and range from a sampled attack action. fileciteturn0file0L5419-L5432 fileciteturn0file0L11169-L11185
+That is the same quotient/remainder structure later used by `run_tick()` to recover direction and range from a sampled attack action.
 
 ### 7.4 What the action output actually is
 
-The model outputs one logit per action, shape `(B, act_dim)`. The brain does **not** directly move units or apply combat. The brain only emits preferences over discrete IDs. Those logits are masked externally and sampled from a categorical distribution. fileciteturn0file0L1005-L1012 fileciteturn0file0L1172-L1207 fileciteturn0file0L11076-L11095
+The model outputs one logit per action, shape `(B, act_dim)`. The brain does **not** directly move units or apply combat. The brain only emits preferences over discrete IDs. Those logits are masked externally and sampled from a categorical distribution.
 
 That is the correct boundary: **policy output is an intention code, not the world effect itself**.
 
@@ -382,7 +378,7 @@ That is the correct boundary: **policy output is an intention code, not the worl
 
 ### 8.1 Legality first, execution later
 
-Before inference results are sampled, `build_mask()` produces a boolean legality mask of shape `(N_alive, NUM_ACTIONS)`. `True` means the action is currently legal. At inference time, illegal logits are replaced with a very negative number, then a categorical sample is drawn from the masked logits. PPO training uses the same masking idea in `_mask_logits()`. fileciteturn0file0L5186-L5248 fileciteturn0file0L11076-L11095 fileciteturn0file0L14935-L14947 fileciteturn0file0L15030-L15068
+Before inference results are sampled, `build_mask()` produces a boolean legality mask of shape `(N_alive, NUM_ACTIONS)`. `True` means the action is currently legal. At inference time, illegal logits are replaced with a very negative number, then a categorical sample is drawn from the masked logits. PPO training uses the same masking idea in `_mask_logits()`.
 
 This is a crucial distinction:
 
@@ -394,7 +390,7 @@ Those are three different stages.
 
 ### 8.2 Idle
 
-`0` is always valid if the action space has at least one action. The mask builder marks `mask[:, 0] = True` immediately. fileciteturn0file0L5250-L5255
+`0` is always valid if the action space has at least one action. The mask builder marks `mask[:, 0] = True` immediately.
 
 ### 8.3 Movement decode
 
@@ -405,14 +401,14 @@ dir_idx = action - 1
 destination = current_position + DIRS8[dir_idx]
 ```
 
-Agents killed earlier in the same tick do not move because movement resolution uses `alive_after`, not the original pre-combat alive mask. The code calls this “combat-first semantics.” fileciteturn0file0L11491-L11518
+Agents killed earlier in the same tick do not move because movement resolution uses `alive_after`, not the original pre-combat alive mask. The code calls this “combat-first semantics.”
 
 Movement is then subject to two layers of world resolution:
 
 1. the target cell must be empty,
 2. if multiple agents want the same empty cell, conflict resolution applies:
    - highest HP wins,
-   - exact top-HP ties mean nobody moves. fileciteturn0file0L11521-L11627
+   - exact top-HP ties mean nobody moves.
 
 So a move action means “attempt to move in direction `d`,” not “guaranteed translation.”
 
@@ -425,27 +421,27 @@ r       = ((action - 9) % 4) + 1
 dir_idx =  (action - 9) // 4
 ```
 
-Then it scales `DIRS8[dir_idx]` by the decoded range to obtain the target offset. fileciteturn0file0L11169-L11192
+Then it scales `DIRS8[dir_idx]` by the decoded range to obtain the target offset.
 
 Under the verified 41-action layout, that means each direction owns a block of four contiguous range actions.
 
 ### 8.5 Soldier versus archer range rules
 
-The legality mask does not give every unit the same attack ranges. In the 41-action path, soldiers are allowed only range `1`, while archers are allowed ranges `1..ARCHER_RANGE`, clipped to at most `4`. That gating is encoded directly in the mask builder through `allow_r`. fileciteturn0file0L5236-L5238 fileciteturn0file0L5378-L5395
+The legality mask does not give every unit the same attack ranges. In the 41-action path, soldiers are allowed only range `1`, while archers are allowed ranges `1..ARCHER_RANGE`, clipped to at most `4`. That gating is encoded directly in the mask builder through `allow_r`.
 
 ### 8.6 Optional line-of-sight wall blocking
 
-If `ARCHER_LOS_BLOCKS_WALLS` is enabled, ranged attacks are intended to be masked out when a wall exists in an intermediate cell. The engine also rechecks this during combat execution before applying damage. That second check is important because even forced or incorrectly permitted actions are filtered again before damage lands. fileciteturn0file0L5038-L5040 fileciteturn0file0L5398-L5414 fileciteturn0file0L11194-L11231
+If `ARCHER_LOS_BLOCKS_WALLS` is enabled, ranged attacks are intended to be masked out when a wall exists in an intermediate cell. The engine also rechecks this during combat execution before applying damage. That second check is important because even forced or incorrectly permitted actions are filtered again before damage lands.
 
 ### 8.7 Two fragility points that must be stated plainly
 
 #### Fragility 1 — The 17-action path is not end-to-end cleanly verified
 
-`build_mask()` documents and implements a legacy 17-action layout. But `run_tick()` decodes every attack using the 41-action quotient/remainder scheme with four ranges per direction. That means the mask builder’s “legacy 17” support should not be treated as a fully aligned end-to-end engine contract in the current repository state. The safe reading is: **41 actions are the verified live schema**. fileciteturn0file0L5221-L5238 fileciteturn0file0L11169-L11185
+`build_mask()` documents and implements a legacy 17-action layout. But `run_tick()` decodes every attack using the 41-action quotient/remainder scheme with four ranges per direction. That means the mask builder’s “legacy 17” support should not be treated as a fully aligned end-to-end engine contract in the current repository state. The safe reading is: **41 actions are the verified live schema**.
 
 #### Fragility 2 — The mask-time LOS helper call is shape-inconsistent with its own documented contract
 
-`_los_blocked_by_walls_grid0()` documents its first argument as `occ0: (H, W)` occupancy channel 0. But the call site inside `build_mask()` passes `occ`, which that same function has just defined as the neighbor occupancy tensor of shape `(N, 8)`, not the full world occupancy plane. The code comment even notes this mismatch. That means the legality-mask LOS computation is not cleanly aligned with the helper’s documented input contract. The later engine-side LOS recheck reduces the damage risk, but the observation-to-action legality contract is still fragile here. fileciteturn0file0L5059-L5130 fileciteturn0file0L5283-L5285 fileciteturn0file0L5406-L5414
+`_los_blocked_by_walls_grid0()` documents its first argument as `occ0: (H, W)` occupancy channel 0. But the call site inside `build_mask()` passes `occ`, which that same function has just defined as the neighbor occupancy tensor of shape `(N, 8)`, not the full world occupancy plane. The code comment even notes this mismatch. That means the legality-mask LOS computation is not cleanly aligned with the helper’s documented input contract. The later engine-side LOS recheck reduces the damage risk, but the observation-to-action legality contract is still fragile here.
 
 A manual should say that directly.
 
@@ -458,7 +454,7 @@ A manual should say that directly.
 At inference time, each alive agent contributes one row in `obs` of shape `(N_alive, OBS_DIM)`. Buckets of agents with the same architecture signature are then extracted from that observation tensor and forwarded together. `ensemble_forward()` expects:
 
 - `models`: list of length `K`,
-- `obs`: tensor `(K, F)` aligned to the same ordering. fileciteturn0file0L4034-L4060 fileciteturn0file0L446-L502 fileciteturn0file0L11063-L11095
+- `obs`: tensor `(K, F)` aligned to the same ordering.
 
 The alignment point is important. `obs[i]` must correspond to `models[i]`.
 
@@ -477,26 +473,26 @@ Instead it:
 7. concatenates the two tokens into `(B, 2D)`,
 8. normalizes,
 9. runs the variant-specific MLP trunk,
-10. outputs policy logits and one scalar value. fileciteturn0file0L1584-L1628 fileciteturn0file0L917-L1000 fileciteturn0file0L1072-L1207
+10. outputs policy logits and one scalar value.
 
-With default config `D = 32`, so the trunk input width is `64`, not `283`. fileciteturn0file0L2810-L2816
+With default config `D = 32`, so the trunk input width is `64`, not `283`.
 
 ### 9.3 Shared schema across brain variants
 
-All current MLP variants share the same observation semantics and output semantics. They differ only in the downstream trunk architecture. The input contract is intentionally held constant across variants so that architecture choice does not change feature meaning. fileciteturn0file0L886-L900 fileciteturn0file0L1373-L1406
+All current MLP variants share the same observation semantics and output semantics. They differ only in the downstream trunk architecture. The input contract is intentionally held constant across variants so that architecture choice does not change feature meaning.
 
 ### 9.4 Where masking happens
 
 The brain outputs raw logits for all actions. Legality masking happens outside the brain:
 
 - in `run_tick()` during online action sampling,
-- in PPO runtime during training-time policy/value evaluation. fileciteturn0file0L11076-L11095 fileciteturn0file0L14935-L14947 fileciteturn0file0L15030-L15068
+- in PPO runtime during training-time policy/value evaluation.
 
 This separation matters operationally. A model checkpoint is not “already legality-aware” by architecture alone. It relies on the environment-side action mask.
 
 ### 9.5 Training-time batched interface
 
-The PPO runtime also contains a batched-per-model path where observations and masks are shaped `(G, M, F)` and `(G, M, A)` for `G` homogeneous model lanes and minibatch length `M`. The math is batched, but parameters are still independent per model. This is an implementation optimization, not a semantic change to the observation/action contract. fileciteturn0file0L14190-L14240
+The PPO runtime also contains a batched-per-model path where observations and masks are shaped `(G, M, F)` and `(G, M, A)` for `G` homogeneous model lanes and minibatch length `M`. The math is batched, but parameters are still independent per model. This is an implementation optimization, not a semantic change to the observation/action contract.
 
 ---
 
@@ -510,21 +506,21 @@ The tick engine preallocates multiple capacity-sized scratch tensors for observa
 - `rich_base`,
 - the combined non-ray block,
 - instinct scratch,
-- movement conflict buffers. fileciteturn0file0L10031-L10095
+- movement conflict buffers.
 
 This means the observation builder is written as a hot-path system, not as one-off readable code.
 
 ### 10.2 Raycasting scratch is cached per device and dtype
 
-`raycast32_firsthit()` maintains a per-device, per-feature-dtype scratch cache containing directions, step tensors, coordinate workspaces, active masks, and final feature buffers. Capacity grows only when needed. That design reduces repeated allocations and makes the ray path stable for long runs. fileciteturn0file0L6583-L6699
+`raycast32_firsthit()` maintains a per-device, per-feature-dtype scratch cache containing directions, step tensors, coordinate workspaces, active masks, and final feature buffers. Capacity grows only when needed. That design reduces repeated allocations and makes the ray path stable for long runs.
 
 ### 10.3 Instinct uses cached discrete-circle offsets
 
-The instinct system caches the discrete circle offsets for the configured radius and reuses `(N, M)` scratch tensors for neighborhood coordinates and masks. This avoids recomputing the offset geometry every tick. fileciteturn0file0L10403-L10445 fileciteturn0file0L10488-L10518
+The instinct system caches the discrete circle offsets for the configured radius and reuses `(N, M)` scratch tensors for neighborhood coordinates and masks. This avoids recomputing the offset geometry every tick.
 
 ### 10.4 Bucketed inference reduces Python overhead
 
-Alive agents are grouped by persistent architecture class through `registry.build_buckets()`, and then `ensemble_forward()` fuses per-agent forward passes for each homogeneous bucket. When enabled and large enough, the system can use `torch.func` plus `vmap`; otherwise it falls back to a safe loop. The performance goal is batching math without sharing parameters across agents. fileciteturn0file0L4034-L4060 fileciteturn0file0L446-L502
+Alive agents are grouped by persistent architecture class through `registry.build_buckets()`, and then `ensemble_forward()` fuses per-agent forward passes for each homogeneous bucket. When enabled and large enough, the system can use `torch.func` plus `vmap`; otherwise it falls back to a safe loop. The performance goal is batching math without sharing parameters across agents.
 
 ### 10.5 Design tradeoff
 
@@ -545,19 +541,19 @@ At minimum, inspect and usually update all of the following together:
    - `INSTINCT_DIM`
    - `RAYS_FLAT_DIM`
    - `RICH_TOTAL_DIM`
-   - `OBS_DIM` fileciteturn0file0L2485-L2506
+   - `OBS_DIM`
 
-2. `_build_transformer_obs()` if the live engine feature assembly changes. fileciteturn0file0L10849-L10906
+2. `_build_transformer_obs()` if the live engine feature assembly changes.
 
-3. `obs_spec.split_obs_flat()` and `split_obs_for_mlp()` if the slice boundaries change. fileciteturn0file0L1506-L1628
+3. `obs_spec.split_obs_flat()` and `split_obs_for_mlp()` if the slice boundaries change.
 
-4. `SEMANTIC_RICH_BASE_INDICES` if any `rich_base` column meaning changes. fileciteturn0file0L2508-L2525
+4. `SEMANTIC_RICH_BASE_INDICES` if any `rich_base` column meaning changes.
 
-5. The MLP brain constructor and input checks if the expected observation width changes. fileciteturn0file0L917-L952
+5. The MLP brain constructor and input checks if the expected observation width changes.
 
-6. Any existing checkpoints or saved models, because shape-compatible is not the same as meaning-compatible. The config comments explicitly classify these dimensions as checkpoint contracts. fileciteturn0file0L2485-L2506 fileciteturn0file0L2805-L2816
+6. Any existing checkpoints or saved models, because shape-compatible is not the same as meaning-compatible. The config comments explicitly classify these dimensions as checkpoint contracts.
 
-7. PPO rollout storage assumptions, because rollout entries store observations of fixed dimensionality and policy heads of fixed action width. fileciteturn0file0L13286-L13292
+7. PPO rollout storage assumptions, because rollout entries store observations of fixed dimensionality and policy heads of fixed action width.
 
 A safe operational rule is: **never edit observation columns in only one place**.
 
@@ -569,18 +565,18 @@ You must decide whether the change is:
 - an ordering change,
 - or only a changed normalization/value rule.
 
-A shape change propagates into config constants, `obs_spec`, the brain front end, and checkpoints. An ordering change additionally invalidates any learned weights even if the dimensions stay equal. A normalization-only change keeps shapes intact but still changes model input distribution and therefore should be treated as a training-distribution change, not a harmless refactor. fileciteturn0file0L2485-L2506 fileciteturn0file0L6971-L7008
+A shape change propagates into config constants, `obs_spec`, the brain front end, and checkpoints. An ordering change additionally invalidates any learned weights even if the dimensions stay equal. A normalization-only change keeps shapes intact but still changes model input distribution and therefore should be treated as a training-distribution change, not a harmless refactor.
 
 ### 11.3 If you change the action schema
 
 At minimum, update together:
 
-1. `config.NUM_ACTIONS`. fileciteturn0file0L2528-L2530  
-2. `build_mask()` so legality columns match the new IDs. fileciteturn0file0L5221-L5434  
-3. `run_tick()` decode logic for attacks and movement. fileciteturn0file0L11165-L11192 fileciteturn0file0L11496-L11518  
-4. Brain construction, because `act_dim` comes from `NUM_ACTIONS` and determines the actor-head width. fileciteturn0file0L8181-L8190 fileciteturn0file0L1005-L1012  
-5. PPO legality masking and rollout data, because `action_masks` are expected to match the logits’ last dimension exactly. fileciteturn0file0L14935-L14947 fileciteturn0file0L14206-L14220  
-6. Any telemetry or analysis code that assumes current action IDs in event logs. Movement telemetry currently records raw action IDs. fileciteturn0file0L11709-L11770
+1. `config.NUM_ACTIONS`.
+2. `build_mask()` so legality columns match the new IDs.
+3. `run_tick()` decode logic for attacks and movement.
+4. Brain construction, because `act_dim` comes from `NUM_ACTIONS` and determines the actor-head width.
+5. PPO legality masking and rollout data, because `action_masks` are expected to match the logits’ last dimension exactly.
+6. Any telemetry or analysis code that assumes current action IDs in event logs. Movement telemetry currently records raw action IDs.
 
 ### 11.4 Silent bug classes to expect
 
@@ -591,7 +587,7 @@ This layer can fail in ways that look like “training got worse” rather than 
 - changing ray class meaning while keeping eight features,
 - action mask columns no longer matching engine decode,
 - model checkpoints loaded against semantically changed schemas,
-- padding slots repurposed without updating all downstream assumptions. fileciteturn0file0L2508-L2525 fileciteturn0file0L5221-L5434 fileciteturn0file0L917-L952
+- padding slots repurposed without updating all downstream assumptions.
 
 ### 11.5 Practical safe-change checklist
 
@@ -603,7 +599,7 @@ Before trusting a schema change, verify all of the following:
 - every action-mask row has at least one legal action
 - sampled actions are never out of range or masked out
 - forced debug actions still decode sensibly
-- old checkpoints are either rejected or intentionally migrated. fileciteturn0file0L11039-L11055 fileciteturn0file0L11113-L11127 fileciteturn0file0L14935-L14947
+- old checkpoints are either rejected or intentionally migrated.
 
 ---
 
@@ -611,31 +607,31 @@ Before trusting a schema change, verify all of the following:
 
 ### Misreading 1 — “The agent sees the whole world.”
 
-False. The agent receives a fixed vector built from 32 first-hit rays, 23 rich scalar/global features, and 4 local-density instinct features. There is no full map tensor input in the current policy path. fileciteturn0file0L10795-L10906 fileciteturn0file0L1506-L1581
+False. The agent receives a fixed vector built from 32 first-hit rays, 23 rich scalar/global features, and 4 local-density instinct features. There is no full map tensor input in the current policy path.
 
 ### Misreading 2 — “Ray classes already know friend versus enemy.”
 
-False. The ray classes are absolute (`red-*`, `blue-*`), not relative (`ally`, `enemy`). Relative interpretation requires combining those ray classes with the acting agent’s team flags in `rich_base`. fileciteturn0file0L6563-L6578 fileciteturn0file0L10863-L10866
+False. The ray classes are absolute (`red-*`, `blue-*`), not relative (`ally`, `enemy`). Relative interpretation requires combining those ray classes with the acting agent’s team flags in `rich_base`.
 
 ### Misreading 3 — “The action itself guarantees the outcome.”
 
-False. The action is only an attempted intention. Movement can fail because of walls, occupancy, or same-destination conflict resolution. Attacks can fail because there is no valid victim, because the target is not an enemy, or because LOS checks reject the shot. fileciteturn0file0L5287-L5296 fileciteturn0file0L11526-L11627 fileciteturn0file0L11249-L11260
+False. The action is only an attempted intention. Movement can fail because of walls, occupancy, or same-destination conflict resolution. Attacks can fail because there is no valid victim, because the target is not an enemy, or because LOS checks reject the shot.
 
 ### Misreading 4 — “Feature order does not matter because the model will learn around it.”
 
-False. This codebase is explicit that schema drift is dangerous. `obs_spec` exists to defend against off-by-one and split errors, and the brain validates the expected widths for the same reason. If order changes while shape stays constant, the model will not “figure it out” from old weights. It will receive different semantics under the same parameterization. fileciteturn0file0L1506-L1543 fileciteturn0file0L917-L952
+False. This codebase is explicit that schema drift is dangerous. `obs_spec` exists to defend against off-by-one and split errors, and the brain validates the expected widths for the same reason. If order changes while shape stays constant, the model will not “figure it out” from old weights. It will receive different semantics under the same parameterization.
 
 ### Misreading 5 — “Instinct means memory.”
 
-False. Instinct is a four-float engineered neighborhood summary computed fresh from nearby occupancy and unit types each tick. It is not a recurrent state and is not stored inside the model across time. fileciteturn0file0L10451-L10575
+False. Instinct is a four-float engineered neighborhood summary computed fresh from nearby occupancy and unit types each tick. It is not a recurrent state and is not stored inside the model across time.
 
 ### Misreading 6 — “Semantic tokens are the current model interface.”
 
-Not in the active MLP path. `build_semantic_tokens()` exists, but the current brain front end uses one concatenated `rich_vec`, not separate semantic-token projections. fileciteturn0file0L1584-L1628 fileciteturn0file0L1631-L1715
+Not in the active MLP path. `build_semantic_tokens()` exists, but the current brain front end uses one concatenated `rich_vec`, not separate semantic-token projections.
 
 ### Misreading 7 — “The repository fully supports both 17 and 41 actions.”
 
-That would be too strong a claim. The mask builder contains both layouts, but the live engine decode path is clearly written around the 41-action quotient/remainder mapping. The reliable documented contract for the present codebase is the 41-action layout. fileciteturn0file0L5221-L5238 fileciteturn0file0L11169-L11185
+That would be too strong a claim. The mask builder contains both layouts, but the live engine decode path is clearly written around the 41-action quotient/remainder mapping. The reliable documented contract for the present codebase is the 41-action layout.
 
 ---
 
@@ -651,7 +647,7 @@ It does **not** fully cover:
 - PPO loss mathematics, advantage estimation, and optimizer flow,
 - checkpoint serialization and resume compatibility in depth,
 - viewer overlays and operator workflows,
-- long-run telemetry and reporting design. fileciteturn0file0L1373-L1406 fileciteturn0file0L13208-L13232 fileciteturn0file0L14954-L15068
+- long-run telemetry and reporting design.
 
 Those belong to later volumes. What this volume provides is the stable foundation those later discussions depend on.
 
@@ -665,7 +661,7 @@ Those belong to later volumes. What this volume provides is the stable foundatio
 |---|---:|---:|---|
 | Ray block | `0..255` | `256` | `raycast32_firsthit()` |
 | Rich base | `256..278` | `23` | `_build_transformer_obs()` |
-| Instinct | `279..282` | `4` | `_compute_instinct_context()` | fileciteturn0file0L2490-L2506 fileciteturn0file0L10849-L10900
+| Instinct | `279..282` | `4` | `_compute_instinct_context()` |
 
 ### A.2 Per-ray layout
 
@@ -680,7 +676,7 @@ For ray `r`, flat columns are `8*r .. 8*r+7`.
 | 4 | blue soldier |
 | 5 | blue archer |
 | 6 | normalized first-hit distance |
-| 7 | normalized HP at first-hit cell | fileciteturn0file0L6712-L6726 fileciteturn0file0L6991-L7008
+| 7 | normalized HP at first-hit cell |
 
 ### A.3 Rich-base layout
 
@@ -708,7 +704,7 @@ For ray `r`, flat columns are `8*r .. 8*r+7`.
 | 275 | normalized blue deaths | combat history summary |
 | 276 | zero padding | reserved / schema filler |
 | 277 | zero padding | reserved / schema filler |
-| 278 | zero padding | reserved / schema filler | fileciteturn0file0L10859-L10881
+| 278 | zero padding | reserved / schema filler |
 
 ### A.4 Instinct layout
 
@@ -717,7 +713,7 @@ For ray `r`, flat columns are `8*r .. 8*r+7`.
 | 279 | ally archer density | neighborhood sample + unit map |
 | 280 | ally soldier density | neighborhood sample + unit map |
 | 281 | noisy enemy density | neighborhood sample + Gaussian perturbation |
-| 282 | threat ratio | enemy density divided by ally total density | fileciteturn0file0L10458-L10575
+| 282 | threat ratio | enemy density divided by ally total density |
 
 ### A.5 Semantic grouping helper for `rich_base`
 
@@ -728,7 +724,7 @@ For ray `r`, flat columns are `8*r .. 8*r+7`.
 | `zone_context` | `9,10` |
 | `team_context` | `3,4,12,13,14,15` |
 | `combat_context` | `16,17,18,19` |
-| `instinct_context` | separate 4-wide instinct block | fileciteturn0file0L2510-L2525 fileciteturn0file0L1631-L1715
+| `instinct_context` | separate 4-wide instinct block |
 
 ---
 
@@ -747,7 +743,7 @@ For ray `r`, flat columns are `8*r .. 8*r+7`.
 | `25..28` | attack south, range `1..4` | same | same |
 | `29..32` | attack southwest, range `1..4` | same | same |
 | `33..36` | attack west, range `1..4` | same | same |
-| `37..40` | attack northwest, range `1..4` | same | same | fileciteturn0file0L5227-L5238 fileciteturn0file0L5419-L5432 fileciteturn0file0L11169-L11185
+| `37..40` | attack northwest, range `1..4` | same | same |
 
 ### B.2 Direction order used by moves and attacks
 
@@ -760,7 +756,7 @@ For ray `r`, flat columns are `8*r .. 8*r+7`.
 | 4 | `(0, 1)` |
 | 5 | `(-1, 1)` |
 | 6 | `(-1, 0)` |
-| 7 | `(-1, -1)` | fileciteturn0file0L5043-L5057
+| 7 | `(-1, -1)` |
 
 ### B.3 Legality rules that matter most
 
@@ -772,7 +768,7 @@ For ray `r`, flat columns are `8*r .. 8*r+7`.
 | soldier range restricted to 1 | `build_mask()` |
 | archer range restricted to `1..ARCHER_RANGE` | `build_mask()` |
 | optional LOS wall blocking | intended in `build_mask()`, rechecked in `run_tick()` |
-| masked logits before sampling/training | `run_tick()` and PPO runtime | fileciteturn0file0L5250-L5296 fileciteturn0file0L5353-L5434 fileciteturn0file0L11194-L11231 fileciteturn0file0L14935-L14947
+| masked logits before sampling/training | `run_tick()` and PPO runtime |
 
 ---
 
@@ -803,4 +799,4 @@ The most important facts to remember are these:
 3. the non-ray block mixes self, zone, and global progress information,
 4. the brain outputs intentions, not guaranteed outcomes,
 5. legality masking is external to the brain,
-6. schema drift can silently invalidate training even when tensor shapes still match. fileciteturn0file0L10791-L10906 fileciteturn0file0L1506-L1628 fileciteturn0file0L1072-L1207 fileciteturn0file0L11076-L11095
+6. schema drift can silently invalidate training even when tensor shapes still match.

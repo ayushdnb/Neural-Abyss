@@ -1742,16 +1742,16 @@ This volume stops at the mechanics boundary. It explains the world engine, not e
 
 Think of the engine as a four-layer machine:
 
-1. **Read the world**  
+1. **Read the world**
    Alive agents sense the current grid, current zones, and current counters.
 
-2. **Choose intents**  
+2. **Choose intents**
    Each alive agent samples exactly one legal action from its masked policy distribution.
 
-3. **Apply rules in order**  
+3. **Apply rules in order**
    Combat changes HP. Death clears the dead. Movement changes positions. Environment changes HP and objective counters.
 
-4. **Repair population at the boundary**  
+4. **Repair population at the boundary**
    The tick counter advances, dead slots are flushed, and respawn writes new agents into available storage for the next tick.
 
 A shorter version is:

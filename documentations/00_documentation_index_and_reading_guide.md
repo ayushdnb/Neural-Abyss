@@ -2,9 +2,9 @@
 
 ## Purpose of This Index
 
-This file is the entry point for the technical manual set that documents the `Neural-Abyss` codebase. Its job is not to reteach the main volumes. Its job is to help a reader choose the correct starting point, follow a sensible reading order, and keep the manual synchronized with the code as the system evolves. The uploaded source tree shows a Python/PyTorch simulation organized around configuration, world generation, agent registration and spawning, a combat-first tick engine, per-agent brains and PPO runtime, an optional Pygame viewer, and utilities for checkpointing, persistence, profiling, sanitization, and telemetry. The same tree also contains older internal labels such as `Infinite_War_Simulation` and the runtime banner `Neural Siege: Custom`, so maintainers should treat naming consistency as an active documentation concern. fileciteturn0file0
+This file is the entry point for the technical manual set that documents the `Neural-Abyss` codebase. Its job is not to reteach the main volumes. Its job is to help a reader choose the correct starting point, follow a sensible reading order, and keep the manual synchronized with the code as the system evolves. The uploaded source tree shows a Python/PyTorch simulation organized around configuration, world generation, agent registration and spawning, a combat-first tick engine, per-agent brains and PPO runtime, an optional `pygame-ce` viewer, and utilities for checkpointing, persistence, profiling, sanitization, and telemetry. This manual therefore uses the current repository name and runtime naming consistently throughout.
 
-This index follows standard large-document guidance: descriptive headings, progressive disclosure, and clear internal navigation reduce reader friction in long technical sets, while GitHub-flavored Markdown supports stable section links, relative links, and readable repository-hosted manuals. citeturn563581search0turn563581search1turn727212search3turn727212search6turn563581search12
+This index follows standard large-document guidance: descriptive headings, progressive disclosure, and clear internal navigation reduce reader friction in long technical sets, while GitHub-flavored Markdown supports stable section links, relative links, and readable repository-hosted manuals.
 
 ## Who This Manual Set Is For
 
@@ -14,9 +14,9 @@ This manual set is for readers who need more than a repository front page:
 - simulation engineers working on grid state, spawning, combat, or tick behavior,
 - ML engineers working on observations, brains, batching, and PPO,
 - operators and maintainers working on viewer behavior, resume flows, telemetry, outputs, and safe extension,
-- reviewers who need a fast but technically grounded understanding of how the system is structured. fileciteturn0file0
+- reviewers who need a fast but technically grounded understanding of how the system is structured.
 
-A README should explain what the project is, why it exists, and how to get started. A long-form manual should carry the deeper design, operations, and maintenance material. This index belongs to the second category. citeturn727212search3turn727212search21
+A README should explain what the project is, why it exists, and how to get started. A long-form manual should carry the deeper design, operations, and maintenance material. This index belongs to the second category.
 
 ## 1. Documentation set at a glance
 
@@ -31,7 +31,7 @@ The current manual set consists of six volumes:
 05  Operations, viewer, checkpointing, telemetry, and safe extension
 ```
 
-The split matches the structure visible in the codebase: top-level orchestration and configuration; engine/world mechanics; observation and perception interfaces; neural and RL internals; and operational tooling around viewing, persistence, checkpointing, and telemetry. fileciteturn0file0
+The split matches the structure visible in the codebase: top-level orchestration and configuration; engine/world mechanics; observation and perception interfaces; neural and RL internals; and operational tooling around viewing, persistence, checkpointing, and telemetry.
 
 ## 2. Volume-by-volume map
 
@@ -44,7 +44,7 @@ The split matches the structure visible in the codebase: top-level orchestration
 | 04 | [`04_neural_brains_ppo_training_and_learning_math.md`](04_neural_brains_ppo_training_and_learning_math.md) | Explain the model family, batched inference path, and PPO runtime. | ML engineers; researchers | `agent/mlp_brain.py`, `agent/ensemble.py`, `rl/ppo_runtime.py` | How are brains built? How are observations embedded? How does per-agent PPO work? |
 | 05 | [`05_operations_viewer_checkpointing_telemetry_and_safe_extension.md`](05_operations_viewer_checkpointing_telemetry_and_safe_extension.md) | Explain how to run, inspect, resume, record, debug, and extend the system safely. | Operators; maintainers; advanced contributors | `ui/viewer.py`, `ui/camera.py`, `utils/checkpointing.py`, `utils/persistence.py`, `utils/telemetry.py`, `utils/profiler.py`, `utils/sanitize.py` | How do I inspect a run? Resume from checkpoints? Trust telemetry? Add features without corrupting runs? |
 
-The mapping above is anchored to the actual repository layout and subsystem boundaries visible in the uploaded source tree. fileciteturn0file0
+The mapping above is anchored to the actual repository layout and subsystem boundaries visible in the uploaded source tree.
 
 ## 3. Recommended reading orders
 
@@ -52,7 +52,7 @@ The mapping above is anchored to the actual repository layout and subsystem boun
 
 `00 → 01 → 02 → 03 → 04 → 05`
 
-Use this path when the codebase is new. It follows the same progression recommended for large technical documents: start with architecture, then mechanics, then interfaces, then learning internals, then operational surfaces. citeturn563581search0turn563581search12
+Use this path when the codebase is new. It follows the same progression recommended for large technical documents: start with architecture, then mechanics, then interfaces, then learning internals, then operational surfaces.
 
 ### Experienced engineer fast path
 
@@ -75,7 +75,7 @@ Use this when changing world state, spawning, combat, movement, or any logic tha
 
 `00 → 01 → 03 → 04 → 05`
 
-Read Volume 03 before Volume 04. In this codebase, the learning stack depends on the observation contract and action interface, not only on the brain classes themselves. `agent/obs_spec.py`, the ray engines, and action masking rules define what the neural and PPO components are actually learning over. fileciteturn0file0
+Read Volume 03 before Volume 04. In this codebase, the learning stack depends on the observation contract and action interface, not only on the brain classes themselves. `agent/obs_spec.py`, the ray engines, and action masking rules define what the neural and PPO components are actually learning over.
 
 ### Maintainer and extension-focused path
 
@@ -114,7 +114,7 @@ Use this when the immediate goal is to keep runs stable while adding or changing
 - **Volume 01 is foundational.** It should usually come before every other volume.
 - **Volume 02 comes before 03 in most serious reads.** Observation and action semantics are downstream of world mechanics and tick execution.
 - **Volume 03 comes before 04.** The model and PPO stack only make sense once the input and control contracts are clear.
-- **Volume 05 is cross-cutting.** It touches the top-level runtime, the viewer, persistence, checkpointing, telemetry, and safe operational practice. It can be read earlier for operational needs, but it is better understood after Volume 01. fileciteturn0file0
+- **Volume 05 is cross-cutting.** It touches the top-level runtime, the viewer, persistence, checkpointing, telemetry, and safe operational practice. It can be read earlier for operational needs, but it is better understood after Volume 01.
 
 A reader may safely jump out of order only when the goal is narrow and operationally bounded. Even then, Volume 01 should be skimmed first.
 
@@ -127,7 +127,7 @@ The manual remains trustworthy only if updates follow the code tree instead of d
 3. Update any dependent volume whose explanation, assumptions, or cross-links were affected.
 4. Update this index when file names, scope boundaries, or recommended reading paths change.
 
-This reflects standard documentation practice for large sets: keep content scannable, link to the right depth instead of repeating background, and preserve stable, descriptive headings and link targets so navigation does not decay over time. citeturn563581search12turn563581search14turn563581search11turn563581search19
+This reflects standard documentation practice for large sets: keep content scannable, link to the right depth instead of repeating background, and preserve stable, descriptive headings and link targets so navigation does not decay over time.
 
 ### Change-to-volume guidance
 
@@ -141,7 +141,7 @@ This reflects standard documentation practice for large sets: keep content scann
 | `utils/checkpointing.py`, `utils/persistence.py`, `utils/telemetry.py`, `utils/profiler.py`, `utils/sanitize.py` | 05 | 00, 01 |
 | File renames, volume renames, or scope reshuffles | 00 | Every affected volume |
 
-These ownership boundaries are grounded in the uploaded package structure and module responsibilities. fileciteturn0file0
+These ownership boundaries are grounded in the uploaded package structure and module responsibilities.
 
 ## 7. Quick navigation table
 
@@ -158,14 +158,14 @@ These ownership boundaries are grounded in the uploaded package structure and mo
 
 This index does not duplicate the deep explanations from the main volumes. It exists to reduce navigation friction.
 
-The README and the manual set should not do the same job. GitHub recommends a README as the repository’s immediate orientation surface, while longer-form project documentation belongs in dedicated documentation space. This manual set is that deeper layer. citeturn727212search3turn727212search21
+The README and the manual set should not do the same job. GitHub recommends a README as the repository’s immediate orientation surface, while longer-form project documentation belongs in dedicated documentation space. This manual set is that deeper layer.
 
 The topics are separated into different files because readers do not arrive with the same goal:
 
 - architecture readers need boundaries before details,
 - mechanics readers need the world model before the learning stack,
 - ML readers need the observation contract before PPO details,
-- operators need resume, telemetry, and safe extension guidance without reading the entire theory stack first. citeturn563581search0turn563581search7turn563581search12
+- operators need resume, telemetry, and safe extension guidance without reading the entire theory stack first.
 
 ## Appendix A. One-line description of every volume
 
@@ -191,4 +191,4 @@ The topics are separated into different files because readers do not arrive with
 
 ## Manual maintenance note
 
-Keep this manual set code-determined. Verify from the source tree, update the owning volume, fix cross-links when headings or file names change, and do not let operational behavior, schema definitions, or naming conventions drift out of sync with the written manual. fileciteturn0file0
+Keep this manual set code-determined. Verify from the source tree, update the owning volume, fix cross-links when headings or file names change, and do not let operational behavior, schema definitions, or naming conventions drift out of sync with the written manual.

@@ -151,9 +151,13 @@ class TickEngine:
         # according to RespawnCfg parameters.
         self.respawner = RespawnController(RespawnCfg())
 
-        # agent_scores: reward tally keyed by persistent agent identifier (not slot).
-        # defaultdict(float) ensures missing keys default to 0.0.
+        # Per-agent cumulative doctrine/personal merit keyed by persistent UID:
+        # - agent_scores: accumulated personal reward/merit
+        # - agent_kill_counts: lifetime credited kills
+        # - agent_cp_points: lifetime objective-control share
         self.agent_scores: Dict[int, float] = collections.defaultdict(float)
+        self.agent_kill_counts: Dict[int, float] = collections.defaultdict(float)
+        self.agent_cp_points: Dict[int, float] = collections.defaultdict(float)
 
         # Zones and corresponding cached tensors on the simulation device.
         self.zones: Optional[Zones] = zones
@@ -801,7 +805,8 @@ class TickEngine:
         gy_list = gy.detach().cpu().to(torch.int64).tolist()
 
         # Root structured death log for ResultsWriter -> dead_agents_log.csv.
-        # For clean runs from tick 0, emit explicit cause + real killer metadata when known.
+        # This legacy CSV keeps a compact stable schema; richer cause/killer
+        # metadata is emitted through telemetry when enabled.
         try:
             rec_fn = getattr(self.stats, "record_death_entry", None)
             if callable(rec_fn):
@@ -1109,7 +1114,7 @@ class TickEngine:
                     self._ppo.flush_agents(dead_slots)
 
             # Respawn.
-            self.respawner.step(self.stats.tick, self.registry, self.grid)
+            self.respawner.step(self.stats.tick, self.registry, self.grid, engine=self)
 
             # Reset PPO state for respawned slots.
             if was_dead is not None:
@@ -1409,13 +1414,15 @@ class TickEngine:
                                 individual_rewards[uniq_k] += reward_add.to(self._data_dt)
                                 reward_kill_individual[uniq_k] += reward_add
 
-                                # agent_scores keyed by persistent agent id
+                                # Accumulate doctrine/personal merit keyed by persistent agent id.
                                 for killer_slot, cnt in zip(uniq_k.tolist(), k_counts.tolist()):
                                     if hasattr(self.registry, "agent_uids"):
                                         uid = int(self.registry.agent_uids[killer_slot].item())
                                     else:
                                         uid = int(data[killer_slot, COL_AGENT_ID].item())
-                                    self.agent_scores[uid] += reward_val * float(cnt)
+                                    self.agent_kill_counts[uid] += float(cnt)
+                                    if self._ppo is None:
+                                        self.agent_scores[uid] += reward_val * float(cnt)
 
                                 for victim_slot, killer_slot in zip(credited_victims.tolist(), credited_killers.tolist()):
                                     combat_killer_slot_by_victim[int(victim_slot)] = int(killer_slot)
@@ -1879,37 +1886,46 @@ class TickEngine:
                         blue_on = (on_cp & (teams_alive == 3.0)).sum().item()
 
                         # King-of-the-hill scoring
+                        winner_team_id = None
                         if red_on > blue_on:
+                            winner_team_id = 2.0
                             self.stats.add_capture_points("red", config.CP_REWARD_PER_TICK)
                             metrics.cp_red_tick += config.CP_REWARD_PER_TICK
                         elif blue_on > red_on:
+                            winner_team_id = 3.0
                             self.stats.add_capture_points("blue", config.CP_REWARD_PER_TICK)
                             metrics.cp_blue_tick += config.CP_REWARD_PER_TICK
 
-                        # Individual reward for contested CP
-                        if red_on > 0 and blue_on > 0:
-                            winners_on_cp = None
-                            if red_on > blue_on:
-                                winners_on_cp = on_cp & (teams_alive == 2.0)
-                            elif blue_on > red_on:
-                                winners_on_cp = on_cp & (teams_alive == 3.0)
-                            if winners_on_cp is not None and winners_on_cp.any():
+                        winners_idx = None
+                        if winner_team_id is not None:
+                            winners_on_cp = on_cp & (teams_alive == winner_team_id)
+                            if winners_on_cp.any():
                                 winners_idx = alive_idx[winners_on_cp]
-                                reward_val = float(config.PPO_REWARD_CONTESTED_CP)
+                                share = float(config.CP_REWARD_PER_TICK) / float(max(int(winners_idx.numel()), 1))
+                                if hasattr(self.registry, "agent_uids"):
+                                    cp_uids = self.registry.agent_uids.index_select(0, winners_idx).detach().cpu().tolist()
+                                else:
+                                    cp_uids = data.index_select(0, winners_idx)[:, COL_AGENT_ID].detach().cpu().tolist()
+                                for uid in cp_uids:
+                                    self.agent_cp_points[int(uid)] += float(share)
 
-                                cp_add = torch.full(
-                                    (int(winners_idx.numel()),),
-                                    reward_val,
-                                    device=self.device,
-                                    dtype=torch.float32,
-                                )
+                        # Individual reward for contested CP
+                        if red_on > 0 and blue_on > 0 and winners_idx is not None and winners_idx.numel() > 0:
+                            reward_val = float(config.PPO_REWARD_CONTESTED_CP)
 
-                                individual_rewards.index_add_(
-                                    0,
-                                    winners_idx,
-                                    cp_add.to(self._data_dt),
-                                )
-                                reward_contested_cp_individual.index_add_(0, winners_idx, cp_add)
+                            cp_add = torch.full(
+                                (int(winners_idx.numel()),),
+                                reward_val,
+                                device=self.device,
+                                dtype=torch.float32,
+                            )
+
+                            individual_rewards.index_add_(
+                                0,
+                                winners_idx,
+                                cp_add.to(self._data_dt),
+                            )
+                            reward_contested_cp_individual.index_add_(0, winners_idx, cp_add)
 
         # 8) PPO REINFORCEMENT LEARNING LOGGING
         if self._ppo and rec_agent_ids:
@@ -1968,6 +1984,15 @@ class TickEngine:
             # Final reward: individual + team + hp shaping
             final_rewards = (individual_total_reward + team_total_reward + hp_reward_f32).to(self._data_dt)
 
+            if ppo_slot_ids.numel() > 0:
+                if hasattr(self.registry, "agent_uids"):
+                    merit_uids = self.registry.agent_uids.index_select(0, ppo_slot_ids).detach().cpu().tolist()
+                else:
+                    merit_uids = data.index_select(0, ppo_slot_ids)[:, COL_AGENT_ID].detach().cpu().tolist()
+                merit_rewards = final_rewards.detach().float().cpu().tolist()
+                for uid, reward_value in zip(merit_uids, merit_rewards):
+                    self.agent_scores[int(uid)] += float(reward_value)
+
             if telemetry is not None and getattr(telemetry, "enabled", False):
                 try:
                     self._telemetry_set_phase(telemetry, tick=int(self.stats.tick), phase="ppo_reward_components")
@@ -2024,7 +2049,7 @@ class TickEngine:
                 self._ppo.flush_agents(dead_slots)
 
         # Respawn dead units
-        self.respawner.step(self.stats.tick, self.registry, self.grid)
+        self.respawner.step(self.stats.tick, self.registry, self.grid, engine=self)
 
         # TELEMETRY: births + lineage edges
         if telemetry is not None and getattr(telemetry, "enabled", False):

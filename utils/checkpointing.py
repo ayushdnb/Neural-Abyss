@@ -1,4 +1,4 @@
-"""Checkpoint save/load support for Neural Abyss."""
+"""Checkpoint save/load support for Neural-Abyss."""
 
 from __future__ import annotations
 
@@ -18,204 +18,65 @@ import torch
 import config
 
 
-# Exceptions
-
 class CheckpointError(RuntimeError):
-    """
-    Custom exception for checkpoint-related errors.
-
-    Why create a custom exception type?
-    - It allows calling code to catch *checkpoint problems specifically*,
-      without accidentally catching unrelated RuntimeError exceptions.
-    """
+    """Checkpoint-specific runtime error."""
     pass
 
-
-# Small utilities (timestamps, atomic file operations)
-
 def _now_stamp() -> str:
-    """
-    Return current timestamp formatted as YYYY-MM-DD_HH-MM-SS.
-
-    This is used in checkpoint folder naming, giving:
-    - human readability
-    - chronological sorting by name
-    """
+    """Return a timestamp suitable for checkpoint directory names."""
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """
-    Atomically write text to a file.
-
-    Atomic write pattern:
-    1) Write content to a temporary file in the same directory.
-    2) Flush and fsync so bytes reach disk (best effort).
-    3) Replace the target path with the temp file via `os.replace`
-       (atomic on most OS/filesystems when staying on same filesystem).
-
-    Why this matters:
-    - If the program crashes mid-write, you won't end up with a half-written file.
-    - Readers will see either the old complete file or the new complete file.
-
-    Args:
-        path: Path object where file should be written
-        text: String content to write
-    """
-    # Create temporary file path by adding .tmp suffix
+    """Write text atomically."""
     tmp = path.with_suffix(path.suffix + ".tmp")
-
-    # Ensure parent directory exists
     path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Write to temporary file with proper flushing and fsync for durability
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
         f.flush()
-        # fsync asks the OS to push buffered data to disk.
-        # This reduces risk of data loss on sudden power loss, but can't guarantee it.
         os.fsync(f.fileno())
-
-    # Atomic replace - this is atomic on most filesystems
     os.replace(tmp, path)
 
 
 def _atomic_json_dump(path: Path, obj: Any) -> None:
-    """
-    Atomically write JSON-serialized object to file.
-
-    Same atomic pattern as `_atomic_write_text`, but JSON-encodes `obj`.
-
-    Args:
-        path: Path object where JSON file should be written
-        obj: Python object to serialize to JSON
-    """
-    # Create temporary file path by adding .tmp suffix
+    """Write JSON atomically."""
     tmp = path.with_suffix(path.suffix + ".tmp")
-
-    # Ensure parent directory exists
     path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Write JSON to temporary file with proper formatting
     with open(tmp, "w", encoding="utf-8") as f:
-        # indent=2 makes diffs readable in git
-        # sort_keys=True makes output deterministic (stable ordering)
         json.dump(obj, f, indent=2, sort_keys=True)
         f.flush()
         os.fsync(f.fileno())
-
-    # Atomic replace
     os.replace(tmp, path)
 
 
 def _atomic_torch_save(path: Path, obj: Any) -> None:
-    """
-    Atomically save PyTorch object to file.
-
-    `torch.save(...)` can write large binary blobs. We use temp + replace
-    to avoid corrupt checkpoint files if interrupted.
-
-    Args:
-        path: Path object where PyTorch file should be saved
-        obj: PyTorch object to save
-    """
-    # Create temporary file path by adding .tmp suffix
+    """Write a PyTorch object atomically."""
     tmp = path.with_suffix(path.suffix + ".tmp")
-
-    # Ensure parent directory exists
     path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Save PyTorch object to temporary file
     torch.save(obj, tmp)
-
-    # Atomic replace
     os.replace(tmp, path)
 
-
-# Tensor/device portability helpers
-
 def _to_cpu_recursive(x: Any) -> Any:
-    """
-    Recursively move torch tensors to CPU for portable checkpoints.
-
-    Key PyTorch concepts:
-    - A tensor can live on CPU or GPU (CUDA).
-    - Checkpoints that store CUDA tensors may fail to load if:
-      - CUDA isn't available
-      - device IDs differ
-      - driver/runtime differs
-    - So we store tensors on CPU by detaching them and moving to "cpu".
-
-    Terminology:
-    - detach(): removes the tensor from autograd graph (no gradient history).
-      This avoids serializing gradient graph metadata and makes the tensor a
-      pure value snapshot.
-
-    Args:
-        x: Any Python object potentially containing torch tensors
-
-    Returns:
-        Same structure with all tensors moved to CPU and detached
-    """
-    # If input is a tensor, detach and move to CPU
+    """Move every tensor in a nested structure to CPU."""
     if torch.is_tensor(x):
         return x.detach().to("cpu")
-
-    # If input is a dictionary, recursively process each value
     if isinstance(x, dict):
         return {k: _to_cpu_recursive(v) for k, v in x.items()}
-
-    # If input is a list or tuple, recursively process each element
     if isinstance(x, (list, tuple)):
         t = [_to_cpu_recursive(v) for v in x]
-        # Preserve tuple type if input was tuple
         return type(x)(t) if isinstance(x, tuple) else t
-
-    # Return non-tensor objects unchanged
     return x
 
-
-# Git metadata helper (optional)
-
 def _try_git_commit() -> Optional[str]:
-    """
-    Try to get current git commit hash.
-
-    This is useful for:
-    - tracking exactly which code produced a checkpoint
-    - debugging mismatches between checkpoint data and code
-
-    Returns:
-        Git commit hash as string, or None if git command fails
-    """
+    """Return the current git commit hash when available."""
     try:
-        # Run git rev-parse HEAD to get current commit
         out = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL)
         return out.decode("utf-8").strip()
     except Exception:
-        # Return None if any error occurs (git not installed, not in git repo, etc.)
         return None
 
-
-# Brain (model) type inference + reconstruction
-
 def _infer_brain_kind(brain: torch.nn.Module) -> str:
-    """
-    Determine the type of brain neural network.
-
-    Why do this?
-    - Your registry may contain multiple possible model architectures.
-    - When saving, we store:
-        - which architecture it was ("kind")
-        - its state_dict (weights)
-    - When loading, we recreate that architecture and load weights into it.
-
-    Args:
-        brain: PyTorch module representing the brain
-
-    Returns:
-        String identifier for the brain type
-    """
+    """Return the serialized identifier for a brain module."""
     from agent.mlp_brain import brain_kind_from_module
 
     kind = brain_kind_from_module(brain)
@@ -225,24 +86,9 @@ def _infer_brain_kind(brain: torch.nn.Module) -> str:
 
 
 def _make_brain(kind: str, device: torch.device) -> torch.nn.Module:
-    """
-    Create a brain instance of the specified kind.
-
-    This is the mirror of `_infer_brain_kind`.
-
-    Args:
-        kind: String identifier for brain type
-        device: PyTorch device to place the brain on
-
-    Returns:
-        Initialized brain module on the specified device
-
-    Raises:
-        CheckpointError: If brain kind is unknown
-    """
+    """Construct a brain instance from its serialized kind."""
     from agent.mlp_brain import create_mlp_brain
 
-    # Get observation and action dimensions from config
     obs_dim = int(getattr(config, "OBS_DIM"))
     act_dim = int(getattr(config, "NUM_ACTIONS"))
 
@@ -253,133 +99,54 @@ def _make_brain(kind: str, device: torch.device) -> torch.nn.Module:
         "dreamer_in_black_fog",
         "obsidian_pulse",
     }:
-
-        return create_mlp_brain(kind, obs_dim, act_dim).to(device)  
+        return create_mlp_brain(kind, obs_dim, act_dim).to(device)
 
     raise CheckpointError(f"Unknown brain kind in checkpoint: {kind}")
 
-
-# RNG state capture/restore (determinism)
-
 def _get_rng_state() -> Dict[str, Any]:
-    """
-    Capture current random number generator states from all sources.
-
-    Why capture RNG state?
-    - Deterministic resume: If you restore RNG states, random decisions after
-      resume can match what would have happened without interruption.
-
-    Sources of randomness here:
-    - Python's `random` module
-    - NumPy RNG
-    - PyTorch CPU RNG
-    - PyTorch CUDA RNG (for each GPU) if available
-
-    Returns:
-        Dictionary containing RNG states for Python random, NumPy, and PyTorch (CPU and CUDA)
-    """
+    """Capture Python, NumPy, and PyTorch RNG state."""
     state: Dict[str, Any] = {
-        "python_random": random.getstate(),           # Python's random module state
-        "numpy_random": np.random.get_state(),        # NumPy's random state
-        "torch_cpu": torch.random.get_rng_state(),    # PyTorch CPU RNG state
-        "torch_cuda": None,                           # Initialize CUDA state as None
+        "python_random": random.getstate(),
+        "numpy_random": np.random.get_state(),
+        "torch_cpu": torch.random.get_rng_state(),
+        "torch_cuda": None,
     }
 
-    # Try to capture CUDA RNG states if CUDA is available
     if torch.cuda.is_available():
         try:
-            # Get RNG state for all CUDA devices
             state["torch_cuda"] = torch.cuda.get_rng_state_all()
         except Exception:
-            # If capturing fails, leave as None
             state["torch_cuda"] = None
 
     return state
 
 
 def _set_rng_state(state: Dict[str, Any]) -> None:
-    """
-    Restore random number generator states.
-
-    Important: This should be called LAST in resume flow to avoid constructor
-    RNG consumption changing post-resume randomness.
-
-    Explanation:
-    - If you set RNG state early, then creating objects / initializing tensors
-      might consume random numbers and shift the sequence.
-    - So you restore everything else first, then finally restore RNG.
-
-    Args:
-        state: Dictionary containing RNG states from _get_rng_state()
-    """
-    # Restore Python random state
+    """Restore Python, NumPy, and PyTorch RNG state."""
     random.setstate(state["python_random"])
-
-    # Restore NumPy random state
     np.random.set_state(state["numpy_random"])
-
-    # Restore PyTorch CPU RNG state
     torch.random.set_rng_state(state["torch_cpu"])
-
-    # Restore PyTorch CUDA RNG states if available
     if torch.cuda.is_available() and state.get("torch_cuda") is not None:
         try:
             torch.cuda.set_rng_state_all(state["torch_cuda"])
         except Exception:
-            # If device count differs, keep best-effort behavior (just skip)
             pass
 
-
-# Stats extraction/apply (generic)
-
 def _extract_stats(stats: Any) -> Dict[str, Any]:
-    """
-    Extract serializable state from stats object.
-
-    Supports:
-    - dataclasses (preferred): `asdict(stats)`
-    - generic objects with __dict__
-
-    Args:
-        stats: Statistics object (typically a dataclass)
-
-    Returns:
-        Dictionary representation of stats
-
-    Raises:
-        CheckpointError: If stats object is not supported
-    """
-    # If stats is a dataclass, convert to dictionary
+    """Extract a serializable snapshot from a stats object."""
     if is_dataclass(stats):
         return asdict(stats)
-
-    # If stats has __dict__ attribute, use it for serialization
     if hasattr(stats, "__dict__"):
-        # Make a shallow copy; nested dataclasses get handled above
         return dict(stats.__dict__)
-
-    # Raise error for unsupported stats objects
     raise CheckpointError("Unsupported stats object for checkpointing")
 
 
 def _apply_stats(stats_obj: Any, payload: Dict[str, Any]) -> None:
-    """
-    Apply serialized stats to a stats object.
-
-    Best-effort behavior:
-    - sets known attributes
-    - skips attributes that cannot be set (read-only, property, etc.)
-
-    Args:
-        stats_obj: Target stats object to update
-        payload: Dictionary of stats values to apply
-    """
-    # Iterate through payload items and set attributes best-effort
+    """Apply serialized stats fields to a stats object."""
     for k, v in payload.items():
         try:
             setattr(stats_obj, k, v)
         except Exception:
-            # Silently skip attributes that can't be set
             pass
 
 
@@ -565,6 +332,8 @@ class CheckpointManager:
             },
             "engine": {
                 "agent_scores": dict(getattr(engine, "agent_scores", {})),
+                "agent_kill_counts": dict(getattr(engine, "agent_kill_counts", {})),
+                "agent_cp_points": dict(getattr(engine, "agent_cp_points", {})),
                 "respawn_controller": self._extract_respawn_state(getattr(engine, "respawner", None)),
                 "catastrophe_controller": self._extract_catastrophe_controller_state(
                     getattr(engine, "catastrophe_controller", None)
@@ -964,6 +733,12 @@ class CheckpointManager:
         if hasattr(engine, "agent_scores"):
             engine.agent_scores.clear()
             engine.agent_scores.update(eng.get("agent_scores", {}))
+        if hasattr(engine, "agent_kill_counts"):
+            engine.agent_kill_counts.clear()
+            engine.agent_kill_counts.update(eng.get("agent_kill_counts", {}))
+        if hasattr(engine, "agent_cp_points"):
+            engine.agent_cp_points.clear()
+            engine.agent_cp_points.update(eng.get("agent_cp_points", {}))
 
         # Restore respawn controller state
         CheckpointManager._apply_respawn_state(

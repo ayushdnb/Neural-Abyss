@@ -285,7 +285,12 @@ class SimulationStats:
         team_id_val: float,
         x: int,
         y: int,
-        killer_team_id_val: float | int,
+        killer_team_id_val: float | int | None = None,
+        *,
+        killer_agent_id: int | None = None,
+        killer_slot: int | None = None,
+        death_cause: str | None = None,
+        notes: str = "",
     ) -> None:
         """
         Record a single death event into the structured death log.
@@ -311,12 +316,29 @@ class SimulationStats:
             Numeric team identifier for the killer (or killer team).
             Same mapping rule.
 
+        Extra keyword-only metadata is accepted for forward compatibility with
+        richer engine death forensics. The legacy root death log intentionally
+        keeps the stable compact schema used by ``ResultsWriter``.
+
         Why store strings "red"/"blue" in the log?
         ------------------------------------------
         Human readability + better analytics.
         Logs are often read by humans or simple scripts. Strings avoid confusion
         and match the constants used elsewhere.
         """
+        _ = (killer_agent_id, killer_slot, death_cause, notes)
+
+        killer_team = ""
+        try:
+            if killer_team_id_val is not None:
+                killer_team_float = float(killer_team_id_val)
+                if killer_team_float == 2.0:
+                    killer_team = "red"
+                elif killer_team_float == 3.0:
+                    killer_team = "blue"
+        except Exception:
+            killer_team = ""
+
         self._dead_log.append(
             {
                 "tick": self.tick,
@@ -324,7 +346,7 @@ class SimulationStats:
                 "team": "red" if float(team_id_val) == 2.0 else "blue",
                 "x": int(x),
                 "y": int(y),
-                "killer_team": "red" if float(killer_team_id_val) == 2.0 else "blue",
+                "killer_team": killer_team,
             }
         )
 

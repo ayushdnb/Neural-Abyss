@@ -1,4 +1,4 @@
-"""Real-time viewer for Neural Abyss."""
+"""Interactive viewer for Neural-Abyss."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import os
 import collections
 from typing import List, Tuple, Optional, Dict, Any
 import math
-from pathlib import Path  # Used for robust checkpoint file path operations
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -29,19 +29,13 @@ from agent.mlp_brain import (
 )
 from .camera import Camera
 from engine.agent_registry import (
-    # These are column indices into `registry.agent_data` tensor.
-    # The registry stores per-agent properties in a compact tensor for GPU efficiency.
     COL_ALIVE, COL_TEAM, COL_HP, COL_X, COL_Y, COL_UNIT,
     COL_HP_MAX, COL_VISION, COL_ATK, COL_AGENT_ID
 )
 
-# Constants & colour palette
+# Constants and color palette.
 FONT_NAME = str(getattr(config, "UI_FONT_NAME", "consolas")).strip() or "consolas"
 
-# Colors stored as (R, G, B). Some overlays use (R, G, B, A) for alpha blending.
-# In Pygame:
-# - RGB values range from 0..255
-# - Alpha (A) also ranges from 0..255 (0 = fully transparent, 255 = opaque)
 COLORS = {
     "bg": (20, 22, 28),
     "hud_bg": (12, 14, 18),
@@ -80,7 +74,7 @@ COLORS = {
     "bar_bg": (38, 42, 48),
     "bar_fg": (46, 204, 113),
 
-    # Graph fill colors with alpha (semi-transparent)
+    # Graph fill colors with alpha.
     "graph_red": (231, 76, 60, 150),
     "graph_blue": (52, 152, 219, 150),
     "graph_grid": (60, 60, 70),
@@ -88,26 +82,23 @@ COLORS = {
     "pause_text": (241, 196, 15),
 }
 
-# Semi-transparent overlays (all include alpha channel).
+# Semi-transparent overlays.
 OVERLAYS = {
     "heal_active": (46, 204, 113, 78),
     "heal_dormant": (214, 163, 72, 110),
     "cp": (210, 210, 230, 48),
 
-    # Control point outline colors:
     "outline_red": (231, 76, 60, 160),
     "outline_blue": (52, 152, 219, 160),
     "outline_neutral": (160, 160, 170, 120),
 
-    # Threat overlay colors (RGB only, alpha added dynamically later)
     "threat_enemy": (231, 76, 60),
     "threat_ally": (52, 152, 219),
 
-    # Vision circle overlay
     "vision_range": (180, 180, 180, 40),
 }
 
-# Ray colors used when "show rays" is enabled
+# Ray colors used when the viewer renders rays.
 RAY_COLORS = {
     "ally": (52, 152, 219),
     "enemy": (231, 76, 60),
@@ -115,20 +106,8 @@ RAY_COLORS = {
     "empty": (100, 100, 110),
 }
 
-
-# Small safety helpers for color handling
 def _clamp_u8(x) -> int:
-    """
-    Clamp any value to the integer range [0, 255].
-
-    Why:
-    - Pygame expects color channels in 0..255.
-    - We might compute alpha or intensity dynamically (floats, numpy types).
-    - Clamping prevents crashes or undefined behavior.
-
-    Implementation detail:
-    - We try to cast to int; if conversion fails, treat as 0.
-    """
+    """Clamp a value to the color-channel range [0, 255]."""
     try:
         xi = int(x)
     except Exception:
@@ -158,27 +137,14 @@ def _rgb(col) -> tuple[int, int, int]:
         pass
     return (_clamp_u8(r), _clamp_u8(g), _clamp_u8(b))
 
-
-# Utility functions
 def _center_window():
-    """
-    Hint to SDL to center the window when the corresponding config knob is on.
-    """
+    """Request a centered SDL window when configured."""
     if bool(getattr(config, "VIEWER_CENTER_WINDOW", True)):
         os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
 
 
 def _get_model_summary(model: nn.Module) -> str:
-    """
-    Return a short string describing a PyTorch model architecture.
-
-    Used in the side panel when an agent is selected.
-
-    Heuristic approach:
-    - If the class name indicates a Transformer, try to show embed dim and
-      attention presence.
-    - Otherwise, attempt to infer an MLP structure by collecting Linear layers.
-    """
+    """Return a short model summary for the side panel."""
     try:
         return describe_brain_module(model)
     except Exception:
@@ -186,23 +152,12 @@ def _get_model_summary(model: nn.Module) -> str:
 
 
 def _param_count(model: nn.Module) -> int:
-    """
-    Return number of trainable parameters in a PyTorch model.
-
-    Why useful:
-    - Gives quick sense of complexity.
-    - Helps compare brain architectures.
-    """
+    """Return the number of trainable parameters."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-
-# Text caching
 class TextCache:
     """
-    Cache pygame Font objects and a bounded LRU of rendered text surfaces.
-
-    The surface cache is intentionally bounded because HUD text contains dynamic
-    counters that would otherwise grow the cache without limit during long runs.
+    Cache font objects and rendered text surfaces.
     """
 
     def __init__(self):
@@ -215,9 +170,7 @@ class TextCache:
         self.max_surfaces = max(64, int(getattr(config, "VIEWER_TEXT_CACHE_MAX_SURFACES", 2048)))
 
     def _mk_font(self, sz: int):
-        """
-        Create a pygame Font of a given size.
-        """
+        """Create a pygame font for the requested size."""
         try:
             return pygame.font.SysFont(FONT_NAME, sz)
         except Exception:
@@ -1511,7 +1464,7 @@ class Viewer:
         ensure_supported_runtime(strict=bool(getattr(config, "PYGAME_CE_STRICT_RUNTIME", True)))
 
         pygame.init()
-        pygame.display.set_caption("Neural Abyss")
+        pygame.display.set_caption("Neural-Abyss")
 
         self.grid = grid
         self.margin = 8

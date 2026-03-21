@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-Neural Abyss configuration module.
+Neural-Abyss configuration.
 
 This file is written to serve two purposes at once:
 1. executable runtime configuration, and
@@ -535,7 +535,7 @@ AMP_ENABLED: bool = _env_bool("FWS_AMP", True)
 
 
 def amp_enabled() -> bool:
-    """Function accessor retained for call sites that prefer a function."""
+    """Return the resolved AMP policy."""
     return AMP_ENABLED
 
 
@@ -613,9 +613,9 @@ MAP_WALL_GAP_PROB: float = _env_float("FWS_MAP_WALL_GAP_PROB", 0.20)
 # Heal-zone parameters.
 # Raise count/size/rate when sustain should matter more.
 # Lower them when combat lethality or territorial churn should dominate.
-HEAL_ZONE_COUNT: int = _env_int("FWS_HEAL_COUNT", 10)
+HEAL_ZONE_COUNT: int = _env_int("FWS_HEAL_COUNT", 8)
 HEAL_ZONE_SIZE_RATIO: float = _env_float("FWS_HEAL_SIZE_RATIO", 5 / 64)
-HEAL_RATE: float = _env_float("FWS_HEAL_RATE", 0.003)
+HEAL_RATE: float = _env_float("FWS_HEAL_RATE", 0.004)
 
 
 # =============================================================================
@@ -641,13 +641,13 @@ if CATASTROPHE_SCHEDULER_MODE not in ("periodic", "dynamic"):
     CATASTROPHE_SCHEDULER_MODE = "periodic"
 
 # Cooldown after one catastrophe clears.
-CATASTROPHE_COOLDOWN_TICKS: int = max(0, _env_int("FWS_CATASTROPHE_COOLDOWN_TICKS", 12_000))
+CATASTROPHE_COOLDOWN_TICKS: int = max(0, _env_int("FWS_CATASTROPHE_COOLDOWN_TICKS", 8_000))
 
 # Duration of one catastrophe event.
-CATASTROPHE_DURATION_TICKS: int = max(1, _env_int("FWS_CATASTROPHE_DURATION_TICKS", 3_000))
+CATASTROPHE_DURATION_TICKS: int = max(1, _env_int("FWS_CATASTROPHE_DURATION_TICKS", 1_800))
 
 # Never suppress all heal zones; keep at least this many active.
-CATASTROPHE_MIN_ACTIVE_HEAL_ZONES: int = max(1, _env_int("FWS_CATASTROPHE_MIN_ACTIVE_HEAL_ZONES", 1))
+CATASTROPHE_MIN_ACTIVE_HEAL_ZONES: int = max(1, _env_int("FWS_CATASTROPHE_MIN_ACTIVE_HEAL_ZONES", 2))
 
 # Minimum total zone count required before catastrophe logic is allowed.
 CATASTROPHE_MIN_ZONE_COUNT_TO_TRIGGER: int = max(
@@ -660,19 +660,19 @@ CATASTROPHE_MIN_ZONE_COUNT_TO_TRIGGER: int = max(
 # accessibility across one side.
 CATASTROPHE_REQUIRE_BOTH_HALVES_COVERED: bool = _env_bool(
     "FWS_CATASTROPHE_REQUIRE_BOTH_HALVES_COVERED",
-    False,
+    True,
 )
 
 # Dynamic-mode occupancy trigger threshold.
 CATASTROPHE_DYNAMIC_HEAL_OCCUPANCY_THRESHOLD: float = _env_float(
     "FWS_CATASTROPHE_DYNAMIC_HEAL_OCCUPANCY_THRESHOLD",
-    0.35,
+    0.28,
 )
 
 # Number of consecutive ticks the dynamic signal must persist.
 CATASTROPHE_DYNAMIC_SUSTAIN_TICKS: int = max(
     1,
-    _env_int("FWS_CATASTROPHE_DYNAMIC_SUSTAIN_TICKS", 120),
+    _env_int("FWS_CATASTROPHE_DYNAMIC_SUSTAIN_TICKS", 90),
 )
 
 # Fractional severity knobs.
@@ -698,9 +698,9 @@ CATASTROPHE_LOG_EVENTS: bool = _env_bool("FWS_CATASTROPHE_LOG_EVENTS", True)
 # Capture points.
 # Raise count/size/reward when territorial control should matter more.
 # Lower reward to make CP mostly informational/spatial rather than score-driving.
-CP_COUNT: int = _env_int("FWS_CP_COUNT", 7)
+CP_COUNT: int = _env_int("FWS_CP_COUNT", 6)
 CP_SIZE_RATIO: float = _env_float("FWS_CP_SIZE_RATIO", 0.08)
-CP_REWARD_PER_TICK: float = _env_float("FWS_CP_REWARD", 0.005)
+CP_REWARD_PER_TICK: float = _env_float("FWS_CP_REWARD", 0.0)
 
 
 # =============================================================================
@@ -731,8 +731,8 @@ ARCHER_LOS_BLOCKS_WALLS: bool = _env_bool("FWS_ARCHER_BLOCK_LOS", True)
 # Raise it to make healing/objectives/combat more urgent.
 # Lower it to allow more passive roaming or longer standoffs.
 METABOLISM_ENABLED: bool = _env_bool("FWS_META_ON", True)
-META_SOLDIER_HP_PER_TICK: float = _env_float("FWS_META_SOLDIER", 0.0015)
-META_ARCHER_HP_PER_TICK: float = _env_float("FWS_META_ARCHER", 0.0010)
+META_SOLDIER_HP_PER_TICK: float = _env_float("FWS_META_SOLDIER", 0.0020)
+META_ARCHER_HP_PER_TICK: float = _env_float("FWS_META_ARCHER", 0.0015)
 
 # Vision ranges.
 # Raise to make agents more informed and long-range aware.
@@ -857,7 +857,7 @@ SPAWN_ARCHER_RATIO: float = _env_float("FWS_SPAWN_ARCHER_RATIO", 0.35)
 # Core respawn probabilities and placement search budget.
 RESPAWN_PROB_PER_DEAD: float = _env_float("FWS_RESPAWN_PROB", 0.05)
 RESPAWN_SPAWN_TRIES: int = _env_int("FWS_RESPAWN_TRIES", 200)
-RESPAWN_MUTATION_STD: float = _env_float("FWS_MUT_STD", 0.08)
+RESPAWN_MUTATION_STD: float = _env_float("FWS_MUT_STD", 0.05)
 RESPAWN_CLONE_PROB: float = _env_float("FWS_CLONE_PROB", 1.0)
 RESPAWN_USE_TEAM_ELITE: bool = _env_bool("FWS_TEAM_ELITE", True)
 RESPAWN_RESET_OPT_ON_RESPAWN: bool = _env_bool("FWS_RESET_OPT", True)
@@ -874,10 +874,10 @@ RESPAWN_INTERIOR_BIAS: float = _env_float("FWS_RESPAWN_INTERIOR_BIAS", 0.10)
 RESPAWN_RARE_MUTATION_TICK_WINDOW_ENABLE: bool = _env_bool("FWS_RESP_RARE_TICK_WINDOW_ENABLE", True)
 RESPAWN_RARE_MUTATION_TICK_WINDOW_TICKS: int = _env_int("FWS_RESP_RARE_TICK_WINDOW", 7000)
 RESPAWN_RARE_MUTATION_PHYSICAL_ENABLE: bool = _env_bool("FWS_RESP_RARE_PHYS_ENABLE", True)
-RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_STD_FRAC: float = _env_float("FWS_RESP_RARE_PHYS_STD", 0.20)
-RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_CLIP_FRAC: float = _env_float("FWS_RESP_RARE_PHYS_CLIP", 0.30)
+RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_STD_FRAC: float = _env_float("FWS_RESP_RARE_PHYS_STD", 0.10)
+RESPAWN_RARE_MUTATION_PHYSICAL_DRIFT_CLIP_FRAC: float = _env_float("FWS_RESP_RARE_PHYS_CLIP", 0.15)
 RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_ENABLE: bool = _env_bool("FWS_RESP_RARE_BRAIN_NOISE_ENABLE", True)
-RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_STD: float = _env_float("FWS_RESP_RARE_BRAIN_NOISE_STD", 0.30)
+RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_STD: float = _env_float("FWS_RESP_RARE_BRAIN_NOISE_STD", 0.15)
 
 # RESPAWN_PARENT_SELECTION_MODE
 # -----------------------------
@@ -895,10 +895,42 @@ if RESPAWN_PARENT_SELECTION_MODE not in ("random", "topk_weighted"):
     RESPAWN_PARENT_SELECTION_MODE = "random"
 
 # Fraction of parent candidates retained in the top-k pool.
-RESPAWN_PARENT_SELECTION_TOPK_FRAC: float = _env_float("FWS_RESP_PARENT_TOPK_FRAC", 0.1)
+RESPAWN_PARENT_SELECTION_TOPK_FRAC: float = _env_float("FWS_RESP_PARENT_TOPK_FRAC", 0.08)
 
 # Exponent controlling how strongly weights favor higher scores within the pool.
-RESPAWN_PARENT_SELECTION_SCORE_POWER: float = _env_float("FWS_RESP_PARENT_SCORE_POWER", 0.75)
+RESPAWN_PARENT_SELECTION_SCORE_POWER: float = _env_float("FWS_RESP_PARENT_SCORE_POWER", 2.0)
+
+# Doctrine of Birth / The Closed Cradle
+# Ongoing births can be forced to remain bloodline-bound:
+# - if True, a live same-team parent must exist for every birth
+# - if False, legacy parentless fresh births remain possible
+RESPAWN_REQUIRE_PARENT_FOR_BIRTH: bool = _env_bool("FWS_RESP_REQUIRE_PARENT_FOR_BIRTH", True)
+
+# Active doctrine for scoring alive same-team parents when
+# RESPAWN_PARENT_SELECTION_MODE="topk_weighted".
+RESPAWN_BIRTH_DOCTRINE_MODE: str = _env_str("FWS_RESP_BIRTH_DOCTRINE_MODE", "personal_points").strip().lower()
+
+# Pool sampled by random_per_birth.
+RESPAWN_BIRTH_RANDOM_DOCTRINE_POOL = tuple(
+    s.strip().lower()
+    for s in _env_str("FWS_RESP_BIRTH_RANDOM_DOCTRINE_POOL", "overall").split(",")
+    if s.strip()
+)
+
+# Explicit top-k parent count. Use 0 to retain legacy fraction-based sizing.
+RESPAWN_BIRTH_TOPK_SIZE: int = _env_int("FWS_RESP_BIRTH_TOPK_SIZE", 12)
+
+# Behavior when a doctrine yields no positive candidate score.
+RESPAWN_BIRTH_ZERO_SCORE_FALLBACK: str = _env_str(
+    "FWS_RESP_BIRTH_ZERO_SCORE_FALLBACK",
+    "uniform_candidates",
+).strip().lower()
+
+# Relative blend weights for multi-axis doctrines.
+RESPAWN_BIRTH_BLEND_WEIGHT_KILL: float = _env_float("FWS_RESP_BIRTH_BLEND_WEIGHT_KILL", 1.0)
+RESPAWN_BIRTH_BLEND_WEIGHT_CP: float = _env_float("FWS_RESP_BIRTH_BLEND_WEIGHT_CP", 1.0)
+RESPAWN_BIRTH_BLEND_WEIGHT_HEALTH: float = _env_float("FWS_RESP_BIRTH_BLEND_WEIGHT_HEALTH", 1.0)
+RESPAWN_BIRTH_BLEND_WEIGHT_PERSONAL: float = _env_float("FWS_RESP_BIRTH_BLEND_WEIGHT_PERSONAL", 1.0)
 
 # RESPAWN_SPAWN_LOCATION_MODE
 # ---------------------------
@@ -918,7 +950,7 @@ if RESPAWN_SPAWN_LOCATION_MODE not in ("uniform", "near_parent"):
 # Search radius around the parent when using near-parent spawning.
 RESPAWN_SPAWN_NEAR_PARENT_RADIUS: int = _env_int(
     "FWS_RESP_SPAWN_NEAR_PARENT_RADIUS",
-    max(1, int(RESPAWN_JITTER_RADIUS)),
+    3,
 )
 
 
@@ -930,13 +962,13 @@ RESPAWN_SPAWN_NEAR_PARENT_RADIUS: int = _env_int(
 # =============================================================================
 
 # Team-level combat rewards/penalties.
-TEAM_KILL_REWARD: float = _env_float("FWS_REW_KILL", 1.0)
-TEAM_DMG_DEALT_REWARD: float = _env_float("FWS_REW_DMG_DEALT", 0.30)
-TEAM_DEATH_PENALTY: float = _env_float("FWS_REW_DEATH", -0.5)
-TEAM_DMG_TAKEN_PENALTY: float = _env_float("FWS_REW_DMG_TAKEN", -0.10)
+TEAM_KILL_REWARD: float = _env_float("FWS_REW_KILL", 0.0)
+TEAM_DMG_DEALT_REWARD: float = _env_float("FWS_REW_DMG_DEALT", 0.0)
+TEAM_DEATH_PENALTY: float = _env_float("FWS_REW_DEATH", 0.0)
+TEAM_DMG_TAKEN_PENALTY: float = _env_float("FWS_REW_DMG_TAKEN", 0.0)
 
 # PPO dense HP reward.
-PPO_REWARD_HP_TICK: float = _env_float("FWS_PPO_REW_HP_TICK", 0.005)
+PPO_REWARD_HP_TICK: float = _env_float("FWS_PPO_REW_HP_TICK", 0.007)
 
 # PPO_HP_REWARD_MODE
 # ------------------
@@ -946,20 +978,23 @@ PPO_REWARD_HP_TICK: float = _env_float("FWS_PPO_REW_HP_TICK", 0.005)
 # Use raw for simple dense shaping.
 # Use threshold_ramp when you want to reward staying substantially healthy,
 # rather than merely being slightly above zero.
-PPO_HP_REWARD_MODE: str = _env_str("FWS_PPO_HP_REWARD_MODE", "raw").strip().lower()
+PPO_HP_REWARD_MODE: str = _env_str("FWS_PPO_HP_REWARD_MODE", "threshold_ramp").strip().lower()
 
 # Threshold used only when PPO_HP_REWARD_MODE == "threshold_ramp".
 # Runtime clamps it into [0, 1].
 # A value around 0.60 means: no HP reward at or below 60% HP, then linearly
 # increasing reward above that point.
-PPO_HP_REWARD_THRESHOLD: float = _env_float("FWS_PPO_HP_REWARD_THRESHOLD", 10)
+PPO_HP_REWARD_THRESHOLD: float = _env_float("FWS_PPO_HP_REWARD_THRESHOLD", 0.60)
 
 # Individual PPO reward terms.
-PPO_REWARD_DMG_DEALT_INDIVIDUAL: float = _env_float("FWS_PPO_REW_DMG_DEALT_AGENT", 0.5)
-PPO_PENALTY_DMG_TAKEN_INDIVIDUAL: float = _env_float("FWS_PPO_PEN_DMG_TAKEN_AGENT", -0.2)
-PPO_REWARD_KILL_INDIVIDUAL: float = _env_float("FWS_PPO_REW_KILL_AGENT", 2.0)
-PPO_REWARD_DEATH: float = _env_float("FWS_PPO_REW_DEATH", -1.0)
-PPO_REWARD_CONTESTED_CP: float = _env_float("FWS_PPO_REW_CONTEST", 0.5)
+PPO_REWARD_DMG_DEALT_INDIVIDUAL: float = _env_float("FWS_PPO_REW_DMG_DEALT_AGENT", 0.30)
+# Runtime subtracts this coefficient, so positive values create a true penalty.
+PPO_PENALTY_DMG_TAKEN_INDIVIDUAL: float = _env_float("FWS_PPO_PEN_DMG_TAKEN_AGENT", 0.45)
+PPO_REWARD_KILL_INDIVIDUAL: float = _env_float("FWS_PPO_REW_KILL_AGENT", 1.5)
+# Despite the name, the current PPO path applies this as a same-team death aggregate.
+PPO_REWARD_DEATH: float = _env_float("FWS_PPO_REW_DEATH", 0.0)
+PPO_REWARD_CONTESTED_CP: float = _env_float("FWS_PPO_REW_CONTEST", 0.35)
+PPO_REWARD_HEALING_RECOVERY: float = _env_float("FWS_PPO_REW_HEALING_RECOVERY", 6.0)
 
 
 # =============================================================================
@@ -975,7 +1010,7 @@ PPO_RESET_LOG: bool = _env_bool("FWS_PPO_RESET_LOG", False)
 # Rollout horizon in ticks.
 # Larger windows improve long-horizon information but delay updates.
 # Smaller windows update more frequently but with shorter trajectories.
-PPO_WINDOW_TICKS: int = _env_int("FWS_PPO_TICKS", 256)
+PPO_WINDOW_TICKS: int = _env_int("FWS_PPO_TICKS", 192)
 
 # Optimizer learning rate.
 PPO_LR: float = _env_float("FWS_PPO_LR", 3e-4)
@@ -987,7 +1022,7 @@ PPO_LR_ETA_MIN: float = _env_float("FWS_PPO_ETA_MIN", 1e-6)
 # PPO clipping and coefficients.
 PPO_CLIP: float = _env_float("FWS_PPO_CLIP", 0.2)
 PPO_CLIP_EPS: float = PPO_CLIP
-PPO_ENTROPY_COEF: float = _env_float("FWS_PPO_ENTROPY", 0.05)
+PPO_ENTROPY_COEF: float = _env_float("FWS_PPO_ENTROPY", 0.025)
 PPO_VALUE_COEF: float = _env_float("FWS_PPO_VCOEF", 0.5)
 PPO_EPOCHS: int = _env_int("FWS_PPO_EPOCHS", 4)
 PPO_MINIBATCHES: int = _env_int("FWS_PPO_MINIB", 8)
@@ -1370,6 +1405,18 @@ def _validate_config_invariants() -> None:
         if str(value) not in allowed:
             _config_issue(f"{name} must be one of {sorted(allowed)} (got {value!r})")
 
+    def _non_negative_float(name: str, value: float) -> None:
+        try:
+            x = float(value)
+        except Exception:
+            _config_issue(f"{name} is not float-like ({value!r})")
+            return
+        if not math.isfinite(x):
+            _config_issue(f"{name} is not finite ({x!r})")
+            return
+        if x < 0.0:
+            _config_issue(f"{name} must be >= 0 (got {x})")
+
     # Basic world/capacity checks.
     _positive_int("GRID_WIDTH", GRID_WIDTH)
     _positive_int("GRID_HEIGHT", GRID_HEIGHT)
@@ -1447,6 +1494,7 @@ def _validate_config_invariants() -> None:
         ("RESPAWN_JITTER_RADIUS", RESPAWN_JITTER_RADIUS),
         ("RESPAWN_COOLDOWN_TICKS", RESPAWN_COOLDOWN_TICKS),
         ("RESPAWN_BATCH_PER_TEAM", RESPAWN_BATCH_PER_TEAM),
+        ("RESPAWN_BIRTH_TOPK_SIZE", RESPAWN_BIRTH_TOPK_SIZE),
         ("PPO_WINDOW_TICKS", PPO_WINDOW_TICKS),
         ("PPO_LR_T_MAX", PPO_LR_T_MAX),
         ("PPO_EPOCHS", PPO_EPOCHS),
@@ -1475,6 +1523,22 @@ def _validate_config_invariants() -> None:
             f"(got {RESPAWN_PARENT_SELECTION_SCORE_POWER})"
         )
 
+    for name, value in (
+        ("RESPAWN_BIRTH_BLEND_WEIGHT_KILL", RESPAWN_BIRTH_BLEND_WEIGHT_KILL),
+        ("RESPAWN_BIRTH_BLEND_WEIGHT_CP", RESPAWN_BIRTH_BLEND_WEIGHT_CP),
+        ("RESPAWN_BIRTH_BLEND_WEIGHT_HEALTH", RESPAWN_BIRTH_BLEND_WEIGHT_HEALTH),
+        ("RESPAWN_BIRTH_BLEND_WEIGHT_PERSONAL", RESPAWN_BIRTH_BLEND_WEIGHT_PERSONAL),
+    ):
+        _non_negative_float(name, value)
+
+    if (
+        float(RESPAWN_BIRTH_BLEND_WEIGHT_KILL)
+        + float(RESPAWN_BIRTH_BLEND_WEIGHT_CP)
+        + float(RESPAWN_BIRTH_BLEND_WEIGHT_HEALTH)
+        + float(RESPAWN_BIRTH_BLEND_WEIGHT_PERSONAL)
+    ) <= 0.0:
+        _config_issue("At least one RESPAWN_BIRTH_BLEND_WEIGHT_* value must be > 0")
+
     if float(RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_STD) < 0.0:
         _config_issue(
             "RESPAWN_RARE_MUTATION_INHERITED_BRAIN_NOISE_STD must be >= 0 "
@@ -1485,6 +1549,25 @@ def _validate_config_invariants() -> None:
     _one_of("PROFILE", PROFILE, {"default", "debug", "train_fast", "train_quality"})
     _one_of("SPAWN_MODE", SPAWN_MODE, {"uniform", "symmetric"})
     _one_of("RESPAWN_PARENT_SELECTION_MODE", RESPAWN_PARENT_SELECTION_MODE, {"random", "topk_weighted"})
+    allowed_birth_doctrines = {
+        "overall",
+        "killer",
+        "cp",
+        "health",
+        "kill_health",
+        "health_cp",
+        "kill_cp",
+        "trinity",
+        "highest_spike",
+        "personal_points",
+        "random_per_birth",
+    }
+    _one_of("RESPAWN_BIRTH_DOCTRINE_MODE", RESPAWN_BIRTH_DOCTRINE_MODE, allowed_birth_doctrines)
+    _one_of(
+        "RESPAWN_BIRTH_ZERO_SCORE_FALLBACK",
+        RESPAWN_BIRTH_ZERO_SCORE_FALLBACK,
+        {"uniform_candidates", "abort_birth"},
+    )
     _one_of("RESPAWN_SPAWN_LOCATION_MODE", RESPAWN_SPAWN_LOCATION_MODE, {"uniform", "near_parent"})
     _one_of("CATASTROPHE_SCHEDULER_MODE", CATASTROPHE_SCHEDULER_MODE, {"periodic", "dynamic"})
     _one_of("BRAIN_MLP_ACTIVATION", BRAIN_MLP_ACTIVATION, {"gelu", "relu", "silu"})
@@ -1530,6 +1613,20 @@ def _validate_config_invariants() -> None:
     if total_mix_prob <= 0.0:
         _config_issue("At least one TEAM_BRAIN_MIX_P_* probability must be > 0")
 
+    if len(RESPAWN_BIRTH_RANDOM_DOCTRINE_POOL) == 0:
+        _config_issue("RESPAWN_BIRTH_RANDOM_DOCTRINE_POOL must not be empty")
+    else:
+        bad_birth_pool = [
+            x
+            for x in RESPAWN_BIRTH_RANDOM_DOCTRINE_POOL
+            if x not in allowed_birth_doctrines or x == "random_per_birth"
+        ]
+        if bad_birth_pool:
+            _config_issue(
+                "RESPAWN_BIRTH_RANDOM_DOCTRINE_POOL contains invalid doctrine names "
+                f"(or recursive random_per_birth): {bad_birth_pool!r}"
+            )
+
     # Schema relationships.
     expected_rays_flat = int(RAY_TOKEN_COUNT) * int(RAY_FEAT_DIM)
     if int(RAYS_FLAT_DIM) != expected_rays_flat:
@@ -1567,10 +1664,10 @@ _validate_config_invariants()
 def summary_str() -> str:
     """Return a compact one-line summary of the active run configuration."""
     return (
-        f"[Neural Abyss] "
-        f"dev={DEVICE.type} "
+        f"[Neural-Abyss] "
+        f"device={DEVICE.type} "
         f"grid={GRID_WIDTH}x{GRID_HEIGHT} "
         f"start={START_AGENTS_PER_TEAM}/team "
-        f"obs={OBS_DIM} acts={NUM_ACTIONS} "
-        f"AMP={'on' if AMP_ENABLED else 'off'}"
+        f"obs={OBS_DIM} actions={NUM_ACTIONS} "
+        f"amp={'on' if AMP_ENABLED else 'off'}"
     )

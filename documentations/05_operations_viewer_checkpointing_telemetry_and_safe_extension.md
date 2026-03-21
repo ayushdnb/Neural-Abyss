@@ -620,29 +620,19 @@ Before changing `ui/viewer.py`, understand these operational facts:
 
 Normal output-producing runs create a run directory and write multiple artifact families into it.
 
-The default fresh-run path comes from `ResultsWriter.start(config_obj=_config_snapshot())`, which in turn falls back to `ResultsWriter._timestamp_dir(base="results")`.
+The fresh-run path comes from `ResultsWriter.start(config_obj=_config_snapshot(), base_dir=config.RESULTS_DIR)`.
 
-That helper produces directories shaped like:
+By default that helper produces directories shaped like:
 
 ```text
 results/sim_YYYY-MM-DD_HH-MM-SS
 ```
 
-### Important code-truth note
-
-`config.py` defines `RESULTS_DIR` from `FWS_RESULTS_DIR`, but in the provided fresh-run path `main.py` does not pass that config value into `ResultsWriter.start()`. `ResultsWriter._timestamp_dir()` defaults to the literal base `"results"`.
-
-So, in the provided code path, fresh runs are created under `results/...` unless an explicit run directory is supplied through another path such as resume-in-place append.
-
-That is an operationally important detail because a reader might expect `FWS_RESULTS_DIR` to control fresh-run directory placement directly.
+If `FWS_RESULTS_DIR` is set, the same timestamped layout is created under that configured base directory instead.
 
 ## 4.2 Run directory naming and lineage
 
-A normal new run gets a timestamped folder like:
-
-```text
-results/sim_2026-03-17_18-35-04
-```
+A normal new run gets a timestamped folder like `results/sim_2026-03-17_18-35-04` by default, or the same `sim_...` directory name under `FWS_RESULTS_DIR` when that override is set:
 
 A resume can behave in two ways:
 
@@ -2091,9 +2081,9 @@ It is the fastest final-status artifact, not the full operational history.
 
 ## 11.9 “`FWS_RESULTS_DIR` controls fresh run output location in the provided runtime path”
 
-Not in the fresh-run path shown by the provided code.
+Correct.
 
-Fresh runs call `ResultsWriter.start()` without a base/run_dir argument, and `ResultsWriter` defaults to the literal base `"results"`.
+Fresh runs pass `config.RESULTS_DIR` into `ResultsWriter.start(..., base_dir=...)`. When `FWS_RESULTS_DIR` is unset, the fallback remains the default `results/` root.
 
 ## 11.10 “Autosave-by-seconds is part of the active runtime behavior”
 
