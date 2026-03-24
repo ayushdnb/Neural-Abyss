@@ -59,6 +59,7 @@ from .agent_registry import (
 
 from agent.mlp_brain import (
     create_mlp_brain,
+    normalize_brain_kind,
     brain_kind_from_module,
 )
 # "Brains" are policy/value networks or decision modules controlling agents.
@@ -335,7 +336,7 @@ def _cap(n: int, cfg: RespawnCfg) -> int:
 
 # Team brain selection (supports exclusive split and mixed teams)
 
-_TEAM_BRAIN_MIX_COUNTER = {TEAM_RED_ID: 0, TEAM_BLUE_ID: 0}
+_TEAM_BRAIN_MIX_COUNTER: Dict[float, int] = {}
 # Per-team counter used for deterministic alternation strategies.
 # Because it is module-level, it persists across controller instances.
 
@@ -355,41 +356,92 @@ def _make_team_mix_rng(team_id: float):
     salt = 101 if team_id == TEAM_RED_ID else 202
     return random.Random(seed + salt)
 
-_TEAM_BRAIN_MIX_RNG = {
-    TEAM_RED_ID: _make_team_mix_rng(TEAM_RED_ID),
-    TEAM_BLUE_ID: _make_team_mix_rng(TEAM_BLUE_ID),
-}
+_TEAM_BRAIN_MIX_RNG: Dict[float, random.Random] = {}
 # Dictionary mapping team_id -> RNG instance.
 
+
+def reset_team_brain_runtime_state() -> None:
+    """Rebuild the per-team brain-mix counters and RNG streams from config."""
+    _TEAM_BRAIN_MIX_COUNTER.clear()
+    _TEAM_BRAIN_MIX_COUNTER.update({
+        TEAM_RED_ID: 0,
+        TEAM_BLUE_ID: 0,
+    })
+    _TEAM_BRAIN_MIX_RNG.clear()
+    _TEAM_BRAIN_MIX_RNG.update({
+        TEAM_RED_ID: _make_team_mix_rng(TEAM_RED_ID),
+        TEAM_BLUE_ID: _make_team_mix_rng(TEAM_BLUE_ID),
+    })
+
+
+def export_team_brain_runtime_state() -> Dict[str, Any]:
+    """Return checkpoint-safe state for mixed-brain assignment continuity."""
+    state: Dict[str, Any] = {
+        "counter": {},
+        "rng_state": {},
+    }
+    for team_id, label in ((TEAM_RED_ID, "red"), (TEAM_BLUE_ID, "blue")):
+        state["counter"][label] = int(_TEAM_BRAIN_MIX_COUNTER.get(team_id, 0))
+        rng = _TEAM_BRAIN_MIX_RNG.get(team_id)
+        if rng is None or isinstance(rng, random.SystemRandom):
+            state["rng_state"][label] = None
+        else:
+            state["rng_state"][label] = rng.getstate()
+    return state
+
+
+def set_team_brain_runtime_state(state: Optional[Dict[str, Any]]) -> None:
+    """Restore mixed-brain assignment counters/RNG state from a checkpoint."""
+    if not state:
+        reset_team_brain_runtime_state()
+        return
+
+    counters = state.get("counter", {}) if isinstance(state, dict) else {}
+    rng_states = state.get("rng_state", {}) if isinstance(state, dict) else {}
+
+    _TEAM_BRAIN_MIX_COUNTER.clear()
+    _TEAM_BRAIN_MIX_RNG.clear()
+    for team_id, label in ((TEAM_RED_ID, "red"), (TEAM_BLUE_ID, "blue")):
+        _TEAM_BRAIN_MIX_COUNTER[team_id] = int(counters.get(label, 0))
+        rng_state = rng_states.get(label)
+        if rng_state is None:
+            _TEAM_BRAIN_MIX_RNG[team_id] = _make_team_mix_rng(team_id)
+            continue
+        rng = random.Random()
+        try:
+            rng.setstate(rng_state)
+        except Exception:
+            rng = _make_team_mix_rng(team_id)
+        _TEAM_BRAIN_MIX_RNG[team_id] = rng
+
+
+reset_team_brain_runtime_state()
+
 def _resolve_team_brain_kind_from_team(team_id: float) -> str:
-    # Determine the "brain kind" to use for a team.
-    # config knobs:
-    #   TEAM_BRAIN_ASSIGNMENT_MODE:
-    #     - "exclusive" / "split" / "team":
-    #         red  -> tron
-    #         blue -> mirror
-    #     - "mix" / "hybrid" / "both":
-    #         choose tron/mirror per spawn using a chosen strategy.
-    # TEAM_BRAIN_MIX_STRATEGY:
-    #   - "alternate" / "roundrobin" / "rr":
-    #       deterministic alternation, controlled by _TEAM_BRAIN_MIX_COUNTER
-    #   - "random" / "prob" / "probabilistic":
-    #       draw from RNG with probability p_tron
-    # If team_id is neither red nor blue, fall back to config.BRAIN_KIND.
+    # Determine the configured brain kind for a team.
+    # TEAM_BRAIN_ASSIGNMENT_MODE controls fixed-per-team versus mixed-per-spawn
+    # selection. TEAM_BRAIN_MIX_STRATEGY controls alternate vs weighted-random
+    # selection inside mixed mode. Unknown team ids fall back to config.BRAIN_KIND.
     mode = str(getattr(config, "TEAM_BRAIN_ASSIGNMENT_MODE", "exclusive")).strip().lower()
-    default_kind = str(getattr(config, "BRAIN_KIND", "whispering_abyss")).strip().lower()
+    default_kind = normalize_brain_kind(
+        str(getattr(config, "BRAIN_KIND", "throne_of_ashen_dreams")).strip().lower()
+    )
 
     if mode in ("exclusive", "split", "team"):
         if team_id == TEAM_RED_ID:
-            return str(getattr(config, "TEAM_BRAIN_EXCLUSIVE_RED", default_kind)).strip().lower()
+            return normalize_brain_kind(
+                str(getattr(config, "TEAM_BRAIN_EXCLUSIVE_RED", default_kind)).strip().lower()
+            )
         if team_id == TEAM_BLUE_ID:
-            return str(getattr(config, "TEAM_BRAIN_EXCLUSIVE_BLUE", default_kind)).strip().lower()
+            return normalize_brain_kind(
+                str(getattr(config, "TEAM_BRAIN_EXCLUSIVE_BLUE", default_kind)).strip().lower()
+            )
         return default_kind
 
     if mode in ("mix", "hybrid", "both"):
         strategy = str(getattr(config, "TEAM_BRAIN_MIX_STRATEGY", "alternate")).strip().lower()
         seq = tuple(
-            str(x).strip().lower()
+            normalize_brain_kind(str(x).strip().lower())
             for x in getattr(config, "TEAM_BRAIN_MIX_SEQUENCE", (default_kind,))
             if str(x).strip()
         ) or (default_kind,)
@@ -402,11 +454,18 @@ def _resolve_team_brain_kind_from_team(team_id: float) -> str:
         if strategy in ("random", "prob", "probabilistic"):
             rng = _TEAM_BRAIN_MIX_RNG.get(team_id, random.SystemRandom())
             weighted = (
-                ("whispering_abyss", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_WHISPERING_ABYSS", 0.0)))),
-                ("veil_of_echoes", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_VEIL_OF_ECHOES", 0.0)))),
-                ("cathedral_of_ash", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_CATHEDRAL_OF_ASH", 0.0)))),
-                ("dreamer_in_black_fog", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_DREAMER_IN_BLACK_FOG", 0.0)))),
-                ("obsidian_pulse", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_OBSIDIAN_PULSE", 0.0)))),
+                (
+                    "throne_of_ashen_dreams",
+                    max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_THRONE_OF_ASHEN_DREAMS", 0.0))),
+                ),
+                (
+                    "veil_of_the_hollow_crown",
+                    max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_VEIL_OF_THE_HOLLOW_CROWN", 0.0))),
+                ),
+                (
+                    "black_grail_of_nightfire",
+                    max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_BLACK_GRAIL_OF_NIGHTFIRE", 0.0))),
+                ),
             )
             total = sum(w for _, w in weighted)
             if total <= 0.0:
@@ -580,7 +639,9 @@ def _new_brain(device: torch.device, *, team_id: Optional[float] = None) -> torc
     if team_assign and team_id is not None:
         brain_kind = _resolve_team_brain_kind_from_team(float(team_id))
     else:
-        brain_kind = str(getattr(config, "BRAIN_KIND", "whispering_abyss")).strip().lower()
+        brain_kind = normalize_brain_kind(
+            str(getattr(config, "BRAIN_KIND", "throne_of_ashen_dreams")).strip().lower()
+        )
 
     return create_mlp_brain(brain_kind, obs_dim, act_dim).to(device)
 
@@ -650,7 +711,9 @@ def _clone_brain(
         else:
             brain_kind = parent_kind or _resolve_team_brain_kind_from_team(float(team_id))
     else:
-        brain_kind = str(getattr(config, "BRAIN_KIND", "whispering_abyss")).strip().lower()
+        brain_kind = normalize_brain_kind(
+            str(getattr(config, "BRAIN_KIND", "throne_of_ashen_dreams")).strip().lower()
+        )
 
     child = create_mlp_brain(brain_kind, obs_dim, act_dim).to(device)
     if parent_kind == brain_kind:

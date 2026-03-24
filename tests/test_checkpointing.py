@@ -5,7 +5,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from engine.agent_registry import COL_ALIVE, COL_HP
+import config
+import engine.respawn as respawn_module
+from agent.mlp_brain import brain_kind_from_module
+from engine.agent_registry import COL_ALIVE, COL_HP, TEAM_RED_ID
 from engine.tick import TickEngine
 from simulation.stats import SimulationStats
 from tests._sim_helpers import CPU, make_test_engine, make_zones, register_agent
@@ -110,3 +113,58 @@ def test_apply_loaded_checkpoint_rejects_stale_next_agent_id(monkeypatch, tmp_pa
             stats=stats2,
             device=CPU,
         )
+
+
+def test_checkpoint_roundtrip_restores_respawn_team_brain_mix_runtime(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(config, "TEAM_BRAIN_ASSIGNMENT", True)
+    monkeypatch.setattr(config, "TEAM_BRAIN_ASSIGNMENT_MODE", "mix")
+    monkeypatch.setattr(config, "TEAM_BRAIN_MIX_STRATEGY", "random")
+    monkeypatch.setattr(config, "TEAM_BRAIN_MIX_SEED", 123)
+    monkeypatch.setattr(config, "TEAM_BRAIN_MIX_P_THRONE_OF_ASHEN_DREAMS", 0.2)
+    monkeypatch.setattr(config, "TEAM_BRAIN_MIX_P_VEIL_OF_THE_HOLLOW_CROWN", 0.3)
+    monkeypatch.setattr(config, "TEAM_BRAIN_MIX_P_BLACK_GRAIL_OF_NIGHTFIRE", 0.5)
+
+    respawn_module.reset_team_brain_runtime_state()
+    try:
+        engine, registry, _grid, stats = make_test_engine(monkeypatch, max_agents=4)
+        register_agent(registry, engine.grid, 0, team_is_red=True, x=2, y=2)
+
+        for _ in range(2):
+            respawn_module._new_brain(CPU, team_id=TEAM_RED_ID)
+
+        manager = CheckpointManager(tmp_path / "run")
+        out_dir = manager.save_atomic(engine=engine, registry=registry, stats=stats)
+        ckpt = CheckpointManager.load(str(out_dir))
+
+        saved_runtime = ckpt["engine"]["respawn_team_brain_runtime"]
+        assert saved_runtime["rng_state"]["red"] is not None
+
+        respawn_module.set_team_brain_runtime_state(saved_runtime)
+        expected = [
+            brain_kind_from_module(respawn_module._new_brain(CPU, team_id=TEAM_RED_ID))
+            for _ in range(3)
+        ]
+
+        respawn_module.reset_team_brain_runtime_state()
+
+        grid2 = ckpt["world"]["grid"].to(CPU)
+        stats2 = SimulationStats()
+        registry2 = registry.__class__(grid2)
+        engine2 = TickEngine(registry2, grid2, stats2, zones=None)
+
+        CheckpointManager.apply_loaded_checkpoint(
+            ckpt,
+            engine=engine2,
+            registry=registry2,
+            stats=stats2,
+            device=CPU,
+        )
+
+        actual = [
+            brain_kind_from_module(respawn_module._new_brain(CPU, team_id=TEAM_RED_ID))
+            for _ in range(3)
+        ]
+
+        assert actual == expected
+    finally:
+        respawn_module.reset_team_brain_runtime_state()

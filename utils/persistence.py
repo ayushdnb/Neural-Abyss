@@ -11,6 +11,7 @@ import json
 import csv
 import datetime
 import queue
+import threading
 
 
 _DEATHS_FIELDNAMES_CURRENT = ["tick", "agent_id", "team", "x", "y", "killer_team"]
@@ -47,6 +48,36 @@ class _MsgSaveModel:
 class _MsgClose:
     """Stop the writer loop."""
     pass
+
+
+class _ThreadProcess:
+    """Thread-backed stand-in when multiprocessing pipes are unavailable."""
+
+    def __init__(self, target, args=(), daemon: bool = True):
+        self._target = target
+        self._args = args
+        self.exitcode = None
+        self._thread = threading.Thread(target=self._run, daemon=daemon)
+
+    def _run(self) -> None:
+        try:
+            self._target(*self._args)
+        except Exception:
+            self.exitcode = 1
+        else:
+            self.exitcode = 0
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def join(self, timeout=None) -> None:
+        self._thread.join(timeout)
+
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
+
+    def terminate(self) -> None:
+        self.exitcode = -15
 
 
 def _read_csv_header(path: str) -> Optional[List[str]]:
@@ -243,11 +274,12 @@ class ResultsWriter:
     """Non-blocking writer for run metadata and CSV outputs."""
 
     def __init__(self) -> None:
-        self.q: Queue = Queue(maxsize=1024)
-        self.err_q: Queue = Queue(maxsize=32)
+        self.q = None
+        self.err_q = None
         self.p: Optional[Process] = None
         self.run_dir: Optional[str] = None
         self._worker_error: Optional[str] = None
+        self.worker_backend: str = "unstarted"
 
     @staticmethod
     def _timestamp_dir(base: str = "results") -> str:
@@ -280,7 +312,8 @@ class ResultsWriter:
         """Raise if the background writer has already failed."""
         if self._worker_error is None:
             try:
-                self._worker_error = self.err_q.get_nowait()
+                if self.err_q is not None:
+                    self._worker_error = self.err_q.get_nowait()
             except queue.Empty:
                 pass
 
@@ -293,6 +326,33 @@ class ResultsWriter:
                 raise RuntimeError(
                     f"[ResultsWriter] worker exited unexpectedly with exitcode={exitcode}"
                 )
+
+    def _start_worker(self) -> None:
+        """Start a background writer, falling back to a thread when MP pipes fail."""
+        mp_error: Optional[BaseException] = None
+
+        try:
+            q = Queue(maxsize=1024)
+            err_q = Queue(maxsize=32)
+            p = Process(target=_writer_loop, args=(q, err_q), daemon=True)
+            p.start()
+            self.q = q
+            self.err_q = err_q
+            self.p = p
+            self.worker_backend = "process"
+            return
+        except (PermissionError, OSError) as exc:
+            mp_error = exc
+
+        self.q = queue.Queue(maxsize=1024)
+        self.err_q = queue.Queue(maxsize=32)
+        self.p = _ThreadProcess(target=_writer_loop, args=(self.q, self.err_q), daemon=True)
+        self.p.start()
+        self.worker_backend = "thread"
+        print(
+            "[ResultsWriter] multiprocessing unavailable; "
+            f"falling back to thread writer ({type(mp_error).__name__}: {mp_error})"
+        )
 
     def start(
         self,
@@ -317,10 +377,8 @@ class ResultsWriter:
             )
 
         self._worker_error = None
-        self.q = Queue(maxsize=1024)
-        self.err_q = Queue(maxsize=32)
-        self.p = Process(target=_writer_loop, args=(self.q, self.err_q), daemon=True)
-        self.p.start()
+        self._start_worker()
+        assert self.q is not None
         self.q.put(
             _MsgInit(
                 run_dir=self.run_dir,
@@ -370,12 +428,34 @@ class ResultsWriter:
         if self.p is None:
             return
 
+        err: Optional[RuntimeError] = None
         try:
             self._raise_worker_error()
-            self.q.put(_MsgClose())
+        except RuntimeError as exc:
+            err = exc
+
+        try:
+            if self.q is not None:
+                self.q.put(_MsgClose())
+        except Exception:
+            pass
+
+        try:
             self.p.join(timeout=2.0)
-            self._raise_worker_error()
         finally:
             if self.p.is_alive():
                 self.p.terminate()
+
+        try:
+            if err is None:
+                self._raise_worker_error()
+        except RuntimeError as exc:
+            err = exc
+        finally:
             self.p = None
+            self.q = None
+            self.err_q = None
+            self.worker_backend = "closed"
+
+        if err is not None:
+            raise err

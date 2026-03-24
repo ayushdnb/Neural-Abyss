@@ -363,7 +363,7 @@ Operationally useful profile facts from the provided config:
 
 - `debug` keeps UI enabled, reduces grid/population scale, disables video recording, and disables vmap.
 - `train_fast` disables UI and enables vmap.
-- `train_quality` disables UI and enables vmap with a larger `BRAIN_MLP_D_MODEL`.
+- `train_quality` disables UI and enables vmap with larger MLP tower widths.
 
 These are convenience defaults, not separate code paths.
 

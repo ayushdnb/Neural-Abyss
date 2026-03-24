@@ -244,7 +244,7 @@ def _get_scratch(device: torch.device, feat_dtype: torch.dtype) -> _Raycast32Scr
     return scratch
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def raycast32_firsthit(
     pos_xy: torch.Tensor,               # (N,2) long
     grid: torch.Tensor,                 # (3,H,W)

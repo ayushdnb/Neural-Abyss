@@ -2,6 +2,7 @@ import csv
 from pathlib import Path
 
 import config
+from tests._sim_helpers import make_test_engine
 from utils.telemetry import TelemetrySession
 
 
@@ -81,3 +82,24 @@ def test_record_birth_and_death_write_life_and_detailed_logs(tmp_path: Path, mon
     assert "11" in detailed
     assert rows[0]["agent_id"] == "11"
     assert rows[0]["death_tick"] == "9"
+
+
+def test_tick_summary_is_not_duplicated_by_flush_and_close(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(config, "TELEMETRY_ENABLED", True)
+    monkeypatch.setattr(config, "TELEMETRY_TICK_SUMMARY_EVERY", 1)
+
+    engine, registry, _grid, stats = make_test_engine(monkeypatch, max_agents=4)
+    stats.tick = 3
+
+    session = TelemetrySession(tmp_path)
+    session.attach_context(registry=registry, stats=stats, ppo_runtime=None)
+
+    session.on_tick_end(3)
+    session.flush(reason="checkpoint_save")
+    session.close()
+
+    with (tmp_path / "telemetry" / "tick_summary.csv").open("r", newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+
+    assert len(rows) == 1
+    assert rows[0]["tick"] == "3"

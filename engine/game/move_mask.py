@@ -173,7 +173,7 @@ def _los_blocked_by_walls_grid0(
     return blocked
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def build_mask(
     pos_xy: torch.Tensor,            # (N, 2) long/float (x, y)
     teams: torch.Tensor,             # (N,) float: 2.0=red, 3.0=blue

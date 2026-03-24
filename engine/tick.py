@@ -24,6 +24,7 @@ from engine.mapgen import Zones
 from engine.catastrophe import CatastropheRuntimeSignal, HealZoneCatastropheController
 
 from agent.ensemble import ensemble_forward
+from agent import obs_spec
 
 
 # TYPE_CHECKING is True only for static analysis / IDE type checking.
@@ -209,12 +210,25 @@ class TickEngine:
 
         self._obs_on_heal = torch.zeros(self._capacity, device=self.device, dtype=torch.bool)
         self._obs_on_cp = torch.zeros(self._capacity, device=self.device, dtype=torch.bool)
-        self._obs_rich_base = torch.empty((self._capacity, 23), device=self.device, dtype=self._data_dt)
-        self._obs_rich = torch.empty(
-            (self._capacity, int(self._OBS_DIM) - (32 * 8)),
+        self._obs_rich_base = torch.empty(
+            (self._capacity, int(config.RICH_BASE_DIM)),
             device=self.device,
             dtype=self._data_dt,
         )
+        self._obs_rich = torch.empty(
+            (self._capacity, int(self._OBS_DIM) - int(config.RAYS_FLAT_DIM)),
+            device=self.device,
+            dtype=self._data_dt,
+        )
+
+        # Slot-local self-history accumulators used by the self-centric
+        # observation path. These are reset whenever a dead slot is reused.
+        self._obs_self_kill_ppo_points = torch.zeros(self._capacity, device=self.device, dtype=torch.float32)
+        self._obs_self_damage_dealt_ppo_points = torch.zeros(self._capacity, device=self.device, dtype=torch.float32)
+        self._obs_self_cp_ppo_points = torch.zeros(self._capacity, device=self.device, dtype=torch.float32)
+        self._obs_self_damage_taken_penalty_mag = torch.zeros(self._capacity, device=self.device, dtype=torch.float32)
+        self._obs_self_death_penalty_mag = torch.zeros(self._capacity, device=self.device, dtype=torch.float32)
+        self._obs_self_kill_count = torch.zeros(self._capacity, device=self.device, dtype=torch.float32)
 
         # Instinct cache / scratch (computed under no_grad)
         # "Instinct" here is a computed feature: local density of allies/enemies
@@ -295,26 +309,133 @@ class TickEngine:
         - When an agent respawns, its “episode continuity” may break.
         - Resetting prevents training on invalid transitions.
         """
-        if self._ppo is None:
-            return
-
         data = self.registry.agent_data
 
-        # now_alive: boolean mask of alive agents AFTER respawn.
         now_alive = (data[:, COL_ALIVE] > 0.5)
-
-        # spawned_slots: were dead AND now alive.
         spawned_slots = (was_dead & now_alive).nonzero(as_tuple=False).squeeze(1)
         if spawned_slots.numel() == 0:
             return
 
-        self._ppo.reset_agents(spawned_slots)
+        self._obs_self_kill_ppo_points.index_fill_(0, spawned_slots, 0.0)
+        self._obs_self_damage_dealt_ppo_points.index_fill_(0, spawned_slots, 0.0)
+        self._obs_self_cp_ppo_points.index_fill_(0, spawned_slots, 0.0)
+        self._obs_self_damage_taken_penalty_mag.index_fill_(0, spawned_slots, 0.0)
+        self._obs_self_death_penalty_mag.index_fill_(0, spawned_slots, 0.0)
+        self._obs_self_kill_count.index_fill_(0, spawned_slots, 0.0)
 
-        # Optional logging.
+        if self._ppo is not None:
+            self._ppo.reset_agents(spawned_slots)
+
         if bool(getattr(config, "PPO_RESET_LOG", False)):
             sl = spawned_slots[:16].tolist()
             suffix = "" if spawned_slots.numel() <= 16 else "..."
             print(f"[ppo] reset state for {int(spawned_slots.numel())} respawned slots: {sl}{suffix}")
+
+    @staticmethod
+    def _bounded_positive_norm(values: torch.Tensor, scale: float) -> torch.Tensor:
+        """
+        Monotone saturating normalization for non-negative cumulative magnitudes.
+
+        Formula:
+            x_norm = x / (x + scale)
+        """
+        scale = max(float(scale), 1e-6)
+        v = values.to(torch.float32).clamp_min(0.0)
+        return v / (v + scale)
+
+    def _fill_legacy_rich_base(
+        self,
+        rich_base: torch.Tensor,
+        alive_data: torch.Tensor,
+        on_heal: torch.Tensor,
+        on_cp: torch.Tensor,
+    ) -> None:
+        """Populate the historical 23-column rich-base schema exactly as before."""
+        hp_max = alive_data[:, COL_HP_MAX].clamp_min(1.0)
+        x_den = max(self.W - 1, 1)
+        y_den = max(self.H - 1, 1)
+
+        rich_base[:, 0] = alive_data[:, COL_HP] / hp_max
+        rich_base[:, 1] = alive_data[:, COL_X] / float(x_den)
+        rich_base[:, 2] = alive_data[:, COL_Y] / float(y_den)
+        rich_base[:, 3] = (alive_data[:, COL_TEAM] == 2.0).to(self._data_dt)
+        rich_base[:, 4] = (alive_data[:, COL_TEAM] == 3.0).to(self._data_dt)
+        rich_base[:, 5] = (alive_data[:, COL_UNIT] == 1.0).to(self._data_dt)
+        rich_base[:, 6] = (alive_data[:, COL_UNIT] == 2.0).to(self._data_dt)
+        rich_base[:, 7] = alive_data[:, COL_ATK] / (config.MAX_ATK or 1.0)
+        rich_base[:, 8] = alive_data[:, COL_VISION] / (config.RAYCAST_MAX_STEPS or 15.0)
+        rich_base[:, 9] = on_heal.to(self._data_dt)
+        rich_base[:, 10] = on_cp.to(self._data_dt)
+        rich_base[:, 11].fill_(float(self.stats.tick) / 50000.0)
+        rich_base[:, 12].fill_(float(self.stats.red.score) / 1000.0)
+        rich_base[:, 13].fill_(float(self.stats.blue.score) / 1000.0)
+        rich_base[:, 14].fill_(float(self.stats.red.cp_points) / 500.0)
+        rich_base[:, 15].fill_(float(self.stats.blue.cp_points) / 500.0)
+        rich_base[:, 16].fill_(float(self.stats.red.kills) / 500.0)
+        rich_base[:, 17].fill_(float(self.stats.blue.kills) / 500.0)
+        rich_base[:, 18].fill_(float(self.stats.red.deaths) / 500.0)
+        rich_base[:, 19].fill_(float(self.stats.blue.deaths) / 500.0)
+        rich_base[:, 20:].zero_()
+
+    def _fill_self_centric_rich_base(
+        self,
+        rich_base: torch.Tensor,
+        alive_idx: torch.Tensor,
+        alive_data: torch.Tensor,
+        on_heal: torch.Tensor,
+        on_cp: torch.Tensor,
+    ) -> None:
+        """Populate the new 16-column self-centric rich-base schema."""
+        hp_max = alive_data[:, COL_HP_MAX].clamp_min(1.0)
+        x_den = max(self.W - 1, 1)
+        y_den = max(self.H - 1, 1)
+
+        rich_base[:, 0] = alive_data[:, COL_HP] / hp_max
+        rich_base[:, 1] = alive_data[:, COL_X] / float(x_den)
+        rich_base[:, 2] = alive_data[:, COL_Y] / float(y_den)
+        rich_base[:, 3] = (alive_data[:, COL_TEAM] == 2.0).to(self._data_dt)
+        rich_base[:, 4] = (alive_data[:, COL_UNIT] == 2.0).to(self._data_dt)
+        rich_base[:, 5] = alive_data[:, COL_ATK] / (config.MAX_ATK or 1.0)
+        rich_base[:, 6] = alive_data[:, COL_VISION] / (config.RAYCAST_MAX_STEPS or 15.0)
+        rich_base[:, 7] = on_heal.to(self._data_dt)
+        rich_base[:, 8] = on_cp.to(self._data_dt)
+        rich_base[:, 9].fill_(float(self.stats.tick) / (float(self.stats.tick) + 50000.0))
+        rich_base[:, 10].copy_(
+            self._bounded_positive_norm(
+                self._obs_self_kill_ppo_points.index_select(0, alive_idx),
+                max(float(getattr(config, "PPO_REWARD_KILL_INDIVIDUAL", 0.0)), 1.0),
+            ).to(self._data_dt)
+        )
+        rich_base[:, 11].copy_(
+            self._bounded_positive_norm(
+                self._obs_self_damage_dealt_ppo_points.index_select(0, alive_idx),
+                max(float(getattr(config, "PPO_REWARD_DMG_DEALT_INDIVIDUAL", 0.0)), 1.0),
+            ).to(self._data_dt)
+        )
+        rich_base[:, 12].copy_(
+            self._bounded_positive_norm(
+                self._obs_self_cp_ppo_points.index_select(0, alive_idx),
+                max(float(getattr(config, "PPO_REWARD_CONTESTED_CP", 0.0)), 1.0),
+            ).to(self._data_dt)
+        )
+        rich_base[:, 13].copy_(
+            self._bounded_positive_norm(
+                self._obs_self_damage_taken_penalty_mag.index_select(0, alive_idx),
+                max(float(getattr(config, "PPO_PENALTY_DMG_TAKEN_INDIVIDUAL", 0.0)), 1.0),
+            ).to(self._data_dt)
+        )
+        rich_base[:, 14].copy_(
+            self._bounded_positive_norm(
+                self._obs_self_death_penalty_mag.index_select(0, alive_idx),
+                max(abs(float(getattr(config, "PPO_REWARD_DEATH", 0.0))), 1.0),
+            ).to(self._data_dt)
+        )
+        rich_base[:, 15].copy_(
+            self._bounded_positive_norm(
+                self._obs_self_kill_count.index_select(0, alive_idx),
+                1.0,
+            ).to(self._data_dt)
+        )
 
     # Zones: ensure masks are on the correct device
     def _ensure_zone_tensors(self) -> None:
@@ -509,7 +630,7 @@ class TickEngine:
         self._instinct_scratch_m = need_m
 
     # Instinct offsets: cached discrete circle offsets
-    @torch.no_grad()
+    @torch.inference_mode()
     def _get_instinct_offsets(self) -> Tuple[torch.Tensor, float]:
         """
         Returns cached integer (dx, dy) offsets inside a discrete circle of radius R cells,
@@ -554,7 +675,7 @@ class TickEngine:
         return self._instinct_offsets, self._instinct_area
 
     # Instinct feature computation
-    @torch.no_grad()
+    @torch.inference_mode()
     def _compute_instinct_context(
         self,
         alive_idx: torch.Tensor,
@@ -711,11 +832,22 @@ class TickEngine:
         if death_cause not in allowed_death_causes:
             raise RuntimeError(f"[tick] unsupported death_cause={death_cause!r}")
 
+        death_penalty_mag = abs(float(getattr(config, "PPO_REWARD_DEATH", 0.0)))
+        if death_penalty_mag != 0.0:
+            add = torch.full(
+                (int(dead_idx.numel()),),
+                death_penalty_mag,
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self._obs_self_death_penalty_mag.index_add_(0, dead_idx, add)
+
         # Snapshot metadata BEFORE mutation (positions/teams/units/uids are still readable now).
         dead_slots = dead_idx.detach().cpu().to(torch.int64).tolist()
         dead_rows = data.index_select(0, dead_idx)
-        dead_team_list = dead_rows[:, COL_TEAM].detach().cpu().to(torch.int64).tolist()
-        dead_unit_list = dead_rows[:, COL_UNIT].detach().cpu().to(torch.int64).tolist()
+        dead_team_unit = dead_rows[:, [COL_TEAM, COL_UNIT]].detach().to(torch.int64).cpu()
+        dead_team_list = dead_team_unit[:, 0].tolist()
+        dead_unit_list = dead_team_unit[:, 1].tolist()
         dead_ids = self._slot_ids_to_agent_uids_list(dead_idx)
 
         # Structured killer alignment for telemetry/death forensics. Batch-extract
@@ -801,8 +933,9 @@ class TickEngine:
         # post-death readers do not observe "death event emitted but agent still alive on grid".
         gx = self._as_long(data[dead_idx, COL_X])
         gy = self._as_long(data[dead_idx, COL_Y])
-        gx_list = gx.detach().cpu().to(torch.int64).tolist()
-        gy_list = gy.detach().cpu().to(torch.int64).tolist()
+        dead_xy = torch.stack((gx, gy), dim=1).detach().to(torch.int64).cpu()
+        gx_list = dead_xy[:, 0].tolist()
+        gy_list = dead_xy[:, 1].tolist()
 
         # Root structured death log for ResultsWriter -> dead_agents_log.csv.
         # This legacy CSV keeps a compact stable schema; richer cause/killer
@@ -883,7 +1016,7 @@ class TickEngine:
         return red_deaths, blue_deaths
 
     # Observation builder for transformer/policy
-    @torch.no_grad()
+    @torch.inference_mode()
     def _build_transformer_obs(self, alive_idx: torch.Tensor, pos_xy: torch.Tensor) -> torch.Tensor:
         """
         Build observation tensor for all alive agents.
@@ -922,7 +1055,7 @@ class TickEngine:
                 # |= accumulates: if any CP mask is True at that cell, on_cp becomes True.
                 on_cp |= cp_mask[pos_xy[:, 1], pos_xy[:, 0]]
 
-        expected_ray_dim = 32 * 8
+        expected_ray_dim = int(config.RAYS_FLAT_DIM)
         alive_data = data[alive_idx]
 
         # unit_map is a grid-shaped tensor encoding which unit type occupies each cell.
@@ -939,50 +1072,41 @@ class TickEngine:
                 f"expected ({N}, {expected_ray_dim})."
             )
 
-        # hp_max clamped to avoid division-by-zero.
-        hp_max = alive_data[:, COL_HP_MAX].clamp_min(1.0)
+        obs_spec.validate_obs_contract()
 
-        # Rich features:
-        # - normalized HP (hp/hp_max)
-        # - normalized positions (x/(W-1), y/(H-1))
-        # - one-hot-ish flags for team and unit types
-        # - normalized attack and vision
-        # - zone flags
-        # - normalized global stats
-        # Build the exact same 23-column layout, but write directly into a single
-        # preallocated tensor to avoid many temporary (N,) vectors each tick.
         rich_base = self._obs_rich_base[:N]
-        rich_base[:, 0] = alive_data[:, COL_HP] / hp_max
-        rich_base[:, 1] = alive_data[:, COL_X] / (self.W - 1)
-        rich_base[:, 2] = alive_data[:, COL_Y] / (self.H - 1)
-        rich_base[:, 3] = (alive_data[:, COL_TEAM] == 2.0).to(self._data_dt)
-        rich_base[:, 4] = (alive_data[:, COL_TEAM] == 3.0).to(self._data_dt)
-        rich_base[:, 5] = (alive_data[:, COL_UNIT] == 1.0).to(self._data_dt)
-        rich_base[:, 6] = (alive_data[:, COL_UNIT] == 2.0).to(self._data_dt)
-        rich_base[:, 7] = alive_data[:, COL_ATK] / (config.MAX_ATK or 1.0)
-        rich_base[:, 8] = alive_data[:, COL_VISION] / (config.RAYCAST_MAX_STEPS or 15.0)
-        rich_base[:, 9] = on_heal.to(self._data_dt)
-        rich_base[:, 10] = on_cp.to(self._data_dt)
-        rich_base[:, 11].fill_(float(self.stats.tick) / 50000.0)
-        rich_base[:, 12].fill_(float(self.stats.red.score) / 1000.0)
-        rich_base[:, 13].fill_(float(self.stats.blue.score) / 1000.0)
-        rich_base[:, 14].fill_(float(self.stats.red.cp_points) / 500.0)
-        rich_base[:, 15].fill_(float(self.stats.blue.cp_points) / 500.0)
-        rich_base[:, 16].fill_(float(self.stats.red.kills) / 500.0)
-        rich_base[:, 17].fill_(float(self.stats.blue.kills) / 500.0)
-        rich_base[:, 18].fill_(float(self.stats.red.deaths) / 500.0)
-        rich_base[:, 19].fill_(float(self.stats.blue.deaths) / 500.0)
-        # Padding slots keep the layout exactly matching the required dimension sizes.
-        rich_base[:, 20:].zero_()
+        if int(rich_base.shape[1]) != int(config.RICH_BASE_DIM):
+            raise RuntimeError(
+                f"[obs] rich_base scratch mismatch: got {int(rich_base.shape[1])}, expected {int(config.RICH_BASE_DIM)}"
+            )
+
+        if str(getattr(config, "OBS_SCHEMA", getattr(config, "OBS_SCHEMA_LEGACY_FULL_V1", "legacy_full_v1"))) == getattr(config, "OBS_SCHEMA_SELF_CENTRIC_V1", "self_centric_v1"):
+            self._fill_self_centric_rich_base(
+                rich_base=rich_base,
+                alive_idx=alive_idx,
+                alive_data=alive_data,
+                on_heal=on_heal,
+                on_cp=on_cp,
+            )
+        else:
+            self._fill_legacy_rich_base(
+                rich_base=rich_base,
+                alive_data=alive_data,
+                on_heal=on_heal,
+                on_cp=on_cp,
+            )
 
         instinct = self._compute_instinct_context(alive_idx=alive_idx, pos_xy=pos_xy, unit_map=unit_map)
-        if instinct.shape != (N, 4):
-            raise RuntimeError(f"instinct shape {tuple(instinct.shape)} != (N,4)")
+        if instinct.shape != (N, int(config.INSTINCT_DIM)):
+            raise RuntimeError(f"instinct shape {tuple(instinct.shape)} != (N,{int(config.INSTINCT_DIM)})")
 
-        # Concatenate base rich features and instinct features.
         rich = self._obs_rich[:N]
-        rich[:, :23].copy_(rich_base)
-        rich[:, 23:].copy_(instinct)
+        if int(rich.shape[1]) != int(config.RICH_TOTAL_DIM):
+            raise RuntimeError(
+                f"[obs] rich scratch mismatch: got {int(rich.shape[1])}, expected {int(config.RICH_TOTAL_DIM)}"
+            )
+        rich[:, :int(config.RICH_BASE_DIM)].copy_(rich_base)
+        rich[:, int(config.RICH_BASE_DIM):].copy_(instinct)
 
         expected_rich_dim = int(self._OBS_DIM) - expected_ray_dim
         if rich.shape != (N, expected_rich_dim):
@@ -1106,9 +1230,10 @@ class TickEngine:
             self.stats.on_tick_advanced(1)
             metrics.tick = int(self.stats.tick)
 
-            # PPO bookkeeping: flush dead agents if PPO enabled.
-            was_dead = (data[:, COL_ALIVE] <= 0.5) if self._ppo is not None else None
-            if was_dead is not None:
+            # Dead-slot snapshot before respawn. This feeds both PPO reset and
+            # self-centric slot-history reset when a dead slot is reused.
+            was_dead = (data[:, COL_ALIVE] <= 0.5)
+            if self._ppo is not None:
                 dead_slots = was_dead.nonzero(as_tuple=False).squeeze(1)
                 if dead_slots.numel() > 0:
                     self._ppo.flush_agents(dead_slots)
@@ -1116,9 +1241,8 @@ class TickEngine:
             # Respawn.
             self.respawner.step(self.stats.tick, self.registry, self.grid, engine=self)
 
-            # Reset PPO state for respawned slots.
-            if was_dead is not None:
-                self._ppo_reset_on_respawn(was_dead)
+            # Reset PPO state and self-history for respawned slots.
+            self._ppo_reset_on_respawn(was_dead)
 
             self._debug_invariants("post_respawn")
             return vars(metrics)
@@ -1413,6 +1537,8 @@ class TickEngine:
                                 reward_add = (k_counts.to(torch.float32) * reward_val)
                                 individual_rewards[uniq_k] += reward_add.to(self._data_dt)
                                 reward_kill_individual[uniq_k] += reward_add
+                                self._obs_self_kill_ppo_points[uniq_k] += reward_add
+                                self._obs_self_kill_count[uniq_k] += k_counts.to(torch.float32)
 
                                 # Accumulate doctrine/personal merit keyed by persistent agent id.
                                 for killer_slot, cnt in zip(uniq_k.tolist(), k_counts.tolist()):
@@ -1451,11 +1577,13 @@ class TickEngine:
                             dmg_dealt_add = (dmg_a.to(torch.float32) * float(ppo_dmg_dealt_coef))
                             individual_rewards[uniq_a] += dmg_dealt_add.to(self._data_dt)
                             reward_damage_dealt_individual[uniq_a] += dmg_dealt_add
+                            self._obs_self_damage_dealt_ppo_points[uniq_a] += dmg_dealt_add
 
                         if ppo_dmg_taken_pen != 0.0 and uniq_v.numel() > 0:
                             dmg_taken_pen = (dmg_sum.to(torch.float32) * float(ppo_dmg_taken_pen))
                             individual_rewards[uniq_v] -= dmg_taken_pen.to(self._data_dt)
                             reward_damage_taken_penalty[uniq_v] -= dmg_taken_pen
+                            self._obs_self_damage_taken_penalty_mag[uniq_v] += dmg_taken_pen
 
                         # Sync grid HP immediately after registry HP mutation (shrink desync window).
                         # This reduces the chance that debug hooks / future readers observe
@@ -1468,15 +1596,24 @@ class TickEngine:
                         if telemetry is not None and getattr(telemetry, "enabled", False):
                             try:
                                 # Victim-sum (unique victims)
+                                victim_rows = data.index_select(0, uniq_v)[:, [COL_TEAM, COL_UNIT, COL_AGENT_ID]].detach().to(torch.int64).cpu()
                                 if hasattr(self.registry, "agent_uids"):
-                                    v_ids = self.registry.agent_uids.index_select(0, uniq_v).detach().cpu().tolist()
+                                    v_ids = (
+                                        self.registry.agent_uids
+                                        .index_select(0, uniq_v)
+                                        .detach()
+                                        .to(torch.int64)
+                                        .cpu()
+                                        .tolist()
+                                    )
                                 else:
-                                    v_ids = [int(data[slot, COL_AGENT_ID].item()) for slot in uniq_v.tolist()]
-                                v_team = [int(data[slot, COL_TEAM].item()) for slot in uniq_v.tolist()]
-                                v_unit = [int(data[slot, COL_UNIT].item()) for slot in uniq_v.tolist()]
-                                dmg_v = [float(x) for x in dmg_sum.detach().cpu().tolist()]
-                                hp_b = [float(x) for x in hp_before.detach().cpu().tolist()]
-                                hp_a = [float(x) for x in hp_after.detach().cpu().tolist()]
+                                    v_ids = victim_rows[:, 2].tolist()
+                                v_team = victim_rows[:, 0].tolist()
+                                v_unit = victim_rows[:, 1].tolist()
+                                victim_damage = torch.stack((dmg_sum, hp_before, hp_after), dim=1).detach().to(torch.float32).cpu()
+                                dmg_v = victim_damage[:, 0].tolist()
+                                hp_b = victim_damage[:, 1].tolist()
+                                hp_a = victim_damage[:, 2].tolist()
                                 telemetry.record_damage_victim_sum(
                                     tick=tick_now,
                                     victim_ids=v_ids,
@@ -1489,28 +1626,49 @@ class TickEngine:
 
                                 # Attacker-sum (aggregate per attacker)
                                 if hasattr(self.registry, "agent_uids"):
-                                    a_ids = self.registry.agent_uids.index_select(0, uniq_a).detach().cpu().tolist()
+                                    a_ids = (
+                                        self.registry.agent_uids
+                                        .index_select(0, uniq_a)
+                                        .detach()
+                                        .to(torch.int64)
+                                        .cpu()
+                                        .tolist()
+                                    )
                                 else:
-                                    a_ids = [int(data[slot, COL_AGENT_ID].item()) for slot in uniq_a.tolist()]
+                                    a_ids = data.index_select(0, uniq_a)[:, COL_AGENT_ID].detach().to(torch.int64).cpu().tolist()
                                 telemetry.record_damage_attacker_sum(
                                     tick=tick_now,
                                     attacker_ids=a_ids,
-                                    damage_dealt=[float(x) for x in dmg_a.detach().cpu().tolist()],
+                                    damage_dealt=dmg_a.detach().to(torch.float32).cpu().tolist(),
                                 )
 
                                 # Optional per-hit logging
                                 if str(getattr(telemetry, "damage_mode", "victim_sum")).lower() == "per_hit":
                                     if hasattr(self.registry, "agent_uids"):
-                                        atk_ids = self.registry.agent_uids.index_select(0, satk).detach().cpu().tolist()
-                                        vic_ids = self.registry.agent_uids.index_select(0, sv).detach().cpu().tolist()
+                                        hit_uids = torch.stack(
+                                            (
+                                                self.registry.agent_uids.index_select(0, satk),
+                                                self.registry.agent_uids.index_select(0, sv),
+                                            ),
+                                            dim=1,
+                                        ).detach().to(torch.int64).cpu()
+                                        atk_ids = hit_uids[:, 0].tolist()
+                                        vic_ids = hit_uids[:, 1].tolist()
                                     else:
-                                        atk_ids = [int(data[slot, COL_AGENT_ID].item()) for slot in satk.tolist()]
-                                        vic_ids = [int(data[slot, COL_AGENT_ID].item()) for slot in sv.tolist()]
+                                        hit_rows = torch.stack(
+                                            (
+                                                data.index_select(0, satk)[:, COL_AGENT_ID].to(torch.int64),
+                                                data.index_select(0, sv)[:, COL_AGENT_ID].to(torch.int64),
+                                            ),
+                                            dim=1,
+                                        ).detach().cpu()
+                                        atk_ids = hit_rows[:, 0].tolist()
+                                        vic_ids = hit_rows[:, 1].tolist()
                                     telemetry.record_damage_per_hit(
                                         tick=tick_now,
                                         attacker_ids=atk_ids,
                                         victim_ids=vic_ids,
-                                        damage=[float(x) for x in sdmg.detach().cpu().tolist()],
+                                        damage=sdmg.detach().to(torch.float32).cpu().tolist(),
                                     )
                             except Exception as e:
                                 try:
@@ -1810,12 +1968,23 @@ class TickEngine:
                             # Event IDs must be persistent agent UIDs (NOT registry slot ids).
                             event_agent_uids = self._slot_ids_to_agent_uids_list(sel_slots)
 
-                            act_ids = a_all.index_select(0, sel).detach().cpu().to(torch.int64).tolist()
-                            fx = x0_all.index_select(0, sel).detach().cpu().to(torch.int64).tolist()
-                            fy = y0_all.index_select(0, sel).detach().cpu().to(torch.int64).tolist()
-                            tx = nx_all.index_select(0, sel).detach().cpu().to(torch.int64).tolist()
-                            ty = ny_all.index_select(0, sel).detach().cpu().to(torch.int64).tolist()
-                            oc = out_code.index_select(0, sel).detach().cpu().to(torch.int64).tolist()
+                            move_events = torch.stack(
+                                (
+                                    a_all.index_select(0, sel).to(torch.int64),
+                                    x0_all.index_select(0, sel).to(torch.int64),
+                                    y0_all.index_select(0, sel).to(torch.int64),
+                                    nx_all.index_select(0, sel).to(torch.int64),
+                                    ny_all.index_select(0, sel).to(torch.int64),
+                                    out_code.index_select(0, sel).to(torch.int64),
+                                ),
+                                dim=1,
+                            ).detach().cpu()
+                            act_ids = move_events[:, 0].tolist()
+                            fx = move_events[:, 1].tolist()
+                            fy = move_events[:, 2].tolist()
+                            tx = move_events[:, 3].tolist()
+                            ty = move_events[:, 4].tolist()
+                            oc = move_events[:, 5].tolist()
 
                             telemetry.record_move_events(
                                 tick=tick_now,
@@ -1926,6 +2095,7 @@ class TickEngine:
                                 cp_add.to(self._data_dt),
                             )
                             reward_contested_cp_individual.index_add_(0, winners_idx, cp_add)
+                            self._obs_self_cp_ppo_points.index_add_(0, winners_idx, cp_add)
 
         # 8) PPO REINFORCEMENT LEARNING LOGGING
         if self._ppo and rec_agent_ids:
@@ -1954,22 +2124,19 @@ class TickEngine:
 
             rec_team_ids = torch.cat(rec_teams)
             team_is_red = (rec_team_ids == 2.0)
+            n_rewards = int(ppo_slot_ids.numel())
 
-            team_kill_reward = torch.where(
-                team_is_red,
-                torch.full((int(ppo_slot_ids.numel()),), float(combat_bd * config.TEAM_KILL_REWARD), device=self.device, dtype=torch.float32),
-                torch.full((int(ppo_slot_ids.numel()),), float(combat_rd * config.TEAM_KILL_REWARD), device=self.device, dtype=torch.float32),
-            )
-            team_death_reward = torch.where(
-                team_is_red,
-                torch.full((int(ppo_slot_ids.numel()),), float((combat_rd + meta_rd) * config.PPO_REWARD_DEATH), device=self.device, dtype=torch.float32),
-                torch.full((int(ppo_slot_ids.numel()),), float((combat_bd + meta_bd) * config.PPO_REWARD_DEATH), device=self.device, dtype=torch.float32),
-            )
-            team_cp_reward = torch.where(
-                team_is_red,
-                torch.full((int(ppo_slot_ids.numel()),), float(metrics.cp_red_tick), device=self.device, dtype=torch.float32),
-                torch.full((int(ppo_slot_ids.numel()),), float(metrics.cp_blue_tick), device=self.device, dtype=torch.float32),
-            )
+            team_kill_reward = torch.empty((n_rewards,), device=self.device, dtype=torch.float32)
+            team_kill_reward.fill_(float(combat_rd * config.TEAM_KILL_REWARD))
+            team_kill_reward[team_is_red] = float(combat_bd * config.TEAM_KILL_REWARD)
+
+            team_death_reward = torch.empty((n_rewards,), device=self.device, dtype=torch.float32)
+            team_death_reward.fill_(float((combat_bd + meta_bd) * config.PPO_REWARD_DEATH))
+            team_death_reward[team_is_red] = float((combat_rd + meta_rd) * config.PPO_REWARD_DEATH)
+
+            team_cp_reward = torch.empty((n_rewards,), device=self.device, dtype=torch.float32)
+            team_cp_reward.fill_(float(metrics.cp_blue_tick))
+            team_cp_reward[team_is_red] = float(metrics.cp_red_tick)
 
             individual_total_reward = (
                 reward_kill_individual[ppo_slot_ids]
@@ -1986,10 +2153,10 @@ class TickEngine:
 
             if ppo_slot_ids.numel() > 0:
                 if hasattr(self.registry, "agent_uids"):
-                    merit_uids = self.registry.agent_uids.index_select(0, ppo_slot_ids).detach().cpu().tolist()
+                    merit_uids = self.registry.agent_uids.index_select(0, ppo_slot_ids).detach().to(torch.int64).cpu().tolist()
                 else:
-                    merit_uids = data.index_select(0, ppo_slot_ids)[:, COL_AGENT_ID].detach().cpu().tolist()
-                merit_rewards = final_rewards.detach().float().cpu().tolist()
+                    merit_uids = data.index_select(0, ppo_slot_ids)[:, COL_AGENT_ID].detach().to(torch.int64).cpu().tolist()
+                merit_rewards = final_rewards.detach().to(torch.float32).cpu().tolist()
                 for uid, reward_value in zip(merit_uids, merit_rewards):
                     self.agent_scores[int(uid)] += float(reward_value)
 
@@ -2040,10 +2207,10 @@ class TickEngine:
         self.stats.on_tick_advanced(1)
         metrics.tick = int(self.stats.tick)
 
-        was_dead = (data[:, COL_ALIVE] <= 0.5) if self._ppo is not None else None
+        was_dead = (data[:, COL_ALIVE] <= 0.5)
 
         # Flush dead agents from PPO before respawn
-        if was_dead is not None:
+        if self._ppo is not None:
             dead_slots = was_dead.nonzero(as_tuple=False).squeeze(1)
             if dead_slots.numel() > 0:
                 self._ppo.flush_agents(dead_slots)
@@ -2064,8 +2231,7 @@ class TickEngine:
                 except Exception:
                     pass
 
-        if was_dead is not None:
-            self._ppo_reset_on_respawn(was_dead)
+        self._ppo_reset_on_respawn(was_dead)
 
         self._debug_invariants("post_respawn")
 

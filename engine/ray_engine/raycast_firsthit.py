@@ -25,7 +25,7 @@ DIRS8 = torch.tensor(
 _TYPE_CLASSES = 6
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def build_unit_map(agent_data: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
     """Return an ``(H, W)`` map of unit types for occupied cells."""
     from ..agent_registry import COL_UNIT
@@ -42,7 +42,7 @@ def build_unit_map(agent_data: torch.Tensor, grid: torch.Tensor) -> torch.Tensor
     return unit_map
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def raycast8_firsthit(
     pos_xy: torch.Tensor,
     grid: torch.Tensor,

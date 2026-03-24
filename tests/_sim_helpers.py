@@ -123,7 +123,7 @@ def register_agent(
     hp_max: float | None = None,
     vision_range: int = 4,
     generation: int = 1,
-    brain_kind: str = "whispering_abyss",
+    brain_kind: str = "throne_of_ashen_dreams",
 ) -> int:
     agent_id = registry.get_next_id()
     brain = create_mlp_brain(brain_kind, int(config.OBS_DIM), int(config.NUM_ACTIONS))

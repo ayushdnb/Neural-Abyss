@@ -399,7 +399,7 @@ A safe beginner rule is this.
 
 Changes to print cadence, output directories, telemetry toggles, UI toggles, or checkpoint frequency are usually **operational**.
 
-Changes to `OBS_DIM`, `NUM_ACTIONS`, `RAY_TOKEN_COUNT`, `RICH_BASE_DIM`, `INSTINCT_DIM`, `BRAIN_MLP_D_MODEL`, or brain-kind selections are often **schema-affecting** and can break assumptions in models, checkpoints, telemetry compatibility, or both. The code reinforces this distinction through explicit invariant checks such as `OBS_DIM == RAYS_FLAT_DIM + RICH_TOTAL_DIM`, `RAYS_FLAT_DIM == RAY_TOKEN_COUNT * RAY_FEAT_DIM`, and `BRAIN_MLP_FINAL_INPUT_WIDTH == 2 * BRAIN_MLP_D_MODEL`.
+Changes to `OBS_DIM`, `NUM_ACTIONS`, `RAY_TOKEN_COUNT`, `RICH_BASE_DIM`, `INSTINCT_DIM`, `BRAIN_MLP_RAY_WIDTH`, `BRAIN_MLP_SCALAR_WIDTH`, or brain-kind selections are often **schema-affecting** and can break assumptions in models, checkpoints, telemetry compatibility, or both. The code reinforces this distinction through explicit invariant checks such as `OBS_DIM == RAYS_FLAT_DIM + RICH_TOTAL_DIM`, `RAYS_FLAT_DIM == RAY_TOKEN_COUNT * RAY_FEAT_DIM`, and `BRAIN_MLP_FINAL_INPUT_WIDTH == BRAIN_MLP_RAY_WIDTH + BRAIN_MLP_SCALAR_WIDTH`.
 
 ### 6.5 Configuration honesty in this codebase
 
@@ -453,15 +453,16 @@ Legal action masking lives in `engine/game/move_mask.py`, not in the brain modul
 
 ### 7.5 The brain boundary
 
-The active brain family is defined in `agent/mlp_brain.py`. All concrete brain variants inherit from a shared base that enforces one observation contract and one output contract. The file’s central architectural choice is the **two-token input interface**:
+The active brain family is defined in `agent/mlp_brain.py`. All concrete brain variants inherit from a shared base that enforces one observation contract and one output contract. The file’s central architectural choice is the **dual-tower summary interface**:
 
-- ray features are summarized into one learned token,
-- rich features are projected into one learned token,
-- those two tokens are concatenated into one flat input vector,
-- a variant-specific MLP trunk processes that vector,
+- ray features are encoded per ray by a shared ray tower,
+- the encoded rays are pooled into one summary vector,
+- the rich scalar tail is encoded by a separate scalar tower,
+- the two summaries are concatenated into one fusion input,
+- a variant-specific fusion stack processes that vector,
 - actor and critic heads emit action logits and value estimates.
 
-The five concrete kinds are `whispering_abyss`, `veil_of_echoes`, `cathedral_of_ash`, `dreamer_in_black_fog`, and `obsidian_pulse`. Brain selection is then controlled by config and by spawn/respawn policy.
+The three concrete kinds are `throne_of_ashen_dreams`, `veil_of_the_hollow_crown`, and `black_grail_of_nightfire`. Brain selection is then controlled by config and by spawn/respawn policy.
 
 A useful beginner correction belongs here: the engine method is still named `_build_transformer_obs()`, but the active policy modules in the uploaded code are MLP-based. A method name with older history should not be misread as proof that the current runtime is transformer-based. The actual active brain family in the uploaded source is the MLP family defined in `agent/mlp_brain.py`.
 
@@ -597,7 +598,7 @@ A fixed row index in `AgentsRegistry`. Slots are reused over time and are the li
 A persistent unique identifier stored authoritatively in `agent_uids`. Unlike slots, UIDs are intended to remain meaningful across death, respawn, lineage, and telemetry.
 
 **Brain kind**
-The normalized string identifier for a concrete policy/value architecture, such as `whispering_abyss` or `obsidian_pulse`.
+The normalized string identifier for a concrete policy/value architecture, such as `throne_of_ashen_dreams` or `black_grail_of_nightfire`.
 
 **Bucket**
 A grouping of alive agents whose brains share the same architecture class, allowing batched inference while preserving per-agent model individuality.

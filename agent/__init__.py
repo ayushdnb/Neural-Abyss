@@ -1,10 +1,9 @@
 from .mlp_brain import (
-    WhisperingAbyssBrain,
-    VeilOfEchoesBrain,
-    CathedralOfAshBrain,
-    DreamerInBlackFogBrain,
-    ObsidianPulseBrain,
+    ThroneOfAshenDreamsBrain,
+    VeilOfTheHollowCrownBrain,
+    BlackGrailOfNightfireBrain,
     create_mlp_brain,
+    normalize_brain_kind,
     brain_kind_from_module,
     brain_kind_display_name,
     brain_kind_short_label,
@@ -12,12 +11,11 @@ from .mlp_brain import (
 )
 
 __all__ = [
-    "WhisperingAbyssBrain",
-    "VeilOfEchoesBrain",
-    "CathedralOfAshBrain",
-    "DreamerInBlackFogBrain",
-    "ObsidianPulseBrain",
+    "ThroneOfAshenDreamsBrain",
+    "VeilOfTheHollowCrownBrain",
+    "BlackGrailOfNightfireBrain",
     "create_mlp_brain",
+    "normalize_brain_kind",
     "brain_kind_from_module",
     "brain_kind_display_name",
     "brain_kind_short_label",

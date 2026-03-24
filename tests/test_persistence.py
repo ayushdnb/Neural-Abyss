@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import queue
 import threading
@@ -156,6 +157,67 @@ def test_results_writer_rejects_unknown_dead_log_header_before_worker_start(
             append_existing=True,
             strict_csv_schema=True,
         )
+
+
+def test_results_writer_init_is_lazy_until_start(monkeypatch) -> None:
+    def _deny_queue(*args, **kwargs):
+        raise PermissionError("pipes blocked")
+
+    monkeypatch.setattr(persistence, "Queue", _deny_queue)
+
+    writer = ResultsWriter()
+
+    assert writer.p is None
+    assert writer.worker_backend == "unstarted"
+
+
+def test_results_writer_falls_back_to_thread_when_multiprocessing_queue_creation_is_denied(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_dir = tmp_path / "run"
+
+    def _deny_queue(*args, **kwargs):
+        raise PermissionError("pipes blocked")
+
+    monkeypatch.setattr(persistence, "Queue", _deny_queue)
+
+    writer = ResultsWriter()
+    try:
+        writer.start(
+            config_obj={"summary": "test"},
+            run_dir=str(run_dir),
+            append_existing=False,
+            strict_csv_schema=True,
+        )
+        writer.write_tick({"tick": 1.0, "red_score": 2.0})
+        writer.write_deaths(
+            [
+                {
+                    "tick": 1,
+                    "agent_id": 9,
+                    "team": "red",
+                    "x": 2,
+                    "y": 3,
+                    "killer_team": "blue",
+                }
+            ]
+        )
+        writer.close()
+    finally:
+        if writer.p is not None:
+            writer.close()
+
+    assert writer.worker_backend == "closed"
+    assert json.loads((run_dir / "config.json").read_text(encoding="utf-8")) == {"summary": "test"}
+    assert (run_dir / "stats.csv").read_text(encoding="utf-8").splitlines() == [
+        "tick,red_score",
+        "1.0,2.0",
+    ]
+    assert (run_dir / "dead_agents_log.csv").read_text(encoding="utf-8").splitlines() == [
+        "tick,agent_id,team,x,y,killer_team",
+        "1,9,red,2,3,blue",
+    ]
 
 
 def test_results_writer_real_process_schema_mismatch_harness(tmp_path: Path) -> None:

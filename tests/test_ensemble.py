@@ -21,7 +21,7 @@ def test_ensemble_forward_handles_empty_bucket() -> None:
 )
 def test_vmap_path_matches_loop_and_refreshes_after_parameter_mutation() -> None:
     torch.manual_seed(7)
-    models = [create_mlp_brain("whispering_abyss", config.OBS_DIM, config.NUM_ACTIONS) for _ in range(3)]
+    models = [create_mlp_brain("black_grail_of_nightfire", config.OBS_DIM, config.NUM_ACTIONS) for _ in range(3)]
     obs = torch.randn((3, config.OBS_DIM), dtype=torch.float32)
 
     ensemble.clear_stacked_vmap_cache()

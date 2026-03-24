@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+import config
 from engine.agent_registry import COL_ALIVE, COL_HP, COL_X, COL_Y
 from engine.tick import TickMetrics
 from tests._sim_helpers import make_test_engine, make_zones, register_agent
@@ -104,3 +105,37 @@ def test_run_tick_combat_kill_updates_stats_and_registry(monkeypatch) -> None:
     assert float(registry.agent_data[1, COL_ALIVE].item()) == 0.0
     assert stats.red.kills == 1
     assert stats.blue.deaths == 1
+
+
+def test_run_tick_matches_between_loop_and_vmap_inference(monkeypatch) -> None:
+    def _run_once(use_vmap: bool):
+        monkeypatch.setattr(config, "USE_VMAP", bool(use_vmap))
+        monkeypatch.setattr(config, "VMAP_MIN_BUCKET", 2)
+        torch.manual_seed(1234)
+        engine, registry, _grid, stats = make_test_engine(monkeypatch, max_agents=8)
+
+        placements = (
+            (0, True, 1, 1),
+            (1, True, 1, 3),
+            (2, True, 1, 5),
+            (3, False, 5, 1),
+            (4, False, 5, 3),
+            (5, False, 5, 5),
+        )
+        for slot, team_is_red, x, y in placements:
+            register_agent(registry, engine.grid, slot, team_is_red=team_is_red, x=x, y=y)
+
+        torch.manual_seed(9876)
+        metrics = engine.run_tick()
+        return metrics, registry.agent_data.detach().clone(), engine.grid.detach().clone(), stats
+
+    loop_metrics, loop_data, loop_grid, loop_stats = _run_once(False)
+    vmap_metrics, vmap_data, vmap_grid, vmap_stats = _run_once(True)
+
+    assert vmap_metrics == pytest.approx(loop_metrics)
+    assert torch.equal(vmap_data, loop_data)
+    assert torch.equal(vmap_grid, loop_grid)
+    assert float(vmap_stats.red.score) == pytest.approx(float(loop_stats.red.score))
+    assert float(vmap_stats.blue.score) == pytest.approx(float(loop_stats.blue.score))
+    assert int(vmap_stats.red.kills) == int(loop_stats.red.kills)
+    assert int(vmap_stats.blue.kills) == int(loop_stats.blue.kills)

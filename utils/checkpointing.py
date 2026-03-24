@@ -92,16 +92,41 @@ def _make_brain(kind: str, device: torch.device) -> torch.nn.Module:
     obs_dim = int(getattr(config, "OBS_DIM"))
     act_dim = int(getattr(config, "NUM_ACTIONS"))
 
-    if kind in {
-        "whispering_abyss",
-        "veil_of_echoes",
-        "cathedral_of_ash",
-        "dreamer_in_black_fog",
-        "obsidian_pulse",
-    }:
+    try:
         return create_mlp_brain(kind, obs_dim, act_dim).to(device)
+    except ValueError as exc:
+        raise CheckpointError(f"Unknown brain kind in checkpoint: {kind}") from exc
 
-    raise CheckpointError(f"Unknown brain kind in checkpoint: {kind}")
+
+def _expected_obs_contract_for_saved_meta(meta: Dict[str, Any]) -> tuple[str, int]:
+    """Return the saved schema name and obs width, with safe defaults for older checkpoints."""
+    schema = str(
+        meta.get("obs_schema") or getattr(config, "OBS_SCHEMA_LEGACY_FULL_V1", "legacy_full_v1")
+    ).strip().lower()
+    if "obs_dim" in meta:
+        obs_dim = int(meta.get("obs_dim", 0))
+    elif schema == getattr(config, "OBS_SCHEMA_SELF_CENTRIC_V1", "self_centric_v1"):
+        obs_dim = int(getattr(config, "SELF_CENTRIC_OBS_DIM", getattr(config, "OBS_DIM", 0)))
+    else:
+        obs_dim = int(getattr(config, "LEGACY_FULL_OBS_DIM", 283))
+    return schema, obs_dim
+
+
+def _validate_loaded_obs_contract(ckpt: Dict[str, Any]) -> None:
+    """Fail early on observation-schema mismatches before brain reconstruction."""
+    meta = ckpt.get("meta", {}) or {}
+    saved_schema, saved_obs_dim = _expected_obs_contract_for_saved_meta(meta)
+    current_schema = str(getattr(config, "OBS_SCHEMA", "")).strip().lower()
+    current_obs_dim = int(getattr(config, "OBS_DIM", 0))
+
+    if saved_schema != current_schema:
+        raise CheckpointError(
+            f"checkpoint observation schema mismatch: ckpt={saved_schema!r} current={current_schema!r}"
+        )
+    if int(saved_obs_dim) != current_obs_dim:
+        raise CheckpointError(
+            f"checkpoint observation width mismatch: ckpt={int(saved_obs_dim)} current={current_obs_dim}"
+        )
 
 def _get_rng_state() -> Dict[str, Any]:
     """Capture Python, NumPy, and PyTorch RNG state."""
@@ -220,7 +245,7 @@ class CheckpointManager:
     """
 
     # Version identifier for checkpoint format compatibility
-    checkpoint_version: int = 1
+    checkpoint_version: int = 3
 
     def __init__(self, run_dir: Path) -> None:
         """
@@ -318,6 +343,8 @@ class CheckpointManager:
                 "saved_device": str(getattr(grid, "device", "unknown")),
                 "runtime_device": str(getattr(config, "TORCH_DEVICE", "unknown")),
                 "git_commit": _try_git_commit(),
+                "obs_schema": str(getattr(config, "OBS_SCHEMA", "")),
+                "obs_dim": int(getattr(config, "OBS_DIM", 0)),
             },
             "world": {
                 "grid": _to_cpu_recursive(grid),
@@ -334,7 +361,14 @@ class CheckpointManager:
                 "agent_scores": dict(getattr(engine, "agent_scores", {})),
                 "agent_kill_counts": dict(getattr(engine, "agent_kill_counts", {})),
                 "agent_cp_points": dict(getattr(engine, "agent_cp_points", {})),
+                "obs_self_kill_ppo_points": _to_cpu_recursive(getattr(engine, "_obs_self_kill_ppo_points", None)),
+                "obs_self_damage_dealt_ppo_points": _to_cpu_recursive(getattr(engine, "_obs_self_damage_dealt_ppo_points", None)),
+                "obs_self_cp_ppo_points": _to_cpu_recursive(getattr(engine, "_obs_self_cp_ppo_points", None)),
+                "obs_self_damage_taken_penalty_mag": _to_cpu_recursive(getattr(engine, "_obs_self_damage_taken_penalty_mag", None)),
+                "obs_self_death_penalty_mag": _to_cpu_recursive(getattr(engine, "_obs_self_death_penalty_mag", None)),
+                "obs_self_kill_count": _to_cpu_recursive(getattr(engine, "_obs_self_kill_count", None)),
                 "respawn_controller": self._extract_respawn_state(getattr(engine, "respawner", None)),
+                "respawn_team_brain_runtime": self._extract_respawn_team_brain_runtime_state(),
                 "catastrophe_controller": self._extract_catastrophe_controller_state(
                     getattr(engine, "catastrophe_controller", None)
                 ),
@@ -646,6 +680,8 @@ class CheckpointManager:
         Raises:
             CheckpointError: If PPO state exists but engine doesn't have PPO
         """
+        _validate_loaded_obs_contract(ckpt)
+
         # --- Restore world/registry ---
         reg = ckpt["registry"]
         from engine.agent_registry import NUM_COLS
@@ -740,10 +776,34 @@ class CheckpointManager:
             engine.agent_cp_points.clear()
             engine.agent_cp_points.update(eng.get("agent_cp_points", {}))
 
+        def _restore_engine_tensor_attr(attr: str, key: str) -> None:
+            if not hasattr(engine, attr):
+                return
+            dst = getattr(engine, attr)
+            src = eng.get(key)
+            if src is None:
+                dst.zero_()
+                return
+            if int(src.numel()) != int(dst.numel()):
+                raise CheckpointError(
+                    f"checkpoint {key} length mismatch: got={int(src.numel())} expected={int(dst.numel())}"
+                )
+            dst.copy_(src.to(device=dst.device, dtype=dst.dtype).reshape_as(dst))
+
+        _restore_engine_tensor_attr("_obs_self_kill_ppo_points", "obs_self_kill_ppo_points")
+        _restore_engine_tensor_attr("_obs_self_damage_dealt_ppo_points", "obs_self_damage_dealt_ppo_points")
+        _restore_engine_tensor_attr("_obs_self_cp_ppo_points", "obs_self_cp_ppo_points")
+        _restore_engine_tensor_attr("_obs_self_damage_taken_penalty_mag", "obs_self_damage_taken_penalty_mag")
+        _restore_engine_tensor_attr("_obs_self_death_penalty_mag", "obs_self_death_penalty_mag")
+        _restore_engine_tensor_attr("_obs_self_kill_count", "obs_self_kill_count")
+
         # Restore respawn controller state
         CheckpointManager._apply_respawn_state(
             getattr(engine, "respawner", None),
             eng.get("respawn_controller")
+        )
+        CheckpointManager._apply_respawn_team_brain_runtime_state(
+            eng.get("respawn_team_brain_runtime")
         )
 
         # Restore statistics before catastrophe runtime state so any restored
@@ -899,6 +959,31 @@ class CheckpointManager:
         for k, v in payload.items():
             if hasattr(respawner, k):
                 setattr(respawner, k, int(v))
+
+    @staticmethod
+    def _extract_respawn_team_brain_runtime_state() -> Dict[str, Any]:
+        """Capture respawn-side team-brain mix state for resume continuity."""
+        try:
+            from engine import respawn as respawn_module
+
+            if hasattr(respawn_module, "export_team_brain_runtime_state"):
+                return dict(respawn_module.export_team_brain_runtime_state())
+        except Exception:
+            pass
+        return {}
+
+    @staticmethod
+    def _apply_respawn_team_brain_runtime_state(payload: Optional[Dict[str, Any]]) -> None:
+        """Restore respawn-side team-brain mix state when available."""
+        if not payload:
+            return
+        try:
+            from engine import respawn as respawn_module
+
+            if hasattr(respawn_module, "set_team_brain_runtime_state"):
+                respawn_module.set_team_brain_runtime_state(payload)
+        except Exception:
+            pass
 
     @staticmethod
     def _extract_ppo_state(engine: Any) -> Dict[str, Any]:

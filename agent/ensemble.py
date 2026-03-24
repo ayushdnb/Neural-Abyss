@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Any
+import weakref
 # ^ Standard typing imports:
 #   - List[T]: list of T
 #   - Tuple[A, B]: a 2-item tuple
@@ -70,6 +71,7 @@ class _StackedStateCacheEntry:
 
 
 _VMAP_STACK_CACHE: "OrderedDict[Tuple[Any, ...], _StackedStateCacheEntry]" = OrderedDict()
+_MODEL_TENSOR_CACHE: "weakref.WeakKeyDictionary[nn.Module, Tuple[Tuple[torch.Tensor, ...], Tuple[torch.Tensor, ...]]]" = weakref.WeakKeyDictionary()
 
 
 def _stack_cache_max_entries() -> int:
@@ -86,6 +88,7 @@ def _stack_cache_max_entries() -> int:
 def clear_stacked_vmap_cache() -> None:
     """Clear all cached stacked vmap parameter/buffer entries."""
     _VMAP_STACK_CACHE.clear()
+    _MODEL_TENSOR_CACHE.clear()
 
 
 def _evict_old_stack_cache_entries(max_entries: int) -> None:
@@ -111,20 +114,42 @@ def _tensor_state_token(t: torch.Tensor) -> Tuple[Any, ...]:
     )
 
 
+def _cached_model_tensors(model: nn.Module) -> Tuple[Tuple[torch.Tensor, ...], Tuple[torch.Tensor, ...]]:
+    """Return cached parameter/buffer tuples for one model object.
+
+    The module graph for a brain is structurally static once constructed. Caching
+    the flattened tensor references avoids repeated named-parameter walks on the
+    hot vmap cache-validation path while still observing in-place mutations via
+    each tensor's version counter.
+    """
+    refs = _MODEL_TENSOR_CACHE.get(model)
+    if refs is not None:
+        return refs
+
+    refs = (tuple(model.parameters()), tuple(model.buffers()))
+    _MODEL_TENSOR_CACHE[model] = refs
+    return refs
+
+
 def _model_state_fingerprint(model: nn.Module) -> Tuple[Any, ...]:
     """Build a deterministic fingerprint of one model's current tensor state."""
+    params, buffers = _cached_model_tensors(model)
     parts: List[Tuple[Any, ...]] = []
-    for p in model.parameters():
+    for p in params:
         parts.append(_tensor_state_token(p))
-    for b in model.buffers():
+    for b in buffers:
         parts.append(_tensor_state_token(b))
     return tuple(parts)
 
 
 def _make_stack_cache_key(models: List[nn.Module], device: torch.device) -> Tuple[Tuple[Any, ...], Tuple[Tuple[Any, ...], ...]]:
-    """Build a cache key from ordered model identities, tensor freshness, and device."""
+    """Build a cache key from ordered model identities and device.
+
+    Freshness is checked separately against cached fingerprints so a weight update
+    refreshes the existing lane entry instead of accumulating a new key variant.
+    """
     fingerprints = tuple(_model_state_fingerprint(m) for m in models)
-    key = (device.type, device.index, tuple((id(m), fp) for m, fp in zip(models, fingerprints)))
+    key = (device.type, device.index, tuple(id(m) for m in models))
     return key, fingerprints
 
 
@@ -196,7 +221,7 @@ def _maybe_warn_once(msg: str) -> None:
     _maybe_debug(msg)
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def _ensemble_forward_loop(models: List[nn.Module], obs: torch.Tensor) -> Tuple[_DistWrap, torch.Tensor]:
     """
     Original safe loop implementation (kept as canonical fallback).
@@ -291,7 +316,7 @@ def _ensemble_forward_loop(models: List[nn.Module], obs: torch.Tensor) -> Tuple[
     return _DistWrap(logits=logits_cat), values_cat
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def _ensemble_forward_vmap(models: List[nn.Module], obs: torch.Tensor) -> Tuple[_DistWrap, torch.Tensor]:
     """
     vmap-based inference across *independent* parameter sets.
@@ -391,7 +416,7 @@ def _ensemble_forward_vmap(models: List[nn.Module], obs: torch.Tensor) -> Tuple[
     return _DistWrap(logits=logits_KA), values_K
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def ensemble_forward(models: List[nn.Module], obs: torch.Tensor) -> Tuple[_DistWrap, torch.Tensor]:
     """
     Fuses per-agent models for a bucket into one batched tensor of outputs.

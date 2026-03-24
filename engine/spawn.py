@@ -11,7 +11,7 @@ import config
 from .agent_registry import AgentsRegistry
 
 # Brains
-from agent.mlp_brain import create_mlp_brain
+from agent.mlp_brain import create_mlp_brain, normalize_brain_kind
 
 
 def _rect_dims(n: int, max_cols: int, max_rows: int) -> Tuple[int, int, int]:
@@ -135,17 +135,23 @@ _TEAM_BRAIN_MIX_RNG = {True: _make_team_mix_rng(True), False: _make_team_mix_rng
 def _resolve_team_brain_kind(team_is_red: bool) -> str:
     """Return the configured MLP brain kind for a team."""
     mode = str(getattr(config, "TEAM_BRAIN_ASSIGNMENT_MODE", "exclusive")).strip().lower()
-    default_kind = str(getattr(config, "BRAIN_KIND", "whispering_abyss")).strip().lower()
+    default_kind = normalize_brain_kind(
+        str(getattr(config, "BRAIN_KIND", "throne_of_ashen_dreams")).strip().lower()
+    )
 
     if mode in ("exclusive", "split", "team"):
         if team_is_red:
-            return str(getattr(config, "TEAM_BRAIN_EXCLUSIVE_RED", default_kind)).strip().lower()
-        return str(getattr(config, "TEAM_BRAIN_EXCLUSIVE_BLUE", default_kind)).strip().lower()
+            return normalize_brain_kind(
+                str(getattr(config, "TEAM_BRAIN_EXCLUSIVE_RED", default_kind)).strip().lower()
+            )
+        return normalize_brain_kind(
+            str(getattr(config, "TEAM_BRAIN_EXCLUSIVE_BLUE", default_kind)).strip().lower()
+        )
 
     if mode in ("mix", "hybrid", "both"):
         strategy = str(getattr(config, "TEAM_BRAIN_MIX_STRATEGY", "alternate")).strip().lower()
         seq = tuple(
-            str(x).strip().lower()
+            normalize_brain_kind(str(x).strip().lower())
             for x in getattr(config, "TEAM_BRAIN_MIX_SEQUENCE", (default_kind,))
             if str(x).strip()
         ) or (default_kind,)
@@ -158,11 +164,18 @@ def _resolve_team_brain_kind(team_is_red: bool) -> str:
         if strategy in ("random", "prob", "probabilistic"):
             r = _TEAM_BRAIN_MIX_RNG[team_is_red].random()
             weighted = (
-                ("whispering_abyss", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_WHISPERING_ABYSS", 0.0)))),
-                ("veil_of_echoes", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_VEIL_OF_ECHOES", 0.0)))),
-                ("cathedral_of_ash", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_CATHEDRAL_OF_ASH", 0.0)))),
-                ("dreamer_in_black_fog", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_DREAMER_IN_BLACK_FOG", 0.0)))),
-                ("obsidian_pulse", max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_OBSIDIAN_PULSE", 0.0)))),
+                (
+                    "throne_of_ashen_dreams",
+                    max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_THRONE_OF_ASHEN_DREAMS", 0.0))),
+                ),
+                (
+                    "veil_of_the_hollow_crown",
+                    max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_VEIL_OF_THE_HOLLOW_CROWN", 0.0))),
+                ),
+                (
+                    "black_grail_of_nightfire",
+                    max(0.0, float(getattr(config, "TEAM_BRAIN_MIX_P_BLACK_GRAIL_OF_NIGHTFIRE", 0.0))),
+                ),
             )
             total = sum(w for _, w in weighted)
             if total <= 0.0:
@@ -196,7 +209,7 @@ def _mk_brain(device: torch.device, *, team_is_red: Optional[bool] = None) -> to
     - If TEAM_BRAIN_ASSIGNMENT is enabled AND team_is_red is provided:
         choose by TEAM_BRAIN_ASSIGNMENT_MODE and strategy via _resolve_team_brain_kind.
     - Else:
-        choose config.BRAIN_KIND (default "whispering_abyss").
+        choose config.BRAIN_KIND (default "throne_of_ashen_dreams").
 
     TYPE DISCUSSION
     ---------------
@@ -217,7 +230,9 @@ def _mk_brain(device: torch.device, *, team_is_red: Optional[bool] = None) -> to
     if team_assign and team_is_red is not None:
         brain_kind = _resolve_team_brain_kind(bool(team_is_red))
     else:
-        brain_kind = str(getattr(config, "BRAIN_KIND", "whispering_abyss")).strip().lower()
+        brain_kind = normalize_brain_kind(
+            str(getattr(config, "BRAIN_KIND", "throne_of_ashen_dreams")).strip().lower()
+        )
 
     return create_mlp_brain(brain_kind, obs_dim, act_dim).to(device)
 

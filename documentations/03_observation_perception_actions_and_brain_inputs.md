@@ -258,16 +258,19 @@ That is a subtle but important implementation fact.
 The authoritative flat layout is:
 
 ```text
-0 ............................................... 255 | 256 .......... 278 | 279 .. 282
-[                32 rays × 8 dims                ] | [ rich_base 23 ] | [ instinct 4 ]
+default self-centric schema:
+0 ............................................... 255 | 256 ..... 271 | 272 .. 275
+[                32 rays × 8 dims                ] | [ rich_base 16 ] | [ instinct 4 ]
 ```
 
 or more formally:
 
 ```text
-obs ∈ R^(283)
-obs = concat(rays_flat ∈ R^(256), rich_base ∈ R^(23), instinct ∈ R^(4))
+obs ∈ R^(276)
+obs = concat(rays_flat ∈ R^(256), rich_base ∈ R^(16), instinct ∈ R^(4))
 ```
+
+The legacy full schema still exists for compatibility and uses `rich_base ∈ R^(23)`, `instinct ∈ R^(4)`, and `obs ∈ R^(283)`.
 
 ### 6.2 Ray flattening order
 
@@ -288,7 +291,7 @@ and inside each eight-column block the order is:
 
 ### 6.3 `obs_spec` as schema enforcer
 
-`split_obs_flat()` checks rank, checks `F == OBS_DIM`, checks `RAYS_FLAT_DIM + RICH_TOTAL_DIM == F`, and only then slices the tensor. `split_obs_for_mlp()` then checks that the ray block width equals `RAY_TOKEN_COUNT * RAY_FEAT_DIM`, reshapes it to `(B, 32, 8)`, and concatenates `rich_base` with `instinct` into a `27`-wide vector.
+`split_obs_flat()` checks rank, checks `F == OBS_DIM`, checks `RAYS_FLAT_DIM + RICH_TOTAL_DIM == F`, and only then slices the tensor. `split_obs_for_mlp()` then checks that the ray block width equals `RAY_TOKEN_COUNT * RAY_FEAT_DIM`, reshapes it to `(B, 32, 8)`, and concatenates `rich_base` with `instinct` into the active rich-tail vector (`20` wide under the self-centric default, `27` under legacy compatibility).
 
 That means there are two independent ordering contracts:
 
@@ -301,7 +304,7 @@ If either side changes without the other, the code will either raise or, worse, 
 
 The MLP brain family validates:
 
-- `obs_dim == 32*8 + 27`,
+- `obs_dim == 32*8 + rich_total_dim`,
 - `config.OBS_DIM` matches that expectation,
 - the input tensor rank is `(B, F)`,
 - and the feature width is exactly `self.obs_dim`.
@@ -309,12 +312,12 @@ The MLP brain family validates:
 Then it builds:
 
 - `rays_raw`: `(B, 32, 8)`
-- `rich_vec`: `(B, 27)`
-- `ray_token`: `(B, D)`
-- `rich_token`: `(B, D)`
-- concatenated flat trunk input: `(B, 2D)` where `D = BRAIN_MLP_D_MODEL`, default `32`, so final trunk input is `(B, 64)`.
+- `rich_vec`: `(B, 20)` under the self-centric default
+- `ray_summary`: `(B, BRAIN_MLP_RAY_WIDTH)` after tower + pooling
+- `scalar_summary`: `(B, BRAIN_MLP_SCALAR_WIDTH)` after the scalar tower
+- concatenated fusion input: `(B, BRAIN_MLP_RAY_WIDTH + BRAIN_MLP_SCALAR_WIDTH)`, default `(B, 192)`.
 
-This means the model does **not** process all 283 raw features at once in the trunk. It first compresses the ray block into one learned summary token and the full non-ray block into one learned rich token.
+This means the model does **not** process all raw features at once in the trunk. It first compresses the ray block into one learned summary vector and the full non-ray block into one learned scalar summary.
 
 ### 6.5 What breaks if ordering changes
 
@@ -322,7 +325,7 @@ If you reorder columns inside `rich_base`, at least four things become unsafe:
 
 1. `SEMANTIC_RICH_BASE_INDICES` may point to wrong content.
 2. Any future code using `build_semantic_tokens()` will silently receive wrong groups.
-3. The current brain will still run, but its learned interpretation of the 27-wide rich vector becomes invalid relative to old checkpoints.
+3. The current brain will still run, but its learned interpretation of the active rich vector becomes invalid relative to old checkpoints.
 4. Any previously trained model weights become semantically stale even if tensor shapes still match.
 
 If you change `RAY_TOKEN_COUNT`, `RAY_FEAT_DIM`, `RICH_BASE_DIM`, or `INSTINCT_DIM`, the breakage is more direct: `OBS_DIM`, the brain’s constructor checks, `split_obs_for_mlp()`, and checkpoint compatibility all change together. The code comments explicitly describe these values as schema contracts rather than ordinary tuning knobs.

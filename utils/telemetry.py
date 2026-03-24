@@ -340,6 +340,7 @@ class TelemetrySession:
 
         # Track last tick seen for graceful shutdown final summary.
         self._last_tick_seen: Optional[int] = None
+        self._last_tick_summary_tick: Optional[int] = None
 
         # Ensure telemetry headers exist only for active telemetry sessions.
         if self.enabled and (not self.lineage_edges_path.exists()):
@@ -928,6 +929,10 @@ class TelemetrySession:
         ]
 
         rows: List[Dict[str, Any]] = []
+        try:
+            import torch
+        except Exception:
+            torch = None
 
         # Movement totals integration (AgentLife snapshot)
         # We maintain per-slot movement counters (attempted/success/blocked/etc.)
@@ -938,36 +943,46 @@ class TelemetrySession:
         # - Therefore, we bulk-copy the counter tensors to CPU ONCE per snapshot,
         #   then do cheap Python list indexing while building CSV rows.
         move_lists = None
-        if self.enabled and self.log_moves and getattr(self, "_move_slot_attempted", None) is not None:
+        if self.enabled and self.log_moves and getattr(self, "_move_slot_attempted", None) is not None and torch is not None:
             try:
-                a0 = self._move_slot_attempted.detach().cpu().tolist()
-                a1 = self._move_slot_success.detach().cpu().tolist()
-                a2 = self._move_slot_blocked_wall.detach().cpu().tolist()
-                a3 = self._move_slot_blocked_occupied.detach().cpu().tolist()
-                a4 = self._move_slot_conflict_lost.detach().cpu().tolist()
-                a5 = self._move_slot_conflict_tie.detach().cpu().tolist()
-                a6 = self._move_slot_cells_l1.detach().cpu().tolist()
-                a7 = self._move_slot_last_seen.detach().cpu().tolist()
-                move_lists = (a0, a1, a2, a3, a4, a5, a6, a7)
+                move_rows = torch.stack(
+                    (
+                        self._move_slot_attempted,
+                        self._move_slot_success,
+                        self._move_slot_blocked_wall,
+                        self._move_slot_blocked_occupied,
+                        self._move_slot_conflict_lost,
+                        self._move_slot_conflict_tie,
+                        self._move_slot_cells_l1,
+                        self._move_slot_last_seen,
+                    ),
+                    dim=0,
+                ).detach().to(torch.int64).cpu()
+                move_lists = tuple(move_rows[i].tolist() for i in range(int(move_rows.size(0))))
             except Exception:
                 move_lists = None
 
         reward_lists = None
-        if self.enabled and getattr(self, "_reward_slot_total", None) is not None:
+        if self.enabled and getattr(self, "_reward_slot_total", None) is not None and torch is not None:
             try:
-                r0 = self._reward_slot_total.detach().cpu().tolist()
-                r1 = self._reward_slot_individual_total.detach().cpu().tolist()
-                r2 = self._reward_slot_team_total.detach().cpu().tolist()
-                r3 = self._reward_slot_hp.detach().cpu().tolist()
-                r4 = self._reward_slot_kill_individual.detach().cpu().tolist()
-                r5 = self._reward_slot_damage_dealt_individual.detach().cpu().tolist()
-                r6 = self._reward_slot_damage_taken_penalty.detach().cpu().tolist()
-                r7 = self._reward_slot_contested_cp_individual.detach().cpu().tolist()
-                r8 = self._reward_slot_team_kill.detach().cpu().tolist()
-                r9 = self._reward_slot_team_death.detach().cpu().tolist()
-                r10 = self._reward_slot_team_cp.detach().cpu().tolist()
-                r11 = self._reward_slot_healing_recovered.detach().cpu().tolist()
-                reward_lists = (r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11)
+                reward_rows = torch.stack(
+                    (
+                        self._reward_slot_total,
+                        self._reward_slot_individual_total,
+                        self._reward_slot_team_total,
+                        self._reward_slot_hp,
+                        self._reward_slot_kill_individual,
+                        self._reward_slot_damage_dealt_individual,
+                        self._reward_slot_damage_taken_penalty,
+                        self._reward_slot_contested_cp_individual,
+                        self._reward_slot_team_kill,
+                        self._reward_slot_team_death,
+                        self._reward_slot_team_cp,
+                        self._reward_slot_healing_recovered,
+                    ),
+                    dim=0,
+                ).detach().to(torch.float32).cpu()
+                reward_lists = tuple(reward_rows[i].tolist() for i in range(int(reward_rows.size(0))))
             except Exception:
                 reward_lists = None
 
@@ -3092,6 +3107,8 @@ class TelemetrySession:
         """
         if (not self.enabled) or (self._registry is None) or (self._stats is None):
             return
+        if self._last_tick_summary_tick == int(tick):
+            return
 
         try:
             import torch  # local import; torch is core dep already used by project
@@ -3135,6 +3152,7 @@ class TelemetrySession:
             # Write a single-row append with fieldnames derived from row keys.
             # This assumes the CSV header matches these keys (created in __init__).
             self._append_csv_rows(self.tick_summary_path, fieldnames=list(row.keys()), rows=[row])
+            self._last_tick_summary_tick = int(tick)
 
         except Exception as e:
             self._anomaly(f"tick_summary write failed: {e}")

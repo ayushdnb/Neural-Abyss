@@ -28,7 +28,7 @@ DIRS64 = _generate_64_directions()
 # 0 none, 1 wall, 2 red-soldier, 3 red-archer, 4 blue-soldier, 5 blue-archer  -> 6 classes
 _TYPE_CLASSES = 6
 
-@torch.no_grad()
+@torch.inference_mode()
 def raycast64_firsthit(
     pos_xy: torch.Tensor,               # (N,2) long
     grid: torch.Tensor,                 # (3,H,W)

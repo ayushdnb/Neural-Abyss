@@ -1,0 +1,5 @@
+tick,agent_id,team,x,y,killer_team
+22,10,red,16,9,blue
+53,3,blue,15,3,red
+81,9,blue,12,6,red
+86,2,red,12,3,

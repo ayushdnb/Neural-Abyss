@@ -185,16 +185,16 @@ A reader should therefore not infer the existence of an active recurrent or tran
 
 ## 2.4 Shared actor-critic structure
 
-All five brain variants share the same overall pattern:
+All three brain variants share the same overall pattern:
 
 ```text
-flat observation (283)
+flat observation (default self-centric: 276; legacy full: 283)
     -> split into ray block and rich block
-    -> embed rays into one learned token
-    -> embed rich tail into one learned token
-    -> concatenate the two tokens
-    -> normalize
-    -> pass through variant-specific trunk
+    -> encode rays with the ray tower
+    -> pool rays into one summary vector
+    -> encode the rich tail with the scalar tower
+    -> concatenate the two summaries
+    -> pass through variant-specific fusion trunk
     -> actor head -> logits over 41 actions
     -> critic head -> scalar value
 ```
@@ -210,49 +210,43 @@ This is not a separate actor network and a separate critic network with independ
 
 ## 2.5 Brain variants
 
-The resolved default shared token width is:
+The resolved default tower widths are:
 
-- `BRAIN_MLP_D_MODEL = 32`
-- final trunk input width = `2 * d_model = 64`
+- `BRAIN_MLP_RAY_WIDTH = 96`
+- `BRAIN_MLP_SCALAR_WIDTH = 96`
+- `BRAIN_MLP_FUSION_WIDTH = 128`
+- final fusion input width = `ray_width + scalar_width = 192`
 
-Using that default, the verified variants are:
+Using those defaults, the verified variants are:
 
 | Brain kind | Trunk shape | Notes |
 | --- | --- | --- |
-| `whispering_abyss` | `64 -> 96 -> 96` | simplest dense baseline |
-| `veil_of_echoes` | `64 -> 128 -> 96 -> 64` | narrowing dense MLP |
-| `cathedral_of_ash` | `64 -> 80 -> 3 residual blocks` | same-width residual refinement |
-| `dreamer_in_black_fog` | `64 -> 80 -> 2 gated residual blocks` | gated residual refinement |
-| `obsidian_pulse` | `64 -> 128 -> 2 bottleneck residual blocks (inner 48)` | wider outer representation with compressed residual path |
+| `throne_of_ashen_dreams` | `ray(8 -> 96) + scalar(20 -> 96) -> 192 -> 3 fusion residual blocks -> 128` | clean late-fusion baseline |
+| `veil_of_the_hollow_crown` | `same towers -> 192 -> 3 fusion residual blocks with scalar reinjection -> 128` | preserves scalar context through the trunk |
+| `black_grail_of_nightfire` | `same towers -> scalar-gated ray tokens -> 192 -> 3 gated fusion blocks -> 128` | lets scalar context modulate perception and fusion |
 
 All variants terminate in:
 
-- `actor_head: Linear(trunk_out, act_dim)`
-- `critic_head: Linear(trunk_out, 1)`
+- `actor_head: Linear(fusion_width, act_dim)`
+- `critic_head: Linear(fusion_width, 1)`
 
 ## 2.6 Shared preprocessing before the trunk
 
-The brain does not feed the raw 283-dimensional observation directly into the trunk.
+The brain does not feed the raw flattened observation directly into the trunk.
 
 Instead `_BaseMLPBrain` performs a structured conversion:
 
 1. split the observation with `obs_spec.split_obs_for_mlp(obs)`,
 2. reshape the ray block from `(B, 256)` to `(B, 32, 8)`,
-3. normalize each ray feature vector with `LayerNorm(8)`,
-4. project each ray from `8 -> d_model`,
-5. summarize the 32 ray embeddings by a mean over the ray axis,
-6. normalize the rich tail `(B, 27)` with `LayerNorm(27)`,
-7. project the rich tail from `27 -> d_model`,
-8. concatenate `[ray_token, rich_token]` to obtain `(B, 2*d_model)`,
-9. apply final normalization,
-10. run the trunk.
+3. run the ray tower over all 32 ray tokens,
+4. pool the encoded rays into one summary vector (default `mean_max` pooling),
+5. normalize and project the rich tail into the scalar tower,
+6. run the scalar tower over the full non-ray tail,
+7. concatenate `[ray_summary, scalar_summary]` to obtain `(B, 192)` under the default widths,
+8. run the variant-specific fusion stack,
+9. emit actor logits and a scalar critic value.
 
-That means the active MLP path uses exactly **two learned tokens**:
-
-- one learned summary token for all ray features,
-- one learned token for the entire rich feature tail.
-
-It does **not** use an attention stack over many tokens.
+Under the default self-centric schema the rich tail is `(B, 20)`. The legacy full schema still exists for compatibility and uses `(B, 27)`, but the active default runtime path is the self-centric 276-wide observation.
 
 ## 2.7 Weight initialization
 
@@ -1940,7 +1934,7 @@ TickEngine.run_tick
     |
     +--> identify alive slots
     |
-    +--> build obs: _build_transformer_obs(...) -> (N_alive, 283)
+    +--> build obs: _build_transformer_obs(...) -> (N_alive, OBS_DIM)
     |
     +--> build legal-action mask: (N_alive, 41)
     |
@@ -2012,7 +2006,7 @@ TickEngine.run_tick
 A compact, implementation-faithful mental model is:
 
 1. **Every live slot has its own actor-critic brain.**
-2. **The brain reads a 283-dimensional observation and emits masked-policy logits plus one scalar value.**
+2. **The brain reads the active observation contract (`OBS_DIM`, default 276 under the self-centric schema) and emits masked-policy logits plus one scalar value.**
 3. **The engine samples a legal discrete action from the masked categorical policy.**
 4. **After the environment step, the engine computes a shaped reward and a done flag for that same slot.**
 5. **The PPO runtime stores that transition in the slot’s own buffer.**
